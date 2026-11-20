@@ -9,3 +9,15 @@ iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
 cef = { workspace = true, features = ["accelerated_osr"] }
 anyhow.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# MapVirtualKeyW only (VK -> scan code for CEF's native_key_code); no input injection.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+[dev-dependencies]
+png = "0.18"
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "web"
+path = "examples/web.rs"
