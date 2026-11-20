@@ -26,9 +26,11 @@ use tokio::sync::mpsc;
 use crate::detail::{Detail, DetailMsg, ItemKey};
 use crate::i18n::{self, tr};
 use crate::script::Script;
-use crate::ui_state::{CloseAction, DetailUi, SPLIT_RANGE, ServerPref, UiState};
+use crate::ui_state::{CloseAction, DetailUi, Page, SPLIT_RANGE, ServerPref, UiState};
 
-/// Width of the left sidebar in logical pixels.
+/// Width of the navigation rail in logical pixels, its right border included.
+pub const RAIL_W: f32 = 64.0;
+/// Width of the session list column in logical pixels.
 pub const SIDEBAR_W: f32 = 264.0;
 /// Width of the draggable divider between centre and detail.
 pub const DIVIDER_W: f32 = 5.0;
@@ -78,7 +80,7 @@ impl From<SessionState> for RunState {
     }
 }
 
-/// Connection to the server as shown in the sidebar footer.
+/// Connection to the server as shown by the rail's server indicator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conn {
     /// First connect in progress.
@@ -156,7 +158,7 @@ pub struct NewForm {
     pub error: Option<String>,
     pub busy: bool,
     /// Server-side folder browser (open while `Some`).
-    pub browser: Option<FolderBrowser>,
+    pub browser: Option<Box<FolderBrowser>>,
 }
 
 /// Folders on the server (works over SSH too): the browse roots and one listed folder.
@@ -211,6 +213,7 @@ pub struct DeleteForm {
     pub busy: bool,
 }
 
+/// State of the accounts, configurations, repos and settings pages.
 #[derive(Default)]
 pub struct SettingsForm {
     /// Provider of the account to add.
@@ -239,16 +242,18 @@ pub struct SettingsForm {
 
 impl SettingsForm {
     fn new(pref: &ServerPref) -> Self {
-        let (ssh, ssh_host, ssh_command) = match pref {
+        let mut f = Self::default();
+        f.reset_server(pref);
+        f
+    }
+
+    /// Show the saved server choice again (entering the settings page).
+    fn reset_server(&mut self, pref: &ServerPref) {
+        (self.ssh, self.ssh_host, self.ssh_command) = match pref {
             ServerPref::Local => (false, String::new(), String::new()),
             ServerPref::Ssh { host, command } => (true, host.clone(), command.clone()),
         };
-        Self {
-            ssh,
-            ssh_host,
-            ssh_command,
-            ..Self::default()
-        }
+        self.server_error = None;
     }
 
     /// The edited server choice (`Err` = localized validation message).
@@ -285,7 +290,6 @@ pub struct StopServerForm {
 pub enum Modal {
     NewSession(NewForm),
     Delete(DeleteForm),
-    Settings(SettingsForm),
     StopServer(StopServerForm),
     /// Confirm switching to another server.
     SwitchServer(ServerPref),
@@ -296,7 +300,7 @@ pub enum Modal {
     CloseDirty(CloseDirtyForm),
 }
 
-/// The configuration editor of the settings dialog (plain fields; the user will redesign it).
+/// The configuration editor of the configurations page (plain fields; the user will redesign it).
 pub struct ConfigEdit {
     pub base: ConfigurationInfo,
     pub name: String,
@@ -393,7 +397,7 @@ impl std::fmt::Display for Choice {
     }
 }
 
-/// An account / configuration change requested from the settings dialog.
+/// An account / configuration change requested from the accounts / configurations page.
 #[derive(Debug, Clone)]
 pub enum SettingsOp {
     AccountRenamed,
@@ -455,7 +459,11 @@ pub enum Message {
 
     /// Sidebar: show the sessions of this configuration.
     ConfigurationPicked(String),
-    OpenSettings,
+    /// Navigation rail click: show the page (clicking the active work page toggles the
+    /// session list).
+    Page(Page),
+    /// The pointer entered / left the rail's work button.
+    RailHover(bool),
     AcctProvider(String),
     AcctName(String),
     /// Create the account and open its login command in a terminal.
@@ -670,6 +678,10 @@ pub struct App {
     pub window_size: Size,
     pub dragging: bool,
     pub modal: Option<Modal>,
+    /// Accounts, configurations, repos and settings pages.
+    pub settings: SettingsForm,
+    /// The pointer is over the rail's work button (shows the session-list toggle icon).
+    pub rail_hover: bool,
     pub rename: Option<(String, String)>,
     /// Problems outside a modal (failed RPCs, ...), shown in the sidebar.
     pub banner: Option<String>,
@@ -701,6 +713,7 @@ impl App {
         let ui = UiState::load(&data_dir);
         ide_i18n::apply(ui.language);
         let target = build_target(&ui.server, remote_override.as_deref());
+        let settings = SettingsForm::new(&ui.server);
         let conn = match &target.transport {
             Ok(_) => Conn::Connecting,
             Err(e) => Conn::Disconnected(tr::err_server_missing(e)),
@@ -725,6 +738,8 @@ impl App {
             window_size: Size::new(1400.0, 860.0),
             dragging: false,
             modal: None,
+            settings,
+            rail_hover: false,
             rename: None,
             banner: None,
             script: None,
@@ -802,15 +817,29 @@ impl App {
         self.conn.is_connected().then(|| self.client()).flatten()
     }
 
+    /// Width left of the terminal: the rail and, when open, the session list and its border.
+    pub fn left_w(&self) -> f32 {
+        if self.ui.sessions_open {
+            RAIL_W + SIDEBAR_W + 1.0
+        } else {
+            RAIL_W
+        }
+    }
+
     /// Width shared by the terminal and the detail pane (the divider's range): the window
-    /// minus the sidebar, the divider and the side panel.
+    /// minus the rail, the session list, the divider and the side panel.
     pub fn split_avail(&self) -> f32 {
         let side = if self.ui.detail_collapsed || self.selected.is_none() {
             0.0
         } else {
             crate::detail::SIDE_W + 1.0
         };
-        (self.window_size.width - SIDEBAR_W - 1.0 - DIVIDER_W - side).max(1.0)
+        (self.window_size.width - self.left_w() - DIVIDER_W - side).max(1.0)
+    }
+
+    /// The work page (sessions, terminal, detail) is shown.
+    pub fn on_work_page(&self) -> bool {
+        self.ui.page == Page::Work
     }
 
     pub fn connected(&self) -> bool {
@@ -911,6 +940,11 @@ impl App {
     /// Merge the server's session list: keep terminal models and web views of known sessions.
     fn apply_lists(&mut self, lists: Lists) -> Task<Message> {
         let (providers, accounts, configs, list) = lists;
+        if self.settings.acct_provider.is_empty()
+            && let Some(p) = providers.iter().find(|p| p.caps.accounts)
+        {
+            self.settings.acct_provider = p.id.clone();
+        }
         self.providers = providers;
         self.accounts = accounts;
         self.configs = configs;
@@ -1043,7 +1077,12 @@ impl App {
                 {
                     self.send_input(Input::Resize(l.info.id.clone(), c, r));
                 }
-                Task::batch([self.refresh(), self.ensure_attached(), self.sync_detail()])
+                Task::batch([
+                    self.refresh(),
+                    self.ensure_attached(),
+                    self.sync_detail(),
+                    self.load_roots(),
+                ])
             }
             ClientEvent::Disconnected { error } => {
                 crate::script::log(&format!("disconnected: {error:?}"));
@@ -1152,7 +1191,11 @@ impl App {
         self.sync_web();
         self.open_items = false;
         let attach = Task::batch([self.ensure_attached(), self.sync_detail()]);
-        if self.selected_live().is_some() && self.modal.is_none() && self.rename.is_none() {
+        if self.selected_live().is_some()
+            && self.modal.is_none()
+            && self.rename.is_none()
+            && self.on_work_page()
+        {
             Task::batch([attach, operation::focus(TERM_ID)])
         } else {
             attach
@@ -1445,7 +1488,7 @@ impl App {
                 if f.browser.take().is_some() {
                     return Task::none();
                 }
-                f.browser = Some(FolderBrowser::default());
+                f.browser = Some(Box::default());
                 // Start at the typed folder when it is browsable, else at the first root.
                 let start = f.repo.trim().trim_matches('"').to_owned();
                 let roots = Task::perform(
@@ -1557,23 +1600,49 @@ impl App {
                 }
                 self.after_select()
             }
-            Message::OpenSettings => {
-                self.open_items = false;
-                let mut form = SettingsForm::new(&self.ui.server);
-                form.acct_provider = self
-                    .providers
-                    .iter()
-                    .find(|p| p.caps.accounts)
-                    .map(|p| p.id.clone())
-                    .unwrap_or_default();
-                self.modal = Some(Modal::Settings(form));
-                let roots = match self.online() {
-                    Some(c) => {
-                        Task::perform(async move { c.browse_config().await }, Message::RootsLoaded)
+            Message::Page(page) => {
+                if page == self.ui.page {
+                    // Like Hermes Desk: the active work button shows / hides the session list.
+                    if page == Page::Work {
+                        self.ui.sessions_open = !self.ui.sessions_open;
+                        crate::script::log(&format!(
+                            "session list open: {}",
+                            self.ui.sessions_open
+                        ));
+                        self.save_ui();
                     }
-                    None => Task::none(),
-                };
-                Task::batch([operation::focus(CONFIG_NAME_ID), roots])
+                    return Task::none();
+                }
+                crate::script::log(&format!("page {page:?}"));
+                self.ui.page = page;
+                self.open_items = false;
+                self.rename = None;
+                self.rail_hover = false;
+                self.settings.error = None;
+                self.save_ui();
+                match page {
+                    Page::Work => self.after_select(),
+                    // The work page stays in the widget tree under the page (terminal and
+                    // editors keep their state): take the keyboard focus away from it.
+                    _ => {
+                        let unfocus = iced::advanced::widget::operate(
+                            iced::advanced::widget::operation::focusable::unfocus(),
+                        );
+                        let load = match page {
+                            Page::Repos => self.load_roots(),
+                            Page::Settings => {
+                                self.settings.reset_server(&self.ui.server);
+                                Task::none()
+                            }
+                            _ => Task::none(),
+                        };
+                        Task::batch([unfocus, load])
+                    }
+                }
+            }
+            Message::RailHover(v) => {
+                self.rail_hover = v;
+                Task::none()
             }
             Message::RootsLoaded(r) => self.with_settings(|f| {
                 f.roots_busy = false;
@@ -1590,9 +1659,7 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
+                let f = &mut self.settings;
                 let mut roots = f
                     .roots
                     .as_ref()
@@ -1639,9 +1706,7 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
+                let f = &mut self.settings;
                 if f.busy || f.acct_provider.is_empty() {
                     return Task::none();
                 }
@@ -1657,9 +1722,7 @@ impl App {
                 crate::script::log(&format!("account created: {r:?}"));
                 match r {
                     Ok(a) => {
-                        if let Some(Modal::Settings(f)) = &mut self.modal {
-                            f.acct_name.clear();
-                        }
+                        self.settings.acct_name.clear();
                         let login = self.provider(&a.provider).is_some_and(|p| p.caps.login);
                         let refresh = self.refresh();
                         if login {
@@ -1701,7 +1764,8 @@ impl App {
                         info.provider,
                         info.account.as_deref().unwrap_or("-")
                     ));
-                    // Shown like a new session: the settings dialog closes.
+                    // Shown like a new session, on the work page.
+                    self.settings.busy = false;
                     self.on_created(Ok(info))
                 }
                 Err(e) => {
@@ -1754,10 +1818,7 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
-                let Some((provider, slug, name)) = f.acct_renaming.clone() else {
+                let Some((provider, slug, name)) = self.settings.acct_renaming.clone() else {
                     return Task::none();
                 };
                 Task::perform(
@@ -1779,9 +1840,7 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
+                let f = &mut self.settings;
                 let name = f.cfg_name.trim().to_owned();
                 f.busy = true;
                 Task::perform(
@@ -1832,9 +1891,7 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
+                let f = &mut self.settings;
                 let Some(e) = &f.cfg_edit else {
                     return Task::none();
                 };
@@ -1858,20 +1915,19 @@ impl App {
             Message::SettingsDone(op, r) => {
                 crate::script::log(&format!("settings {op:?}: {r:?}"));
                 let ok = r.is_ok();
-                if let Some(Modal::Settings(f)) = &mut self.modal {
-                    f.busy = false;
-                    match r {
-                        Ok(()) => {
-                            f.error = None;
-                            match &op {
-                                SettingsOp::ConfigCreated => f.cfg_name.clear(),
-                                SettingsOp::ConfigSaved => f.cfg_edit = None,
-                                SettingsOp::AccountRenamed => f.acct_renaming = None,
-                                _ => {}
-                            }
+                let f = &mut self.settings;
+                f.busy = false;
+                match r {
+                    Ok(()) => {
+                        f.error = None;
+                        match &op {
+                            SettingsOp::ConfigCreated => f.cfg_name.clear(),
+                            SettingsOp::ConfigSaved => f.cfg_edit = None,
+                            SettingsOp::AccountRenamed => f.acct_renaming = None,
+                            _ => {}
                         }
-                        Err(e) => f.error = Some(i18n::proto_error(&e)),
                     }
+                    Err(e) => f.error = Some(i18n::proto_error(&e)),
                 }
                 if ok
                     && let SettingsOp::ConfigDeleted(slug) = &op
@@ -1880,7 +1936,7 @@ impl App {
                     self.ui.configuration = None;
                     self.save_ui();
                 }
-                // The server also notifies; refresh now so the dialog updates without a race.
+                // The server also notifies; refresh now so the page updates without a race.
                 self.refresh()
             }
 
@@ -1982,7 +2038,7 @@ impl App {
                 Task::none()
             }
             Message::QuickOpen => {
-                if self.modal.is_some() {
+                if self.modal.is_some() || !self.on_work_page() {
                     return Task::none();
                 }
                 self.open_quick()
@@ -2035,7 +2091,8 @@ impl App {
                 let t = self.open_file_at(&sid, &path, 0, 0);
                 Task::batch([t, self.sync_detail()])
             }
-            Message::FindInFiles => self.open_search(),
+            Message::FindInFiles if self.on_work_page() => self.open_search(),
+            Message::FindInFiles => Task::none(),
             Message::DefPick(i) => {
                 let Some(Modal::DefPicker(f)) = self.modal.take() else {
                     return Task::none();
@@ -2083,7 +2140,7 @@ impl App {
                 if self.dragging {
                     let avail = self.split_avail();
                     self.ui.split_ratio =
-                        ((p.x - SIDEBAR_W - 1.0) / avail).clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
+                        ((p.x - self.left_w()) / avail).clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
                 }
                 Task::none()
             }
@@ -2165,9 +2222,7 @@ impl App {
             Message::SettingsSshHost(v) => self.with_settings(|f| f.ssh_host = v),
             Message::SettingsSshCommand(v) => self.with_settings(|f| f.ssh_command = v),
             Message::SettingsApplyServer => {
-                let Some(Modal::Settings(f)) = &mut self.modal else {
-                    return Task::none();
-                };
+                let f = &mut self.settings;
                 match f.server_pref() {
                     Err(e) => f.server_error = Some(e),
                     Ok(pref) if pref == self.ui.server => f.server_error = None,
@@ -2196,20 +2251,26 @@ impl App {
     }
 
     fn with_cfg(&mut self, f: impl FnOnce(&mut ConfigEdit)) -> Task<Message> {
-        if let Some(Modal::Settings(SettingsForm {
-            cfg_edit: Some(e), ..
-        })) = &mut self.modal
-        {
+        if let Some(e) = &mut self.settings.cfg_edit {
             f(e);
         }
         Task::none()
     }
 
     fn with_settings(&mut self, f: impl FnOnce(&mut SettingsForm)) -> Task<Message> {
-        if let Some(Modal::Settings(form)) = &mut self.modal {
-            f(form);
-        }
+        f(&mut self.settings);
         Task::none()
+    }
+
+    /// Load the browse roots for the repos page (while it is shown and connected).
+    fn load_roots(&mut self) -> Task<Message> {
+        if self.ui.page != Page::Repos {
+            return Task::none();
+        }
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        Task::perform(async move { c.browse_config().await }, Message::RootsLoaded)
     }
 
     /// Window close: with a local server and running sessions, ask (unless remembered)
@@ -2357,6 +2418,8 @@ impl App {
         }
         self.selected = Some(id);
         self.modal = None;
+        // A login terminal opened from the accounts page is shown on the work page.
+        self.ui.page = Page::Work;
         self.save_ui();
         self.after_select()
     }

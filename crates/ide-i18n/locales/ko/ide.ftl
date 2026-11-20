@@ -6,6 +6,21 @@
 
 language-name = 한국어
 
+## 내비게이션 레일 (왼쪽 끝: 페이지와 서버 상태)
+
+nav-work = 작업
+nav-accounts = 계정
+nav-configurations = 구성
+nav-repos = 레포
+sessions-hide = 세션 목록 숨기기
+sessions-show = 세션 목록 펼치기
+rail-server = 서버: { $target } · { $state }
+rail-server-version = 서버: { $target } · { $state } · { $version }
+conn-state-connecting = 연결 중
+conn-state-connected = 연결됨
+conn-state-reconnecting = 다시 연결 중
+conn-state-disconnected = 연결 안 됨
+
 ## Sidebar
 
 settings = 설정
@@ -286,7 +301,6 @@ err-def-not-found = 정의를 찾지 못했어요: { $name }
 configuration-label = 구성
 account-label = 계정
 account-default = 기본 로그인 (CLI 자체 설정)
-accounts-label = 계정
 accounts-note = 계정마다 에이전트 CLI 로그인 하나와 설정 폴더를 따로 써요. 추가하면 터미널에서 로그인을 열어요.
 account-name-placeholder = 계정 이름
 account-add = 추가 후 로그인
@@ -297,7 +311,6 @@ account-logged-in = 로그인됨
 account-logged-out = 로그인 안 됨
 account-status-unknown = 알 수 없음
 account-delete-tooltip = 계정과 로그인 파일 삭제
-configurations-label = 구성
 configurations-note = 어떤 에이전트와 계정에도 붙일 수 있는 스킬, MCP 서버, 지침이에요.
 configuration-name-placeholder = 구성 이름
 configuration-name-label = 이름

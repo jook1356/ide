@@ -12,11 +12,12 @@
 //! The script installs a declarative provider `fake` (`<data>/providers/script-fake.toml`,
 //! `cmd.exe` echoing a marker as its "login") to exercise accounts and login terminals without
 //! running a real CLI's login.
-//! - `IDE_APP_SCRIPT_PAUSE=1`: hold key screens for an external read-only capture
+//! - `IDE_APP_SCRIPT_PAUSE=1`: hold key screens for an external read-only capture (or a
+//!   comma-separated list of pause-name prefixes: hold only those)
 //!
 //! The script runs in English (it switches the language first; error checks match English
 //! text) and has one Korean pass that screenshots the main screen and the dialogs. It ends by
-//! stopping the server (settings -> stop server), so no daemon is left running.
+//! stopping the server (settings page -> stop server), so no daemon is left running.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -33,7 +34,7 @@ use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMess
 
 use crate::app::{App, Conn, McpField, Message, Modal, NewForm, RunState};
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
-use crate::ui_state::{CloseAction, ServerPref};
+use crate::ui_state::{CloseAction, Page, ServerPref};
 use ide_client::{AccountState, SessionKind};
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
@@ -114,9 +115,23 @@ enum Step {
     ConfirmDelete,
     WaitDeleted(usize, u64),
     GitWorktreeList,
-    OpenSettings,
+    /// Show a page through the navigation rail (no-op when it is already shown, so it never
+    /// toggles the session list; use `App(Message::Page(..))` for a real click).
+    GoPage(Page),
+    ExpectPage(Page),
+    /// The session list is open (or hidden) and the terminal's width follows.
+    ExpectSessionsOpen(bool),
+    /// `ui.json` stores this page and session-list state.
+    ExpectSavedRail(Page, bool),
+    /// The rail's work button on the work page: (session list open, hovered) -> the
+    /// collapse / expand icon while hovered and the hide / show tooltip.
+    ExpectWorkToggle(bool, bool),
+    /// The rail's server tooltip contains the text.
+    ExpectServerTooltip(&'static str),
+    /// The repos page loaded the browse roots from the server.
+    WaitRootsLoaded(u64),
     ExpectSettingsError(&'static str),
-    /// Settings: add a configuration by name.
+    /// Configurations page: add a configuration by name.
     CfgCreate(&'static str),
     /// The configuration slug is listed (or not).
     WaitConfig(&'static str, bool, u64),
@@ -127,7 +142,7 @@ enum Step {
     /// The saved configuration has the filled values (server list and `configurations.json`).
     WaitConfigSaved(&'static str, u64),
     CfgDelete(&'static str),
-    /// Settings: add an account (provider, name): creates it and opens its login terminal.
+    /// Accounts page: add an account (provider, name): creates it and opens its login terminal.
     AcctAdd(&'static str, &'static str),
     /// A login session appeared and is selected; remember it as the next session index.
     WaitLogin(u64),
@@ -156,7 +171,7 @@ enum Step {
     /// The remembered daemon exited and its pid file is gone.
     WaitDaemonGone(u64),
     Retry,
-    /// Settings: choose SSH with this host (`None` = local); does not apply.
+    /// Settings page: choose SSH with this host (`None` = local); does not apply.
     SettingsServer(Option<&'static str>),
     ApplyServer,
     ConfirmSwitch,
@@ -176,9 +191,9 @@ enum Step {
     Exit,
 
     // ---- phase 2: files, changes, search, definitions (on the phase 2 session)
-    /// Settings: add a browse root (`None` = the test repo's parent folder).
+    /// Repos page: add a browse root (`None` = the test repo's parent folder).
     AddRoot(Option<&'static str>),
-    /// The settings list the repo's parent as a browse root and `server.json` stores it.
+    /// The repos page lists the repo's parent as a browse root and `server.json` stores it.
     WaitRoots(u64),
     ExpectRootsError(&'static str, u64),
     /// Open the new-session dialog with an empty folder, a Shell agent and a title.
@@ -471,14 +486,14 @@ fn steps(claude: bool) -> Vec<Step> {
         Wait(1500),
         Log("--- modal over the web view (z-order fix)"),
         ModalWebUnsafe(true),
-        OpenSettings,
+        App(Message::OpenNew),
         Wait(1000),
         Shot("08a_modal_over_web_unfixed"),
         Pause("modal_over_web_unfixed"),
         CloseModal,
         ModalWebUnsafe(false),
         Wait(800),
-        OpenSettings,
+        App(Message::OpenNew),
         Wait(1000),
         Shot("08b_modal_over_web_fixed"),
         Pause("modal_over_web_fixed"),
@@ -486,8 +501,46 @@ fn steps(claude: bool) -> Vec<Step> {
         CloseModal,
         Wait(800),
         Shot("08c_modal_closed_web_back"),
+        Log("--- navigation rail: pages cover the work page (and its web view)"),
+        ExpectPage(Page::Work),
+        ExpectSessionsOpen(true),
+        ExpectWorkToggle(true, false),
+        App(Message::RailHover(true)),
+        ExpectWorkToggle(true, true),
+        Wait(300),
+        Shot("rail_01_work_hovered"),
+        App(Message::RailHover(false)),
+        ExpectServerTooltip("Server: Local · connected · "),
+        GoPage(Page::Settings),
+        ExpectPage(Page::Settings),
+        Wait(1000),
+        Shot("rail_02_page_over_web"),
+        ExpectDarker("rail_02_page_over_web", "06_web_tab", 0.5),
+        Log("--- clicking another page's active button does not toggle the session list"),
+        App(Message::Page(Page::Settings)),
+        ExpectPage(Page::Settings),
+        ExpectSessionsOpen(true),
+        GoPage(Page::Work),
+        Wait(800),
+        Shot("rail_03_back_to_work_web"),
+        Log("--- the active work button toggles the session list (saved in ui.json)"),
+        App(Message::Page(Page::Work)),
+        ExpectPage(Page::Work),
+        ExpectSessionsOpen(false),
+        ExpectWorkToggle(false, false),
+        App(Message::RailHover(true)),
+        ExpectWorkToggle(false, true),
+        App(Message::RailHover(false)),
+        ExpectSavedRail(Page::Work, false),
+        Wait(500),
+        Shot("rail_04_sessions_hidden"),
+        ExpectText(0, "hello from A"),
+        App(Message::Page(Page::Work)),
+        ExpectSessionsOpen(true),
+        ExpectSavedRail(Page::Work, true),
         Log("--- configurations"),
-        OpenSettings,
+        GoPage(Page::Configurations),
+        ExpectSavedRail(Page::Configurations, true),
         CfgCreate("Work"),
         WaitConfig("work", true, 5000),
         CfgFill("work"),
@@ -499,7 +552,7 @@ fn steps(claude: bool) -> Vec<Step> {
         CfgDelete("default"),
         Wait(1000),
         ExpectSettingsError("configuration “default”; delete them first"),
-        CloseModal,
+        GoPage(Page::Work),
         FillNew {
             repo: Repo::Test,
             provider: "shell",
@@ -511,13 +564,13 @@ fn steps(claude: bool) -> Vec<Step> {
         Pause("new_session_configuration"),
         CloseModal,
         Log("--- accounts: add -> login terminal (fake provider), rename, status, delete"),
-        OpenSettings,
+        GoPage(Page::Accounts),
         AcctAdd("fake", "Script login"),
         WaitLogin(15_000),
         WaitText(2, "FAKE-LOGIN-OK", 15_000),
         Wait(500),
         Shot("09b_login_terminal"),
-        OpenSettings,
+        GoPage(Page::Accounts),
         WaitAccount("fake", "script-login", true, 5000),
         AcctRename("fake", "script-login", "Renamed login"),
         WaitAccountName("fake", "script-login", "Renamed login", 5000),
@@ -529,16 +582,17 @@ fn steps(claude: bool) -> Vec<Step> {
         Wait(300),
         Shot("09c_accounts"),
         Pause("accounts"),
-        CloseModal,
+        GoPage(Page::Work),
         AskDelete(2),
         ConfirmDelete,
         WaitDeleted(2, 15_000),
-        OpenSettings,
+        GoPage(Page::Accounts),
         AcctDelete("fake", "script-login"),
         WaitAccount("fake", "script-login", false, 5000),
+        GoPage(Page::Configurations),
         CfgDelete("work"),
         WaitConfig("work", false, 5000),
-        CloseModal,
+        GoPage(Page::Work),
         Select(0),
         Log("--- i18n: Korean UI, then back to English"),
         SetLang(LanguagePref::Fixed(Lang::Ko)),
@@ -567,14 +621,42 @@ fn steps(claude: bool) -> Vec<Step> {
         Shot("ko_03_new_session_error"),
         Pause("ko_new_session_error"),
         CloseModal,
-        OpenSettings,
+        Log("--- Korean pages of the navigation rail"),
+        ExpectServerTooltip("서버: 로컬 · 연결됨 · "),
+        Wait(300),
+        Shot("ko_rail_1_work"),
+        Pause("ko_rail_1_work"),
+        App(Message::Page(Page::Work)),
+        ExpectWorkToggle(false, false),
+        App(Message::RailHover(true)),
+        ExpectWorkToggle(false, true),
+        Wait(300),
+        Shot("ko_rail_2_sessions_hidden"),
+        Pause("ko_rail_2_sessions_hidden"),
+        App(Message::RailHover(false)),
+        App(Message::Page(Page::Work)),
+        ExpectSessionsOpen(true),
+        GoPage(Page::Accounts),
+        Wait(300),
+        Shot("ko_rail_3_accounts"),
+        Pause("ko_rail_3_accounts"),
+        GoPage(Page::Configurations),
+        Wait(300),
+        Shot("ko_rail_4_configurations"),
+        Pause("ko_rail_4_configurations"),
+        GoPage(Page::Repos),
+        Wait(800),
+        Shot("ko_rail_5_repos"),
+        Pause("ko_rail_5_repos"),
+        GoPage(Page::Settings),
         Wait(300),
         Shot("ko_04_settings"),
-        Pause("ko_settings"),
+        Pause("ko_rail_6_settings"),
         AskStopServer,
         Wait(300),
         Shot("ko_05_stop_server_confirm"),
         CloseModal,
+        GoPage(Page::Work),
         TransportOffline,
         WaitDisconnected(5000),
         Wait(500),
@@ -590,12 +672,21 @@ fn steps(claude: bool) -> Vec<Step> {
         Wait(500),
         Write(0, "ping -n 6 127.0.0.1 & echo PING-%OS%\r"),
         WaitText(0, "TTL=", 10_000),
+        // The reopened app restores the page and the hidden session list from ui.json.
+        App(Message::Page(Page::Work)),
+        GoPage(Page::Repos),
         CloseApp,
         Wait(300),
         Shot("10_closed"),
         Wait(7000),
         ReopenApp,
         WaitReady(30_000),
+        ExpectPage(Page::Repos),
+        ExpectSessionsOpen(false),
+        WaitRootsLoaded(10_000),
+        GoPage(Page::Work),
+        App(Message::Page(Page::Work)),
+        ExpectSessionsOpen(true),
         ExpectReloaded,
         WaitText(0, "PING-Windows_NT", 20_000),
         ExpectLines(0, "TTL=", 6),
@@ -670,8 +761,8 @@ fn steps(claude: bool) -> Vec<Step> {
     }
     s.extend(phase2());
     s.extend([
-        Log("--- stop the server from the settings (sessions end, daemon exits)"),
-        OpenSettings,
+        Log("--- stop the server from the settings page (sessions end, daemon exits)"),
+        GoPage(Page::Settings),
         AskStopServer,
         Wait(300),
         Shot("19_stop_server_confirm"),
@@ -679,6 +770,7 @@ fn steps(claude: bool) -> Vec<Step> {
         ConfirmStopServer,
         WaitDisconnected(15_000),
         WaitDaemonGone(10_000),
+        ExpectServerTooltip("Server: Local · disconnected"),
         Wait(300),
         Shot("20_server_stopped"),
         Log("--- retry starts a new server; the session is still listed (stopped)"),
@@ -687,10 +779,11 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitReady(10_000),
         MarkDaemon,
         WaitStopped(0, 5000),
+        GoPage(Page::Work),
         Wait(500),
         Shot("21_new_server"),
         Log("--- server setting: SSH to an unreachable host (no local server is started)"),
-        OpenSettings,
+        App(Message::Page(Page::Settings)),
         SettingsServer(Some(UNREACHABLE)),
         Wait(300),
         Shot("22_settings_ssh"),
@@ -707,8 +800,10 @@ fn steps(claude: bool) -> Vec<Step> {
         ExpectNotConnected,
         Shot("24_ssh_unreachable"),
         Pause("ssh_unreachable"),
+        ExpectPage(Page::Settings),
+        ExpectServerTooltip("Server: ssh ide-test@unreachable.invalid"),
         Log("--- back to the local server (the local daemon kept running)"),
-        OpenSettings,
+        GoPage(Page::Settings),
         SettingsServer(None),
         ApplyServer,
         ConfirmSwitch,
@@ -746,7 +841,7 @@ fn steps_p2_only() -> Vec<Step> {
     ];
     s.extend(phase2());
     s.extend([
-        OpenSettings,
+        GoPage(Page::Settings),
         AskStopServer,
         ConfirmStopServer,
         WaitDisconnected(15_000),
@@ -767,8 +862,8 @@ fn phase2() -> Vec<Step> {
     let renamed = "메모-바뀜.txt";
     let enter = |n: Named| TreeKey(n);
     vec![
-        Log("--- phase 2: browse roots in the settings (browse.set_roots)"),
-        OpenSettings,
+        Log("--- phase 2: browse roots on the repos page (browse.set_roots)"),
+        GoPage(Page::Repos),
         AddRoot(Some("relative\\folder")),
         ExpectRootsError("Invalid path", 5000),
         AddRoot(None),
@@ -776,7 +871,7 @@ fn phase2() -> Vec<Step> {
         Wait(300),
         Shot("30_settings_browse_roots"),
         Pause("settings_browse_roots"),
-        CloseModal,
+        GoPage(Page::Work),
         Log("--- new session through the server-side folder browser"),
         OpenNewBlank("phase 2"),
         BrowseOpen,
@@ -992,12 +1087,12 @@ fn phase2() -> Vec<Step> {
         Shot("ko_16_new_session_browser"),
         Pause("ko_new_session_browser"),
         CloseModal,
-        OpenSettings,
+        GoPage(Page::Repos),
         WaitRoots(5000),
         Wait(300),
         Shot("ko_17_settings_roots"),
         Pause("ko_settings_roots"),
-        CloseModal,
+        GoPage(Page::Work),
         SetLang(LanguagePref::Fixed(Lang::En)),
         ExpectLang(Lang::En, "New session"),
     ]
@@ -1170,13 +1265,11 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
         }
         Step::WaitRoots(ms) => {
             let parent = sc.repo_parent();
-            let listed = match &app.modal {
-                Some(Modal::Settings(f)) => f
-                    .roots
-                    .as_ref()
-                    .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &parent))),
-                _ => false,
-            };
+            let listed = app
+                .settings
+                .roots
+                .as_ref()
+                .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &parent)));
             let stored = std::fs::read_to_string(sc.data.join("server.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -1195,10 +1288,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             )
         }
         Step::ExpectRootsError(needle, ms) => {
-            let err = match &app.modal {
-                Some(Modal::Settings(f)) => f.roots_error.clone(),
-                _ => None,
-            };
+            let err = app.settings.roots_error.clone();
             wait!(
                 err.as_deref().is_some_and(|e| e.contains(needle)),
                 ms,
@@ -1588,10 +1678,7 @@ fn detail_luma(app: &App, shot: &window::Screenshot) -> f32 {
     let (w, h) = (shot.size.width as usize, shot.size.height as usize);
     let scale = shot.size.width as f32 / app.window_size.width.max(1.0);
     let lw = app.window_size.width;
-    let pane_l = crate::app::SIDEBAR_W
-        + 1.0
-        + app.ui.split_ratio * app.split_avail()
-        + crate::app::DIVIDER_W;
+    let pane_l = app.left_w() + app.ui.split_ratio * app.split_avail() + crate::app::DIVIDER_W;
     let pane_r = lw - crate::detail::SIDE_W - 1.0 - 8.0;
     let left = pane_l.max(lw / 2.0 + 270.0);
     let px = |x: f32| ((x * scale) as usize).min(w);
@@ -1830,7 +1917,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::SetSplit(r) => {
                 // Same path as dragging the divider: press, move, release.
-                let x = crate::app::SIDEBAR_W + 1.0 + r * app.split_avail();
+                let x = app.left_w() + r * app.split_avail();
                 tasks.push(app.update(Message::DividerPressed));
                 tasks.push(app.update(Message::DragMoved(iced::Point::new(x, 300.0))));
                 tasks.push(app.update(Message::DragEnd));
@@ -1847,7 +1934,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 }
             }
             Step::Pause(name) => {
-                if std::env::var("IDE_APP_SCRIPT_PAUSE").is_ok_and(|v| v == "1") {
+                // `IDE_APP_SCRIPT_PAUSE=1` holds every pause; a comma-separated list of name
+                // prefixes holds only those.
+                let hold_this = std::env::var("IDE_APP_SCRIPT_PAUSE").is_ok_and(|v| {
+                    v == "1" || v.split(',').any(|p| !p.is_empty() && name.starts_with(p))
+                });
+                if hold_this {
                     if fresh {
                         log(&format!("PAUSE {name}"));
                     }
@@ -2045,12 +2137,74 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     );
                 }
             }
-            Step::OpenSettings => tasks.push(app.update(Message::OpenSettings)),
-            Step::ExpectSettingsError(needle) => {
-                let err = match &app.modal {
-                    Some(Modal::Settings(f)) => f.error.clone(),
-                    _ => None,
+            Step::GoPage(p) => {
+                if app.ui.page != p {
+                    tasks.push(app.update(Message::Page(p)));
+                }
+            }
+            Step::ExpectPage(p) => {
+                sc.check(app.ui.page == p, &format!("page {:?} shown", app.ui.page));
+            }
+            Step::ExpectSessionsOpen(open) => {
+                let left = crate::app::RAIL_W
+                    + if open {
+                        crate::app::SIDEBAR_W + 1.0
+                    } else {
+                        0.0
+                    };
+                sc.check(
+                    app.ui.sessions_open == open && (app.left_w() - left).abs() < 0.5,
+                    &format!(
+                        "session list open={} (terminal starts at x={}, terminal + detail {:.0} px)",
+                        app.ui.sessions_open,
+                        app.left_w(),
+                        app.split_avail()
+                    ),
+                );
+            }
+            Step::ExpectSavedRail(p, open) => {
+                let s = crate::ui_state::UiState::load(&app.data_dir);
+                sc.check(
+                    s.page == p && s.sessions_open == open,
+                    &format!(
+                        "ui.json page {:?}, sessions_open {}",
+                        s.page, s.sessions_open
+                    ),
+                );
+            }
+            Step::ExpectWorkToggle(open, hovered) => {
+                use crate::icons::Icon;
+                let (icon, label) = app.rail_entry(Page::Work);
+                let want_icon = match (hovered, open) {
+                    (false, _) => Icon::Messages,
+                    (true, true) => Icon::SidebarCollapse,
+                    (true, false) => Icon::SidebarExpand,
                 };
+                let want_label = if open {
+                    tr::sessions_hide()
+                } else {
+                    tr::sessions_show()
+                };
+                sc.check(
+                    icon == want_icon && label == want_label,
+                    &format!("rail work button: {icon:?}, tooltip {label:?}"),
+                );
+            }
+            Step::WaitRootsLoaded(ms) => {
+                if let Some(c) = &app.settings.roots {
+                    sc.check(true, &format!("repos page loaded the roots: {:?}", c.roots));
+                } else if timeout(ms) {
+                    sc.check(false, "repos page never loaded the roots");
+                } else {
+                    next = false;
+                }
+            }
+            Step::ExpectServerTooltip(needle) => {
+                let t = app.server_tooltip();
+                sc.check(t.contains(needle), &format!("rail server tooltip {t:?}"));
+            }
+            Step::ExpectSettingsError(needle) => {
+                let err = app.settings.error.clone();
                 sc.check(
                     err.as_deref().is_some_and(|e| e.contains(needle)),
                     &format!("settings error shown: {err:?}"),
@@ -2128,13 +2282,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     .map(|l| l.info.id.clone());
                 if let Some(id) = login {
                     sc.check(
-                        app.modal.is_none(),
-                        &format!("login terminal {id} opened and selected, settings closed"),
+                        app.modal.is_none() && app.ui.page == Page::Work,
+                        &format!("login terminal {id} opened and selected on the work page"),
                     );
                     sc.ids.push(id);
-                } else if let Some(Modal::Settings(f)) = &app.modal
-                    && let Some(e) = &f.error
-                {
+                } else if let Some(e) = &app.settings.error {
                     let e = e.clone();
                     sc.check(false, &format!("account/login failed: {e}"));
                 } else if timeout(ms) {
@@ -2194,14 +2346,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 tasks.push(app.update(Message::AcctStatus(provider.into(), slug.into())));
             }
             Step::WaitAccountStatus(provider, slug, ms) => {
-                let st = match &app.modal {
-                    Some(Modal::Settings(f)) => f
-                        .acct_status
-                        .iter()
-                        .find(|(k, _)| k.0 == provider && k.1 == slug)
-                        .and_then(|(_, s)| *s),
-                    _ => None,
-                };
+                let st = app
+                    .settings
+                    .acct_status
+                    .iter()
+                    .find(|(k, _)| k.0 == provider && k.1 == slug)
+                    .and_then(|(_, s)| *s);
                 match st {
                     // The fake provider has no status command.
                     Some(s) => sc.check(

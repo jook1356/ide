@@ -1,0 +1,72 @@
+//! Tabler icons (MIT, `assets/icons/`, unmodified files from github.com/tabler/tabler-icons)
+//! drawn with iced's `svg` widget. Drawn like `@tabler/icons-react` with `stroke={1.5}`: the
+//! files' `stroke-width="2"` is replaced when they are loaded; the colour comes from the style.
+
+use std::sync::LazyLock;
+
+use iced::widget::svg;
+use iced::{Color, Element, Widget as _};
+
+/// Icons used by the navigation rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    Messages,
+    Key,
+    Stack2,
+    GitBranch,
+    Settings,
+    ActivityHeartbeat,
+    SidebarCollapse,
+    SidebarExpand,
+}
+
+const SOURCES: [&str; 8] = [
+    include_str!("../assets/icons/messages.svg"),
+    include_str!("../assets/icons/key.svg"),
+    include_str!("../assets/icons/stack-2.svg"),
+    include_str!("../assets/icons/git-branch.svg"),
+    include_str!("../assets/icons/settings.svg"),
+    include_str!("../assets/icons/activity-heartbeat.svg"),
+    include_str!("../assets/icons/layout-sidebar-left-collapse.svg"),
+    include_str!("../assets/icons/layout-sidebar-left-expand.svg"),
+];
+
+/// Stroke width the icons are drawn with (in the 24-unit view box).
+const STROKE: &str = "1.5";
+
+static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
+    SOURCES
+        .iter()
+        .map(|s| {
+            let s = s.replace("stroke-width=\"2\"", &format!("stroke-width=\"{STROKE}\""));
+            svg::Handle::from_memory(s.into_bytes())
+        })
+        .collect()
+});
+
+fn handle(icon: Icon) -> svg::Handle {
+    HANDLES[icon as usize].clone()
+}
+
+/// The icon at `size` logical pixels in `color`.
+pub fn icon<'a, M: 'a>(icon: Icon, size: f32, color: Color) -> Element<'a, M> {
+    svg(handle(icon))
+        .width(size)
+        .height(size)
+        .style(move |_, _| svg::Style { color: Some(color) })
+        .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icons_are_tabler_outlines_with_thin_strokes() {
+        for s in SOURCES {
+            assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
+            assert!(s.contains("stroke-width=\"2\""));
+        }
+        assert_eq!(HANDLES.len(), Icon::SidebarExpand as usize + 1);
+    }
+}

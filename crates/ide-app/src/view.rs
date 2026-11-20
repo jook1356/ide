@@ -1,4 +1,6 @@
-//! Window layout: sidebar | terminal | divider | detail, plus modal dialogs.
+//! Window layout: navigation rail | page, where the work page is session list | terminal |
+//! divider | detail; other pages (accounts, configurations, repos, settings) cover the work page,
+//! which stays in the widget tree. Modal dialogs on top.
 
 use iced::widget::{
     Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, row,
@@ -11,18 +13,18 @@ use ide_term::TerminalView;
 
 use crate::app::{
     App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_REPO_ID,
-    NewForm, QuickForm, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SettingsForm,
-    TERM_ID, path_name, same_path,
+    NewForm, QuickForm, RAIL_W, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID,
+    SettingsForm, TERM_ID, path_name, same_path,
 };
 use crate::i18n::{self, tr};
+use crate::icons::{self, Icon};
 use crate::style;
-use crate::ui_state::{CloseAction, ServerPref};
+use crate::ui_state::{CloseAction, Page, ServerPref};
 
 type El<'a> = Element<'a, Message>;
 
 // Symbols (Segoe UI Symbol / system fallback fonts on Windows).
 const I_PLUS: &str = "+";
-const I_GEAR: &str = "⚙";
 // U+25B8: U+25B6 would get the emoji presentation from Segoe UI Emoji.
 const I_PLAY: &str = "▸";
 const I_RESTART: &str = "↻";
@@ -83,6 +85,15 @@ fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
 }
 
+/// A section of a page in a bordered card (Hermes Desk's `Paper withBorder p="md"`).
+fn card(content: El<'_>) -> El<'_> {
+    container(content)
+        .padding(16)
+        .width(Fill)
+        .style(style::card)
+        .boxed()
+}
+
 fn error_box<'a>(e: &'a str) -> El<'a> {
     container(text(e).size(12))
         .padding(8)
@@ -93,18 +104,36 @@ fn error_box<'a>(e: &'a str) -> El<'a> {
 
 impl App {
     pub fn view(&self) -> El<'_> {
-        let base = row![
-            self.sidebar(),
-            container(space())
-                .width(1)
-                .height(Fill)
-                .style(style::bg(style::BORDER)),
+        // The session list's slot keeps its place when hidden (same child count), so the
+        // terminal and the detail area keep their widget state.
+        let (list, list_border): (El<'_>, El<'_>) = if self.ui.sessions_open {
+            (
+                self.sidebar(),
+                container(space())
+                    .width(1)
+                    .height(Fill)
+                    .style(style::bg(style::BORDER))
+                    .boxed(),
+            )
+        } else {
+            (space().width(0).boxed(), space().width(0).boxed())
+        };
+        let work = row![
+            list,
+            list_border,
             self.centre(),
             self.divider(),
             self.detail_area(),
             self.side_area(),
         ]
         .height(Fill);
+        // Other pages cover the work page (like Hermes Desk, which keeps it mounted).
+        let page: El<'_> = if self.on_work_page() {
+            space().boxed()
+        } else {
+            opaque(self.page_view()).into()
+        };
+        let base = row![self.rail(), stack![work, page].width(Fill).height(Fill),].height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
         let overlay: El<'_> = match &self.modal {
             Some(m) => self.modal_view(m),
@@ -123,18 +152,178 @@ impl App {
         self.connected().then_some(msg)
     }
 
+    // ------------------------------------------------------------------ rail
+
+    /// Icon and tooltip of a rail page button. On its own page the work button toggles the
+    /// session list: hovered it shows the collapse / expand icon, and its tooltip says so.
+    pub fn rail_entry(&self, page: Page) -> (Icon, String) {
+        let (icon, label) = match page {
+            Page::Work => (Icon::Messages, tr::nav_work()),
+            Page::Accounts => (Icon::Key, tr::nav_accounts()),
+            Page::Configurations => (Icon::Stack2, tr::nav_configurations()),
+            Page::Repos => (Icon::GitBranch, tr::nav_repos()),
+            Page::Settings => (Icon::Settings, tr::settings()),
+        };
+        if page != Page::Work || !self.on_work_page() {
+            return (icon, label);
+        }
+        let open = self.ui.sessions_open;
+        let icon = match (self.rail_hover, open) {
+            (false, _) => icon,
+            (true, true) => Icon::SidebarCollapse,
+            (true, false) => Icon::SidebarExpand,
+        };
+        let label = if open {
+            tr::sessions_hide()
+        } else {
+            tr::sessions_show()
+        };
+        (icon, label)
+    }
+
+    /// Tooltip of the rail's server indicator: target, state and (connected) server version.
+    pub fn server_tooltip(&self) -> String {
+        let target = self.server_label();
+        match &self.conn {
+            Conn::Connected(w) => {
+                tr::rail_server_version(&target, &tr::conn_state_connected(), &w.server_version)
+            }
+            Conn::Connecting => tr::rail_server(&target, &tr::conn_state_connecting()),
+            Conn::Reconnecting => tr::rail_server(&target, &tr::conn_state_reconnecting()),
+            Conn::Disconnected(_) => tr::rail_server(&target, &tr::conn_state_disconnected()),
+        }
+    }
+
+    /// Colour of the connection: green connected, amber (re)connecting, red disconnected.
+    fn conn_color(&self) -> Color {
+        match &self.conn {
+            Conn::Connected(_) => style::GREEN,
+            Conn::Connecting | Conn::Reconnecting => style::AMBER,
+            Conn::Disconnected(_) => style::RED,
+        }
+    }
+
+    /// Navigation rail (Hermes Desk's `NavRail`): 64 px, 44 px buttons 6 px apart, the server
+    /// indicator at the bottom.
+    fn rail(&self) -> El<'_> {
+        let link = |icon: Icon, active: bool, msg: Message| {
+            let color = if active {
+                style::RAIL_ACTIVE_ICON
+            } else {
+                style::RAIL_ICON
+            };
+            button(container(icons::icon(icon, 22.0, color)).center(44))
+                .width(44)
+                .height(44)
+                .padding(0)
+                .style(style::rail_link(active))
+                .on_press(msg)
+        };
+        let tip = |content: El<'static>, label: String| -> El<'static> {
+            tooltip(
+                content,
+                container(text(label).size(14))
+                    .padding([5, 10])
+                    .style(style::rail_tip),
+            )
+            .position(tooltip::Position::Right)
+            .gap(8)
+            .boxed()
+        };
+        let mut top: Column<El<'_>> = Column::new().spacing(6).align_x(Alignment::Center);
+        for page in [
+            Page::Work,
+            Page::Accounts,
+            Page::Configurations,
+            Page::Repos,
+            Page::Settings,
+        ] {
+            let (icon, label) = self.rail_entry(page);
+            let mut b: El<'static> = link(icon, self.ui.page == page, Message::Page(page)).boxed();
+            if page == Page::Work {
+                b = mouse_area(b)
+                    .on_enter(Message::RailHover(true))
+                    .on_exit(Message::RailHover(false))
+                    .boxed();
+            }
+            // The active page also gets an accent bar on the rail's left edge, 11 px in from the
+            // button's top and bottom.
+            let bar: El<'_> = if self.ui.page == page {
+                container(
+                    container(space())
+                        .width(3)
+                        .height(22)
+                        .style(style::rail_accent),
+                )
+                .padding(iced::Padding {
+                    top: 11.0,
+                    ..iced::Padding::ZERO
+                })
+                .boxed()
+            } else {
+                space().boxed()
+            };
+            top = top.push(
+                stack![container(tip(b, label)).center_x(Fill), bar]
+                    .width(Fill)
+                    .boxed(),
+            );
+        }
+        // Server indicator: pulse icon with a status dot (Mantine `Indicator`: 9 px, 7 px in
+        // from the top right corner).
+        let server = stack![
+            link(
+                Icon::ActivityHeartbeat,
+                false,
+                Message::Page(Page::Settings)
+            ),
+            container(
+                container(space())
+                    .width(9)
+                    .height(9)
+                    .style(style::dot(self.conn_color())),
+            )
+            .padding(iced::Padding {
+                top: 2.5,
+                left: 32.5,
+                ..iced::Padding::ZERO
+            }),
+        ]
+        .width(44)
+        .height(44)
+        .boxed();
+        let col = column![
+            top.height(Fill),
+            container(tip(server, self.server_tooltip())).padding(iced::Padding {
+                bottom: 10.0,
+                ..iced::Padding::ZERO
+            }),
+        ]
+        .width(Fill)
+        .align_x(Alignment::Center)
+        .padding(iced::Padding {
+            top: 12.0,
+            ..iced::Padding::ZERO
+        });
+        row![
+            container(col)
+                .width(RAIL_W - 1.0)
+                .height(Fill)
+                .style(style::bg(style::RAIL)),
+            container(space())
+                .width(1)
+                .height(Fill)
+                .style(style::bg(style::RAIL_BORDER)),
+        ]
+        .boxed()
+    }
+
     // ------------------------------------------------------------------ sidebar
 
     fn sidebar(&self) -> El<'_> {
         let configs = self.config_choices();
         let current = self.current_configuration();
         let selected = configs.iter().find(|c| c.key == current).cloned();
-        let header = row![
-            text("ide").size(15).font(style::BOLD),
-            space().width(Fill),
-            icon_button(I_GEAR, Some(Message::OpenSettings), tr::settings()),
-        ]
-        .align_y(Alignment::Center);
         let profile = row![
             label(tr::configuration_label()),
             space().width(8),
@@ -197,18 +386,9 @@ impl App {
             );
         }
 
-        let mut col = column![
-            header,
-            profile,
-            container(space())
-                .height(1)
-                .width(Fill)
-                .style(style::bg(style::BORDER)),
-            sessions_header,
-            scrollable(list).height(Fill),
-        ]
-        .spacing(10)
-        .padding(10);
+        let mut col = column![sessions_header, profile, scrollable(list).height(Fill),]
+            .spacing(10)
+            .padding(10);
         if let Some(b) = &self.banner {
             col = col.push(
                 container(text(b.as_str()).size(12))
@@ -217,7 +397,6 @@ impl App {
                     .boxed(),
             );
         }
-        col = col.push(self.connection_footer());
         container(col)
             .width(SIDEBAR_W)
             .height(Fill)
@@ -225,22 +404,17 @@ impl App {
             .boxed()
     }
 
-    /// Connection status: connected (target + server version), reconnecting, disconnected with
-    /// a retry button.
-    fn connection_footer(&self) -> El<'_> {
-        let (dot, color, msg, retry) = match &self.conn {
-            Conn::Connecting => (I_DOT, style::AMBER, tr::conn_connecting(), false),
-            Conn::Connected(w) => (
-                I_DOT,
-                style::GREEN,
-                tr::conn_connected(&w.server_version),
-                false,
-            ),
-            Conn::Reconnecting => (I_DOT, style::AMBER, tr::conn_reconnecting(), true),
-            Conn::Disconnected(why) => (I_DOT, style::RED, tr::conn_disconnected(why), true),
+    /// Connection status (settings page, server section): connected (target + server
+    /// version), reconnecting, disconnected with a retry button.
+    fn connection_status(&self) -> El<'_> {
+        let (msg, retry) = match &self.conn {
+            Conn::Connecting => (tr::conn_connecting(), false),
+            Conn::Connected(w) => (tr::conn_connected(&w.server_version), false),
+            Conn::Reconnecting => (tr::conn_reconnecting(), true),
+            Conn::Disconnected(why) => (tr::conn_disconnected(why), true),
         };
         let mut r = row![
-            text(dot).size(10).color(color),
+            text(I_DOT).size(10).color(self.conn_color()),
             column![
                 text(tr::conn_target(&self.server_label()))
                     .size(11)
@@ -257,11 +431,13 @@ impl App {
         .spacing(6)
         .align_y(Alignment::Center);
         if retry && self.target.transport.is_ok() {
-            r = r.push(icon_button(
-                I_RESTART,
-                Some(Message::Retry),
-                tr::conn_retry(),
-            ));
+            r = r.push(
+                button(text(tr::conn_retry()).size(12))
+                    .padding([4, 10])
+                    .style(style::secondary)
+                    .on_press(Message::Retry)
+                    .boxed(),
+            );
         }
         container(r)
             .padding([6, 8])
@@ -708,7 +884,250 @@ impl App {
     /// A modal covers the window: the web view shows a dimmed, frozen snapshot (see
     /// [`App::detail`]).
     pub fn web_covered(&self) -> bool {
-        self.modal.is_some() && !self.modal_web_unsafe
+        (self.modal.is_some() && !self.modal_web_unsafe) || !self.on_work_page()
+    }
+
+    // ------------------------------------------------------------------ pages
+
+    /// The shown page other than the work page: a centred column (like Hermes Desk's
+    /// `PageLayout`: 960 px wide with 32 px margins, a 40 px title row, 20 px between sections).
+    fn page_view(&self) -> El<'_> {
+        let f = &self.settings;
+        let online = self.connected();
+        let (title, sections): (String, Vec<El<'_>>) = match self.ui.page {
+            Page::Work => (String::new(), Vec::new()),
+            Page::Accounts => (
+                tr::nav_accounts(),
+                vec![card(self.accounts_section(f, online))],
+            ),
+            Page::Configurations => (
+                tr::nav_configurations(),
+                vec![card(self.configurations_section(f, online))],
+            ),
+            Page::Repos => (tr::nav_repos(), vec![card(self.roots_section(f, online))]),
+            Page::Settings => (
+                tr::settings(),
+                vec![
+                    card(self.language_section()),
+                    card(self.server_section(f, online)),
+                    card(self.on_close_section()),
+                ],
+            ),
+        };
+        let mut c = column![
+            container(text(title).size(22).font(style::BOLD))
+                .height(40)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(20);
+        let error = match self.ui.page {
+            Page::Accounts | Page::Configurations => f.error.as_deref(),
+            _ => None,
+        };
+        if let Some(e) = error {
+            c = c.push(error_box(e));
+        }
+        for s in sections {
+            c = c.push(s);
+        }
+        let avail = self.window_size.width - RAIL_W;
+        let width = (avail - 64.0).clamp(320.0, 896.0);
+        container(scrollable(
+            container(c.width(width)).center_x(Fill).padding([32, 0]),
+        ))
+        .width(Fill)
+        .height(Fill)
+        .style(style::bg(style::BG))
+        .boxed()
+    }
+
+    /// Settings page: UI language.
+    fn language_section(&self) -> El<'_> {
+        let languages = LanguagePref::all()
+            .into_iter()
+            .fold(row![].spacing(6), |r, p| {
+                let name = match p {
+                    LanguagePref::System => tr::language_system(),
+                    LanguagePref::Fixed(l) => l.native_name().to_owned(),
+                };
+                r.push(
+                    button(text(name).size(13))
+                        .padding([5, 12])
+                        .style(style::choice(self.ui.language == p))
+                        .on_press(Message::SetLanguage(p))
+                        .boxed(),
+                )
+            });
+        column![label(tr::language_label()), languages]
+            .spacing(10)
+            .boxed()
+    }
+
+    /// Settings page: connection status, local / SSH server, stop server.
+    fn server_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let mut c = column![label(tr::server_label()), self.connection_status()].spacing(10);
+        let kinds = row![
+            button(text(tr::conn_local()).size(13))
+                .padding([5, 12])
+                .style(style::choice(!f.ssh))
+                .on_press(Message::SettingsServerSsh(false)),
+            button(text(tr::server_ssh()).size(13))
+                .padding([5, 12])
+                .style(style::choice(f.ssh))
+                .on_press(Message::SettingsServerSsh(true)),
+            space().width(Fill),
+            button(text(tr::server_apply()).size(13))
+                .padding([5, 12])
+                .style(style::secondary)
+                .on_press(Message::SettingsApplyServer),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        c = c.push(kinds.boxed());
+        if f.ssh {
+            c = c.push(
+                text_input(tr::ssh_host_placeholder(), &f.ssh_host)
+                    .id(SSH_HOST_ID)
+                    .on_input(Message::SettingsSshHost)
+                    .on_submit(Message::SettingsApplyServer)
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input)
+                    .boxed(),
+            );
+            c = c.push(
+                text_input(tr::ssh_command_placeholder(), &f.ssh_command)
+                    .on_input(Message::SettingsSshCommand)
+                    .on_submit(Message::SettingsApplyServer)
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input)
+                    .boxed(),
+            );
+        }
+        if let Some(v) = &self.remote_override {
+            c = c.push(
+                text(tr::server_env_override(v))
+                    .size(12)
+                    .color(style::AMBER)
+                    .boxed(),
+            );
+        }
+        if let Some(e) = &f.server_error {
+            c = c.push(error_box(e));
+        }
+        c = c.push(
+            row![
+                text(tr::server_note())
+                    .size(12)
+                    .color(style::DIM)
+                    .width(Fill),
+                button(text(tr::stop_server()).size(13))
+                    .padding([5, 12])
+                    .style(style::danger)
+                    .on_press_maybe(online.then_some(Message::AskStopServer)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .boxed(),
+        );
+        c.boxed()
+    }
+
+    /// Settings page: what closing the window does.
+    fn on_close_section(&self) -> El<'_> {
+        let on_close = [
+            (CloseAction::Ask, tr::on_close_ask()),
+            (CloseAction::Keep, tr::on_close_keep()),
+            (CloseAction::Stop, tr::on_close_stop()),
+        ]
+        .into_iter()
+        .fold(row![].spacing(6), |r, (a, name)| {
+            r.push(
+                button(text(name).size(13))
+                    .padding([5, 12])
+                    .style(style::choice(self.ui.on_close == a))
+                    .on_press(Message::SetOnClose(a))
+                    .boxed(),
+            )
+        });
+        column![label(tr::on_close_label()), on_close]
+            .spacing(10)
+            .boxed()
+    }
+
+    /// Repos page: folders the new-session dialog can browse on the server.
+    fn roots_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let mut c = column![
+            label(tr::browse_roots_label()),
+            text(tr::browse_roots_note()).size(12).color(style::DIM),
+        ]
+        .spacing(10);
+        if let Some(cfg) = &f.roots {
+            let mut list: Column<El<'_>> = Column::new().spacing(4);
+            if let Some(h) = &cfg.home {
+                list = list.push(
+                    container(
+                        row![
+                            ide_views::icons::folder_icon(false, style::DIM),
+                            text(h.as_str()).size(12).width(Fill),
+                            text(tr::browse_home()).size(11).color(style::DIM),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([5, 8])
+                    .style(style::bg(style::HEADER))
+                    .boxed(),
+                );
+            }
+            for (i, r) in cfg.roots.iter().enumerate() {
+                list = list.push(
+                    container(
+                        row![
+                            ide_views::icons::folder_icon(false, style::DIM),
+                            text(r.as_str()).size(12).width(Fill),
+                            icon_button(
+                                I_DELETE,
+                                (online && !f.roots_busy).then_some(Message::RootRemove(i)),
+                                tr::remove()
+                            ),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([2, 8])
+                    .style(style::bg(style::HEADER))
+                    .boxed(),
+                );
+            }
+            c = c.push(list.boxed());
+        }
+        c = c.push(
+            row![
+                text_input(tr::browse_root_placeholder(), &f.root_input)
+                    .id(ROOT_INPUT_ID)
+                    .on_input(Message::RootInput)
+                    .on_submit(Message::RootAdd)
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input)
+                    .width(Fill),
+                button(text(tr::add()).size(13))
+                    .padding([5, 12])
+                    .style(style::secondary)
+                    .on_press_maybe(
+                        (online && !f.roots_busy && !f.root_input.trim().is_empty())
+                            .then_some(Message::RootAdd)
+                    ),
+            ]
+            .spacing(6)
+            .boxed(),
+        );
+        if let Some(e) = &f.roots_error {
+            c = c.push(error_box(e));
+        }
+        c.boxed()
     }
 
     // ------------------------------------------------------------------ modals
@@ -724,7 +1143,7 @@ impl App {
             .collect()
     }
 
-    /// Settings: accounts per provider (add = create + open the login command).
+    /// Accounts page: accounts per provider (add = create + open the login command).
     fn accounts_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
         let mut list: Column<El<'_>> = Column::new().spacing(4);
         for a in &self.accounts {
@@ -814,7 +1233,6 @@ impl App {
             .collect();
         let sel = providers.iter().find(|c| c.key == f.acct_provider).cloned();
         column![
-            label(tr::accounts_label()),
             text(tr::accounts_note()).size(12).color(style::DIM),
             list,
             row![
@@ -841,7 +1259,7 @@ impl App {
         .boxed()
     }
 
-    /// Settings: configurations (list, add, delete) and a plain editor for one of them.
+    /// Configurations page: configurations (list, add, delete) and a plain editor for one of them.
     fn configurations_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
         let mut list: Column<El<'_>> = Column::new().spacing(4);
         for c in &self.configs {
@@ -879,7 +1297,6 @@ impl App {
             }
         }
         column![
-            label(tr::configurations_label()),
             text(tr::configurations_note()).size(12).color(style::DIM),
             list,
             row![
@@ -1414,212 +1831,6 @@ impl App {
             .spacing(10)
             .width(460)
             .boxed(),
-            Modal::Settings(f) => {
-                let online = self.connected();
-                let languages = LanguagePref::all()
-                    .into_iter()
-                    .fold(row![].spacing(6), |r, p| {
-                        let name = match p {
-                            LanguagePref::System => tr::language_system(),
-                            LanguagePref::Fixed(l) => l.native_name().to_owned(),
-                        };
-                        r.push(
-                            button(text(name).size(13))
-                                .padding([5, 12])
-                                .style(style::choice(self.ui.language == p))
-                                .on_press(Message::SetLanguage(p))
-                                .boxed(),
-                        )
-                    });
-                let mut c = column![
-                    text(tr::settings()).size(18).font(style::BOLD),
-                    label(tr::language_label()),
-                    languages,
-                    space().height(4),
-                    self.accounts_section(f, online),
-                    space().height(4),
-                    self.configurations_section(f, online),
-                ]
-                .spacing(10);
-                if let Some(e) = &f.error {
-                    c = c.push(error_box(e));
-                }
-                c = c.push(space().height(4).boxed());
-                c = c.push(label(tr::server_label()));
-                let kinds = row![
-                    button(text(tr::conn_local()).size(13))
-                        .padding([5, 12])
-                        .style(style::choice(!f.ssh))
-                        .on_press(Message::SettingsServerSsh(false)),
-                    button(text(tr::server_ssh()).size(13))
-                        .padding([5, 12])
-                        .style(style::choice(f.ssh))
-                        .on_press(Message::SettingsServerSsh(true)),
-                    space().width(Fill),
-                    button(text(tr::server_apply()).size(13))
-                        .padding([5, 12])
-                        .style(style::secondary)
-                        .on_press(Message::SettingsApplyServer),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center);
-                c = c.push(kinds.boxed());
-                if f.ssh {
-                    c = c.push(
-                        text_input(tr::ssh_host_placeholder(), &f.ssh_host)
-                            .id(SSH_HOST_ID)
-                            .on_input(Message::SettingsSshHost)
-                            .on_submit(Message::SettingsApplyServer)
-                            .size(13)
-                            .padding([5, 8])
-                            .style(style::input)
-                            .boxed(),
-                    );
-                    c = c.push(
-                        text_input(tr::ssh_command_placeholder(), &f.ssh_command)
-                            .on_input(Message::SettingsSshCommand)
-                            .on_submit(Message::SettingsApplyServer)
-                            .size(13)
-                            .padding([5, 8])
-                            .style(style::input)
-                            .boxed(),
-                    );
-                }
-                if let Some(v) = &self.remote_override {
-                    c = c.push(
-                        text(tr::server_env_override(v))
-                            .size(12)
-                            .color(style::AMBER)
-                            .boxed(),
-                    );
-                }
-                if let Some(e) = &f.server_error {
-                    c = c.push(error_box(e));
-                }
-                c = c.push(
-                    row![
-                        text(tr::server_note())
-                            .size(12)
-                            .color(style::DIM)
-                            .width(Fill),
-                        button(text(tr::stop_server()).size(13))
-                            .padding([5, 12])
-                            .style(style::danger)
-                            .on_press_maybe(online.then_some(Message::AskStopServer)),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .boxed(),
-                );
-                c = c.push(space().height(4).boxed());
-                c = c.push(label(tr::browse_roots_label()));
-                c = c.push(
-                    text(tr::browse_roots_note())
-                        .size(12)
-                        .color(style::DIM)
-                        .boxed(),
-                );
-                if let Some(cfg) = &f.roots {
-                    let mut list: Column<El<'_>> = Column::new().spacing(4);
-                    if let Some(h) = &cfg.home {
-                        list = list.push(
-                            container(
-                                row![
-                                    ide_views::icons::folder_icon(false, style::DIM),
-                                    text(h.as_str()).size(12).width(Fill),
-                                    text(tr::browse_home()).size(11).color(style::DIM),
-                                ]
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            )
-                            .padding([5, 8])
-                            .style(style::bg(style::HEADER))
-                            .boxed(),
-                        );
-                    }
-                    for (i, r) in cfg.roots.iter().enumerate() {
-                        list = list.push(
-                            container(
-                                row![
-                                    ide_views::icons::folder_icon(false, style::DIM),
-                                    text(r.as_str()).size(12).width(Fill),
-                                    icon_button(
-                                        I_DELETE,
-                                        (online && !f.roots_busy).then_some(Message::RootRemove(i)),
-                                        tr::remove()
-                                    ),
-                                ]
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            )
-                            .padding([2, 8])
-                            .style(style::bg(style::HEADER))
-                            .boxed(),
-                        );
-                    }
-                    c = c.push(list.boxed());
-                }
-                c = c.push(
-                    row![
-                        text_input(tr::browse_root_placeholder(), &f.root_input)
-                            .id(ROOT_INPUT_ID)
-                            .on_input(Message::RootInput)
-                            .on_submit(Message::RootAdd)
-                            .size(13)
-                            .padding([5, 8])
-                            .style(style::input)
-                            .width(Fill),
-                        button(text(tr::add()).size(13))
-                            .padding([5, 12])
-                            .style(style::secondary)
-                            .on_press_maybe(
-                                (online && !f.roots_busy && !f.root_input.trim().is_empty())
-                                    .then_some(Message::RootAdd)
-                            ),
-                    ]
-                    .spacing(6)
-                    .boxed(),
-                );
-                if let Some(e) = &f.roots_error {
-                    c = c.push(error_box(e));
-                }
-                c = c.push(label(tr::on_close_label()));
-                let on_close = [
-                    (CloseAction::Ask, tr::on_close_ask()),
-                    (CloseAction::Keep, tr::on_close_keep()),
-                    (CloseAction::Stop, tr::on_close_stop()),
-                ]
-                .into_iter()
-                .fold(row![].spacing(6), |r, (a, name)| {
-                    r.push(
-                        button(text(name).size(13))
-                            .padding([5, 12])
-                            .style(style::choice(self.ui.on_close == a))
-                            .on_press(Message::SetOnClose(a))
-                            .boxed(),
-                    )
-                });
-                c = c.push(on_close.boxed());
-                c = c.push(
-                    row![
-                        space().width(Fill),
-                        button(text(tr::close()).size(13))
-                            .padding([6, 14])
-                            .style(style::secondary)
-                            .on_press(Message::CloseModal),
-                    ]
-                    .boxed(),
-                );
-                // The settings grew taller than small windows: scroll inside the card.
-                // Shrink = the content's height, capped by the window (scrolls when taller).
-                // Right padding keeps the scrollbar off the rows' buttons.
-                scrollable(container(c.width(520)).padding(iced::Padding {
-                    right: 14.0,
-                    ..iced::Padding::ZERO
-                }))
-                .height(Length::Shrink)
-                .boxed()
-            }
         };
         opaque(
             mouse_area(

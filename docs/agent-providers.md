@@ -150,10 +150,10 @@ Notifications `AccountsChanged`, `ConfigurationsChanged` replace `ProfilesChange
 capabilities `providers`, `accounts`, `configurations` replace `profiles`.
 
 ## UI (minimal, to be redesigned)
-- Settings -> **Accounts**: all accounts (provider icon, name, provider), Status (asks the CLI),
+- Accounts page (navigation rail -> 계정): **Accounts**: all accounts (provider icon, name, provider), Status (asks the CLI),
   Log in (opens a login session), rename (display name), delete (with its dir). Add = provider +
   name -> creates the account and opens its login command in a terminal tab (settings close).
-- Settings -> **Configurations**: list with session counts, add, delete, edit: name, instructions
+- Configurations page (navigation rail -> 구성): **Configurations**: list with session counts, add, delete, edit: name, instructions
   (multiline), skill folders (one per row), MCP servers (name, command, args split on spaces,
   env as `KEY=value` items), plus a per-provider support line (✓ native, ~ fallback, ✕ not passed).
 - New session: provider (only usable ones), account (of that provider, or "default login"; hidden

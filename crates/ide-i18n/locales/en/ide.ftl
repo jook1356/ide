@@ -10,6 +10,21 @@
 # The language's name in itself (reserved; shown in the language picker).
 language-name = English
 
+## Navigation rail (left edge: pages and the server status)
+
+nav-work = Work
+nav-accounts = Accounts
+nav-configurations = Configurations
+nav-repos = Repos
+sessions-hide = Hide session list
+sessions-show = Show session list
+rail-server = Server: { $target } · { $state }
+rail-server-version = Server: { $target } · { $state } · { $version }
+conn-state-connecting = connecting
+conn-state-connected = connected
+conn-state-reconnecting = reconnecting
+conn-state-disconnected = disconnected
+
 ## Sidebar
 
 settings = Settings
@@ -311,7 +326,6 @@ err-def-not-found = No definition found for “{ $name }”.
 configuration-label = CONFIGURATION
 account-label = ACCOUNT
 account-default = Default login (the CLI's own settings)
-accounts-label = ACCOUNTS
 accounts-note = An account is one login of an agent CLI with its own config folder. Adding one opens its login in a terminal.
 account-name-placeholder = Account name
 account-add = Add and log in
@@ -322,7 +336,6 @@ account-logged-in = logged in
 account-logged-out = not logged in
 account-status-unknown = unknown
 account-delete-tooltip = Delete the account and its login files
-configurations-label = CONFIGURATIONS
 configurations-note = Skills, MCP servers and instructions, added to any agent and account.
 configuration-name-placeholder = Configuration name
 configuration-name-label = Name

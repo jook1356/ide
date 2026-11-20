@@ -173,7 +173,7 @@ Known gaps (phase 1):
   `ide-core`/`portable-pty`. It never spawns agents, runs git or touches project files. Local state
   only: `<data>/ui.json` (selection, split, detail collapsed, language, per-session web URL, last
   repo folder, server choice, close behaviour) and the CEF profile (`<data>/web`).
-- **Server choice**: Settings -> Server: Local (default: `ide-server --stdio` next to `ide.exe`,
+- **Server choice**: settings page (navigation rail) -> Server: Local (default: `ide-server --stdio` next to `ide.exe`,
   `IDE_DATA_DIR` passed through; the relay attaches to the running daemon or starts it detached
   without a console) or SSH (`ssh <host> [command]`, `Ssh::new`; no local server is started).
   Switching asks first and reconnects; sessions on the previous server keep running there.
@@ -270,7 +270,7 @@ Error ids added (args): `path-invalid` (`path`), `fs-not-found` / `fs-exists` / 
 Existing ids reused: `path-denied` (`path`), `session-not-found` (`id`), `git` / `git-spawn`,
 `message-too-large` (now also sent when a reply exceeds 16 MiB).
 
-Browse roots are editable from the app (Settings -> Repository folders): `browse.config`
+Browse roots are editable from the app (the repos page of the navigation rail): `browse.config`
 (home dir + the `browse_roots` stored in `server.json`) and `browse.set_roots{roots}` (each root
 absolute, existing, a folder and not a filesystem root -> canonical, deduplicated, at most 64;
 `path-invalid` / `path-denied` / `fs-not-found` / `fs-not-a-dir`; other keys of `server.json`

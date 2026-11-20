@@ -1,7 +1,7 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
 //! detail collapsed, active configuration, per-session web URL, last repo folder, UI language,
-//! which server to use (local / SSH), what closing the window does and each session's open
-//! detail items.
+//! which server to use (local / SSH), what closing the window does, each session's open
+//! detail items, the page chosen in the navigation rail and whether the session list is open.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,21 @@ pub enum CloseAction {
     Keep,
     /// Stop every session and the daemon, then exit.
     Stop,
+}
+
+/// A page of the navigation rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Page {
+    /// Session list, terminal and detail area.
+    #[default]
+    Work,
+    Accounts,
+    Configurations,
+    /// Repository folders the new-session dialog can browse.
+    Repos,
+    /// Language, server and closing behaviour.
+    Settings,
 }
 
 /// Which server the app connects to.
@@ -94,6 +109,11 @@ pub struct UiState {
     /// Open detail items per session id.
     #[serde(deserialize_with = "lenient")]
     pub detail: BTreeMap<String, DetailUi>,
+    /// Page shown next to the navigation rail.
+    #[serde(deserialize_with = "lenient")]
+    pub page: Page,
+    /// The session list column of the work page is open.
+    pub sessions_open: bool,
 }
 
 impl Default for UiState {
@@ -109,6 +129,8 @@ impl Default for UiState {
             on_close: CloseAction::Ask,
             server: ServerPref::Local,
             detail: BTreeMap::new(),
+            page: Page::Work,
+            sessions_open: true,
         }
     }
 }
@@ -171,6 +193,8 @@ mod tests {
             detail_collapsed: true,
             language: LanguagePref::Fixed(ide_i18n::Lang::Ko),
             on_close: CloseAction::Keep,
+            page: Page::Repos,
+            sessions_open: false,
             server: ServerPref::Ssh {
                 host: "me@devbox".into(),
                 command: "/opt/ide/ide-server --stdio".into(),
@@ -194,6 +218,7 @@ mod tests {
         let l = UiState::load(&base);
         assert_eq!(l.split_ratio, SPLIT_RANGE.1);
         assert!(l.web_urls.is_empty() && !l.detail_collapsed);
+        assert_eq!((l.page, l.sessions_open), (Page::Work, true));
         assert_eq!(l.language, LanguagePref::System);
         std::fs::write(
             UiState::file(&base),
@@ -211,14 +236,21 @@ mod tests {
         // Invalid values of the new fields fall back to their defaults only.
         std::fs::write(
             UiState::file(&base),
-            r#"{"on_close": "explode", "server": {"kind": "ftp"}, "split_ratio": 0.5}"#,
+            r#"{"on_close": "explode", "server": {"kind": "ftp"}, "page": "nowhere", "split_ratio": 0.5}"#,
         )
         .unwrap();
         let l = UiState::load(&base);
         assert_eq!(
-            (l.on_close, l.server, l.split_ratio),
-            (CloseAction::Ask, ServerPref::Local, 0.5)
+            (l.on_close, l.server, l.page, l.split_ratio),
+            (CloseAction::Ask, ServerPref::Local, Page::Work, 0.5)
         );
+        std::fs::write(
+            UiState::file(&base),
+            r#"{"page": "settings", "sessions_open": false}"#,
+        )
+        .unwrap();
+        let l = UiState::load(&base);
+        assert_eq!((l.page, l.sessions_open), (Page::Settings, false));
         std::fs::write(
             UiState::file(&base),
             r#"{"on_close": "stop", "server": {"kind": "ssh", "host": "h"}}"#,

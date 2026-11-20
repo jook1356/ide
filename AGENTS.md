@@ -21,12 +21,13 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   The app attaches to a running daemon or starts one (detached, no console window); closing the
   window keeps sessions running unless the user chooses otherwise (close dialog / Settings). The
   daemon exits after 10 min without clients and running sessions (`IDE_SERVER_IDLE_EXIT_SECS`, 0 =
-  never). Settings -> Server selects local or SSH; `IDE_REMOTE=ssh:<host>` overrides it.
+  never). The settings page (rail -> 설정 / Settings) selects local or SSH; `IDE_REMOTE=ssh:<host>` overrides it.
 - Test daemons: kill only your own, by PID (`<data>/ide-server.pid`), or end a script run with the
   app's stop-server action; never `taskkill /IM ide-server.exe` (it hits other data dirs' daemons).
 - App end-to-end test (in-app, no OS input): `IDE_APP_SCRIPT=1 IDE_DATA_DIR=<scratch>
   IDE_APP_TEST_REPO=<scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
-  Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture);
+  Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture, or a comma-separated list of
+  pause-name prefixes such as `ko_rail` to hold only those);
   results in `<evidence>/script.log` (`IDE_APP_SCRIPT_PAUSE_MS` lengthens the pauses;
   `IDE_APP_SCRIPT_ONLY=p2` runs only startup + the phase 2 file/changes/search checks + server
   stop). The phase 2 part creates its fixtures in the test repo on first use (TS import, Korean

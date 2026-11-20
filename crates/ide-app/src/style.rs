@@ -18,6 +18,17 @@ pub const GREEN: Color = color!(0x3fb950);
 pub const AMBER: Color = color!(0xd29922);
 pub const RED: Color = color!(0xf85149);
 
+// Navigation rail, from Hermes Desk's dark theme (its retuned Mantine `dark` scale and the solid
+// "violet light" accent): ground dark-9, border dark-6, hover dark-5, icons dark-0.
+pub const RAIL: Color = color!(0x0c0d10);
+pub const RAIL_BORDER: Color = color!(0x272930);
+pub const RAIL_HOVER: Color = color!(0x30323a);
+pub const RAIL_ICON: Color = color!(0xe6e7ec);
+/// `--mantine-color-violet-light` (oklch of violet-8 at L 0.37, 60 % chroma).
+pub const RAIL_ACTIVE: Color = color!(0x3f2e7f);
+/// `--mantine-color-violet-light-color` (violet-2).
+pub const RAIL_ACTIVE_ICON: Color = color!(0xd0bfff);
+
 pub const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
     ..Font::DEFAULT
@@ -104,6 +115,80 @@ pub fn icon(_: &Theme, status: button::Status) -> button::Style {
         button::Status::Hovered => flat(Some(HOVER), TEXT),
         button::Status::Pressed => flat(Some(SELECTED), TEXT),
         button::Status::Disabled => flat(None, FAINT),
+    }
+}
+
+/// A 44 x 44 navigation rail button: hover tint, the active page in violet.
+pub fn rail_link(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let bg = match (active, status) {
+            (true, _) => Some(RAIL_ACTIVE),
+            (false, button::Status::Hovered | button::Status::Pressed) => Some(RAIL_HOVER),
+            _ => None,
+        };
+        let mut s = flat(bg, RAIL_ICON);
+        s.border.radius = 8.0.into();
+        s
+    }
+}
+
+/// Accent bar on the rail's left edge beside the active page (Hermes Desk's `--accent-gradient`:
+/// 135deg, violet-5 to #6d8bff; rounded on the right).
+pub fn rail_accent(_: &Theme) -> container::Style {
+    let gradient = iced::gradient::Linear::new(iced::Radians(135f32.to_radians()))
+        .add_stop(0.0, color!(0x9775fa))
+        .add_stop(1.0, color!(0x6d8bff));
+    container::Style {
+        background: Some(Background::Gradient(gradient.into())),
+        border: Border {
+            radius: iced::border::Radius {
+                top_left: 0.0,
+                top_right: 3.0,
+                bottom_right: 3.0,
+                bottom_left: 0.0,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Tooltip of the navigation rail (Mantine's dark-scheme tooltip: light grey, dark text).
+pub fn rail_tip(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(color!(0xe9ecef).into()),
+        text_color: Some(Color::BLACK),
+        border: Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Small round status dot.
+pub fn dot(c: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(c.into()),
+        border: Border {
+            radius: 100.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// A section card of a page (bordered, rounded).
+pub fn card(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(PANEL.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
     }
 }
 

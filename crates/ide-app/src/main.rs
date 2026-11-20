@@ -17,6 +17,7 @@ mod app;
 mod detail;
 mod detail_view;
 mod i18n;
+mod icons;
 mod script;
 mod style;
 mod ui_state;
