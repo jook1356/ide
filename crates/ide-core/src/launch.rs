@@ -76,13 +76,41 @@ impl LaunchSpec {
         };
         vars.push(("TERM".into(), "xterm-256color".into()));
         vars.push(("COLORTERM".into(), "truecolor".into()));
+        let (program, args) = wrap_batch_file(program, Vec::new(), env)?;
         Ok(LaunchSpec {
             program,
-            args: Vec::new(),
+            args,
             cwd: session.worktree_path.clone(),
             env: vars,
         })
     }
+}
+
+/// Whether `program` is a Windows batch file (`.cmd` / `.bat`, case-insensitive), which
+/// `CreateProcess` cannot start directly.
+pub fn is_batch_file(program: &Path) -> bool {
+    program
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+/// On Windows, run batch files (npm shims such as `claude.cmd`) through the command
+/// interpreter: `cmd.exe /d /s /c <program> <args>`. Other programs, and every program on
+/// other platforms, are returned unchanged.
+fn wrap_batch_file(
+    program: PathBuf,
+    args: Vec<String>,
+    env: &LaunchEnv,
+) -> Result<(PathBuf, Vec<String>)> {
+    if !cfg!(windows) || !is_batch_file(&program) {
+        return Ok((program, args));
+    }
+    let cmd = cmd_exe(env)?;
+    let mut wrapped: Vec<String> = ["/d", "/s", "/c"].map(String::from).into();
+    wrapped.push(program.display().to_string());
+    wrapped.extend(args);
+    Ok((cmd, wrapped))
 }
 
 fn resolve(program: &str, env: &LaunchEnv) -> Result<PathBuf> {
@@ -109,6 +137,23 @@ fn shell_program(env: &LaunchEnv) -> Result<PathBuf> {
         return Ok(found);
     }
     resolve(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }, env)
+}
+
+/// `cmd.exe` for running batch files: `COMSPEC` when it names `cmd.exe`, else `cmd.exe` on `PATH`.
+fn cmd_exe(env: &LaunchEnv) -> Result<PathBuf> {
+    if let Some(p) = env.comspec.as_ref().filter(|p| !p.is_empty())
+        && Path::new(p)
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe"))
+        && let Some(found) = which_in(
+            &p.to_string_lossy(),
+            env.path.as_deref(),
+            env.pathext.as_deref(),
+        )
+    {
+        return Ok(found);
+    }
+    resolve("cmd.exe", env)
 }
 
 /// Find `program` on the current `PATH` (honouring `PATHEXT` on Windows).
@@ -244,9 +289,18 @@ mod tests {
             &env,
         )
         .unwrap();
-        assert_eq!(s.program, claude);
+        if cfg!(windows) {
+            // claude.cmd is a batch file: run through cmd.exe /d /s /c.
+            assert_eq!(s.program, shell);
+            assert_eq!(
+                s.args,
+                ["/d", "/s", "/c", &claude.display().to_string()].map(String::from)
+            );
+        } else {
+            assert_eq!(s.program, claude);
+            assert!(s.args.is_empty());
+        }
         assert_eq!(s.cwd, wt);
-        assert!(s.args.is_empty());
         assert_eq!(
             get(&s, "CLAUDE_CONFIG_DIR"),
             Some(prof.claude_config_dir.display().to_string().as_str())
@@ -261,7 +315,12 @@ mod tests {
             &env,
         )
         .unwrap();
-        assert_eq!(s.program, codex);
+        if cfg!(windows) {
+            assert_eq!(s.program, shell);
+            assert_eq!(s.args.last(), Some(&codex.display().to_string()));
+        } else {
+            assert_eq!(s.program, codex);
+        }
         assert_eq!(
             get(&s, "CODEX_HOME"),
             Some(prof.codex_home.display().to_string().as_str())
@@ -278,6 +337,55 @@ mod tests {
         assert_eq!(s.program, shell);
         assert!(get(&s, "CODEX_HOME").is_some() && get(&s, "CLAUDE_CONFIG_DIR").is_some());
         assert_eq!(get(&s, "COLORTERM"), Some("truecolor"));
+    }
+
+    #[test]
+    fn batch_files_wrapped_on_windows() {
+        assert!(is_batch_file(Path::new("C:/x/claude.CMD")));
+        assert!(is_batch_file(Path::new("run.bat")));
+        assert!(!is_batch_file(Path::new("codex.exe")));
+        assert!(!is_batch_file(Path::new("cmd")));
+
+        let t = TempDir::new("launch-batch");
+        let bin = t.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cmd = fake_exe(&bin, "cmd.exe");
+        let pwsh = fake_exe(&bin, "pwsh.exe");
+        let env = LaunchEnv {
+            path: Some(bin.clone().into_os_string()),
+            pathext: Some(".EXE;.BAT;.CMD".into()),
+            // A non-cmd COMSPEC is not used to run batch files.
+            comspec: Some(pwsh.clone().into()),
+            shell: None,
+        };
+        let prof = profile(&t.0);
+        let wt = t.0.join("wt");
+
+        // Only a .bat on PATH: wrapped in cmd.exe.
+        let bat = fake_exe(&bin, "codex.bat");
+        let s = LaunchSpec::for_session_with(
+            &sample_session(AgentKind::Codex, wt.clone()),
+            &prof,
+            &env,
+        )
+        .unwrap();
+        if cfg!(windows) {
+            assert_eq!(s.program, cmd);
+            assert_eq!(
+                s.args,
+                ["/d", "/s", "/c", &bat.display().to_string()].map(String::from)
+            );
+        } else {
+            assert!(s.args.is_empty());
+        }
+        // With an .exe next to it, the .exe wins (PATHEXT order) and runs directly.
+        let exe_file = fake_exe(&bin, "codex.exe");
+        let s = LaunchSpec::for_session_with(&sample_session(AgentKind::Codex, wt), &prof, &env)
+            .unwrap();
+        if cfg!(windows) {
+            assert_eq!(s.program, exe_file);
+            assert!(s.args.is_empty());
+        }
     }
 
     #[test]

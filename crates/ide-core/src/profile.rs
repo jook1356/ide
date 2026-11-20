@@ -17,11 +17,15 @@ pub const DEFAULT_PROFILE: &str = "default";
 pub struct Profile {
     /// Unique slug.
     pub name: String,
-    /// Directory used as `CLAUDE_CONFIG_DIR` (`profiles/<name>/claude`).
+    /// Directory used as `CLAUDE_CONFIG_DIR` (`profiles/<name>/claude`). Written to
+    /// `profiles.json` for compatibility, but recomputed from the data dir on load.
+    #[serde(default)]
     pub claude_config_dir: PathBuf,
-    /// Directory used as `CODEX_HOME` (`profiles/<name>/codex`).
+    /// Directory used as `CODEX_HOME` (`profiles/<name>/codex`). Recomputed on load too.
+    #[serde(default)]
     pub codex_home: PathBuf,
     /// Creation time, Unix seconds.
+    #[serde(default)]
     pub created_at: u64,
 }
 
@@ -40,12 +44,22 @@ pub struct ProfileStore {
 impl ProfileStore {
     /// Load `profiles.json` (creating the `default` profile if the file is missing or empty)
     /// and make sure every profile's directories exist.
+    ///
+    /// The directories stored in the file are ignored: they are recomputed from `paths`
+    /// (`profiles/<name>/{claude,codex}`), so a moved or copied data dir keeps working. The
+    /// fields are still written for backward compatibility. A stored name that is not a valid
+    /// slug is rejected ([`Error::InvalidName`]) since it is used as a directory name.
     pub fn open(paths: &Paths) -> Result<Self> {
         let file: ProfilesFile = read_json(&paths.profiles_file())?.unwrap_or_default();
         let mut store = Self {
             paths: paths.clone(),
-            profiles: file.profiles,
+            profiles: Vec::with_capacity(file.profiles.len()),
         };
+        for p in file.profiles {
+            validate_slug(&p.name)?;
+            let fresh = store.make_profile(&p.name, p.created_at);
+            store.profiles.push(fresh);
+        }
         if store.profiles.is_empty() {
             store.create(DEFAULT_PROFILE)?;
         } else {
@@ -220,6 +234,47 @@ mod tests {
         assert_eq!(reopened.list(), store.list());
         let names: Vec<_> = reopened.list().iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["default", "job"]);
+    }
+
+    #[test]
+    fn dirs_recomputed_from_paths_on_load() {
+        let t = TempDir::new("prof-moved");
+        // A file written by an older build / another data dir location, with stale absolute
+        // dirs and without the optional fields being meaningful.
+        let paths = Paths::new(t.0.join("moved"));
+        std::fs::create_dir_all(paths.root()).unwrap();
+        std::fs::write(
+            paths.profiles_file(),
+            r#"{"profiles":[{"name":"work","claude_config_dir":"Z:/old/profiles/work/claude","codex_home":"Z:/old/profiles/work/codex","created_at":7}]}"#,
+        )
+        .unwrap();
+        let store = ProfileStore::open(&paths).unwrap();
+        let p = store.get("work").unwrap();
+        assert_eq!(
+            p.claude_config_dir,
+            paths.profile_dir("work").join("claude")
+        );
+        assert_eq!(p.codex_home, paths.profile_dir("work").join("codex"));
+        assert_eq!(p.created_at, 7);
+        assert!(p.claude_config_dir.is_dir() && p.codex_home.is_dir());
+
+        // Still the same file format (fields present) after a save.
+        let mut store = store;
+        store.create("other").unwrap();
+        let json = std::fs::read_to_string(paths.profiles_file()).unwrap();
+        assert!(json.contains("\"claude_config_dir\""), "{json}");
+        assert!(!json.contains("Z:/old"), "{json}");
+
+        // Names are directory names: a bad one in the file is rejected.
+        std::fs::write(
+            paths.profiles_file(),
+            r#"{"profiles":[{"name":"../evil","claude_config_dir":"","codex_home":"","created_at":0}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ProfileStore::open(&paths),
+            Err(Error::InvalidName { .. })
+        ));
     }
 
     #[test]

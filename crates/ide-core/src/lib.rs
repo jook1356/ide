@@ -16,11 +16,24 @@
 //!
 //! let spec = LaunchSpec::for_session(&session, profiles.get(DEFAULT_PROFILE).unwrap())?;
 //! // hand `spec` to the PTY layer
+//!
+//! // Or, in one step (resolves the program before creating the worktree):
+//! let req = NewSession {
+//!     repo_path: "C:/src/my-repo".into(),
+//!     agent: AgentKind::Shell,
+//!     title: String::new(),
+//!     base_ref: String::new(),
+//! };
+//! let (session, spec) = create_session(&paths, profiles.get(DEFAULT_PROFILE).unwrap(), &req)?;
+//! sessions.upsert(session.clone())?;
+//! // ... later: stop the process, then
+//! delete_session(&paths, &mut sessions, &session.id, true)?;
 //! # Ok(()) }
 //! ```
 
 pub mod error;
 pub mod launch;
+pub mod ops;
 pub mod paths;
 pub mod profile;
 pub mod repo;
@@ -29,7 +42,10 @@ pub mod slug;
 pub mod worktree;
 
 pub use error::{Error, Result};
-pub use launch::{LaunchEnv, LaunchSpec, which, which_in};
+pub use launch::{LaunchEnv, LaunchSpec, is_batch_file, which, which_in};
+pub use ops::{
+    NewSession, create_session, create_session_with, delete_session, remove_session_files,
+};
 pub use paths::{DATA_DIR_ENV, Paths};
 pub use profile::{DEFAULT_PROFILE, Profile, ProfileStore};
 pub use repo::{Repo, same_path};
