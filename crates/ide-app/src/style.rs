@@ -140,14 +140,14 @@ pub fn choice(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
     }
 }
 
-pub fn tab(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+/// Side panel tab (the active one is underlined by the caller).
+pub fn tab_flat(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
-        let mut s = match (active, status) {
-            (true, _) => flat(Some(PANEL), TEXT),
-            (false, button::Status::Hovered) => flat(Some(HOVER), TEXT),
-            _ => flat(None, DIM),
+        let mut s = match status {
+            button::Status::Hovered | button::Status::Pressed => flat(Some(HOVER), TEXT),
+            _ => flat(None, if active { TEXT } else { DIM }),
         };
-        s.border.radius = iced::border::top(4.0);
+        s.border.radius = 0.0.into();
         s
     }
 }

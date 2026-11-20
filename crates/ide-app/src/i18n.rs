@@ -87,6 +87,32 @@ pub fn proto_error(e: &ProtoError) -> String {
         "internal" => tr::err_internal(&a("detail")),
         "message-too-large" => tr::err_message_too_large(),
         "path-denied" => tr::err_path_denied(&a("path")),
+        // phase 2: files, watch, search, git, definitions
+        "path-invalid" => tr::err_path_invalid(&a("path")),
+        "fs-not-found" => tr::err_fs_not_found(&a("path")),
+        "fs-exists" => tr::err_fs_exists(&a("path")),
+        "fs-permission" => tr::err_fs_permission(&a("path")),
+        "fs-dir-not-empty" => tr::err_fs_dir_not_empty(&a("path")),
+        "fs-not-a-dir" => tr::err_fs_not_a_dir(&a("path")),
+        "fs-is-a-dir" => tr::err_fs_is_a_dir(&a("path")),
+        "fs-io" => tr::err_fs_io(&a("path"), &a("detail")),
+        "fs-conflict" => tr::err_fs_conflict(&a("path")),
+        "fs-bad-encoding" => tr::err_fs_bad_encoding(&a("encoding")),
+        "fs-unencodable" => tr::err_fs_unencodable(&a("path"), &a("encoding")),
+        "watch-failed" => tr::err_watch_failed(&a("detail")),
+        "search-empty" => tr::err_search_empty(),
+        "search-bad-regex" => tr::err_search_bad_regex(&a("detail")),
+        "search-bad-glob" => tr::err_search_bad_glob(&a("glob"), &a("detail")),
+        "git-bad-rev" => tr::err_git_bad_rev(&a("rev")),
+        "git-no-base" => tr::err_git_no_base(&a("base")),
+        // `def.lookup` "nothing found" reasons (`DefResult::None`)
+        "def-invalid-position" => tr::err_def_invalid_position(),
+        "def-unsupported-file" => tr::err_def_unsupported_file(&a("path")),
+        "def-no-name" => tr::err_def_no_name(),
+        "def-external-module" => tr::err_def_external_module(&a("spec")),
+        "def-module-not-found" => tr::err_def_module_not_found(&a("spec")),
+        "def-external-name" => tr::err_def_external_name(&a("spec")),
+        "def-not-found" => tr::err_def_not_found(&a("name")),
         // client side
         "disconnected" => tr::err_disconnected(),
         "timeout" => tr::err_timeout(),
@@ -139,6 +165,14 @@ mod tests {
             "서버 오류가 발생했어요 (quota-exceeded): limit=3"
         );
         assert_eq!(status_label(RunState::Exited(Some(3))), "종료됨 (3)");
+        assert_eq!(
+            proto_error(&ProtoError::new("fs-conflict").arg("path", "a.ts")),
+            "읽은 뒤 디스크에서 파일이 바뀌었어요: a.ts"
+        );
+        assert_eq!(
+            proto_error(&ProtoError::new("def-not-found").arg("name", "foo")),
+            "정의를 찾지 못했어요: foo"
+        );
         assert_eq!(agent_label(Agent::Shell), "셸");
         set_language(Lang::En);
         assert!(proto_error(&e).contains("is not a git repository"));
@@ -155,6 +189,39 @@ mod tests {
             "Server error quota-exceeded: limit=3"
         );
         assert_eq!(status_label(RunState::Running), "running");
+        for id in [
+            "path-invalid",
+            "fs-not-found",
+            "fs-exists",
+            "fs-permission",
+            "fs-dir-not-empty",
+            "fs-not-a-dir",
+            "fs-is-a-dir",
+            "fs-io",
+            "fs-conflict",
+            "fs-bad-encoding",
+            "fs-unencodable",
+            "watch-failed",
+            "search-empty",
+            "search-bad-regex",
+            "search-bad-glob",
+            "git-bad-rev",
+            "git-no-base",
+            "bad-request",
+            "def-invalid-position",
+            "def-unsupported-file",
+            "def-no-name",
+            "def-external-module",
+            "def-module-not-found",
+            "def-external-name",
+            "def-not-found",
+        ] {
+            let e = ProtoError::new(id);
+            assert!(
+                !proto_error(&e).starts_with("Server error"),
+                "{id} has no message"
+            );
+        }
         assert_eq!(agent_label(Agent::Claude), "Claude");
     }
 }

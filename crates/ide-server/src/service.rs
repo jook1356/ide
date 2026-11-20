@@ -11,8 +11,8 @@ use ide_core::{
     SessionStore,
 };
 use ide_proto::{
-    Agent, NewSession, Notify, ProfileInfo, ProtoError, Request, Response, SessionInfo,
-    SessionState, TextSearch, UserInfo,
+    Agent, BrowseConfig, NewSession, Notify, ProfileInfo, ProtoError, Request, Response,
+    SessionInfo, SessionState, TextSearch, UserInfo,
 };
 use tokio::sync::broadcast;
 
@@ -340,31 +340,81 @@ impl UserCtx {
         if let Some(r) = &self.browse_roots {
             return PathJail::new(r.iter().cloned());
         }
-        let mut roots = Vec::new();
-        if let Some(h) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .filter(|h| !h.is_empty())
-        {
-            roots.push(PathBuf::from(h));
-        }
+        let mut roots: Vec<PathBuf> = home_dir().into_iter().collect();
+        roots.extend(self.read_server_config().1.into_iter().map(PathBuf::from));
+        PathJail::new(roots)
+    }
+
+    /// `<data>/server.json` as a JSON object (empty if missing or invalid) and its
+    /// `browse_roots` strings.
+    fn read_server_config(&self) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
         let cfg = self.paths.root().join(SERVER_CONFIG_FILE);
-        if let Ok(text) = std::fs::read_to_string(&cfg) {
-            match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(v) => {
-                    for r in v
-                        .get("browse_roots")
-                        .and_then(|r| r.as_array())
-                        .into_iter()
-                        .flatten()
-                    {
-                        if let Some(p) = r.as_str() {
-                            roots.push(PathBuf::from(p));
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("{}: {e}", cfg.display()),
+        let Ok(text) = std::fs::read_to_string(&cfg) else {
+            return Default::default();
+        };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(map)) => {
+                let roots = map
+                    .get("browse_roots")
+                    .and_then(|r| r.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r.as_str().map(str::to_owned))
+                    .collect();
+                (map, roots)
+            }
+            Ok(_) => Default::default(),
+            Err(e) => {
+                tracing::warn!("{}: {e}", cfg.display());
+                Default::default()
             }
         }
-        PathJail::new(roots)
+    }
+
+    /// `browse.config`: the home dir and the extra roots saved in `server.json`.
+    pub fn browse_config(&self) -> BrowseConfig {
+        BrowseConfig {
+            home: home_dir().map(|h| h.display().to_string()),
+            roots: self.read_server_config().1,
+        }
+    }
+
+    /// `browse.set_roots`: validate every root (absolute, existing folder, not a filesystem
+    /// root; canonicalized, duplicates dropped) and store them in `server.json` (other keys
+    /// are kept; the file is created if missing).
+    pub fn set_browse_roots(&self, roots: Vec<String>) -> Result<BrowseConfig, ProtoError> {
+        const MAX_ROOTS: usize = 64;
+        if roots.len() > MAX_ROOTS {
+            return Err(ProtoError::new("bad-request").arg("method", "browse.set_roots"));
+        }
+        let mut clean: Vec<String> = Vec::new();
+        for r in &roots {
+            let p = validate_browse_root(r)?.display().to_string();
+            if !clean.contains(&p) {
+                clean.push(p);
+            }
+        }
+        let _g = self.write_lock.lock().unwrap();
+        let (mut map, _) = self.read_server_config();
+        map.insert(
+            "browse_roots".into(),
+            serde_json::Value::Array(clean.iter().cloned().map(Into::into).collect()),
+        );
+        let dir = self.paths.root();
+        let path = dir.join(SERVER_CONFIG_FILE);
+        let tmp = dir.join(format!("{SERVER_CONFIG_FILE}.tmp"));
+        let io = |e: std::io::Error| {
+            ProtoError::new("fs-io")
+                .arg("path", path.display().to_string())
+                .arg("detail", e.to_string())
+        };
+        let bytes = serde_json::to_vec_pretty(&serde_json::Value::Object(map))
+            .map_err(|e| ProtoError::new("internal").arg("detail", e.to_string()))?;
+        std::fs::create_dir_all(dir).map_err(io)?;
+        std::fs::write(&tmp, bytes).map_err(io)?;
+        std::fs::rename(&tmp, &path).map_err(io)?;
+        self.audit("browse.set_roots", &clean.join(";"));
+        Ok(self.browse_config())
     }
 
     /// Start (or join) the watcher of a session for one connection.
@@ -661,6 +711,10 @@ impl UserCtx {
             Request::BrowseList { abs_dir } => {
                 fsops::browse(&self.browse_jail(), &abs_dir).map(Response::Browse)
             }
+            Request::BrowseConfig => Ok(Response::BrowseConfig(self.browse_config())),
+            Request::BrowseSetRoots { roots } => {
+                self.set_browse_roots(roots).map(Response::BrowseConfig)
+            }
             Request::SearchFiles {
                 session,
                 query,
@@ -811,6 +865,50 @@ impl UserCtx {
             }
         }
     }
+}
+
+/// The user's home dir (`USERPROFILE` / `HOME`), always a browse root.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// A browse root as given by the client: an absolute path (no `..`, no NUL/control
+/// characters) of an existing folder that is not a filesystem root. Returns it canonical.
+pub fn validate_browse_root(raw: &str) -> Result<PathBuf, ProtoError> {
+    use std::path::Component;
+    let s = raw.trim();
+    let invalid = || ProtoError::new("path-invalid").arg("path", raw);
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let p = std::path::Path::new(s);
+    if !p.is_absolute() {
+        return Err(invalid());
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(ProtoError::new("path-denied").arg("path", raw));
+    }
+    let canon = crate::jail::canonicalize(p).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ProtoError::new("fs-not-found").arg("path", raw),
+        std::io::ErrorKind::PermissionDenied => ProtoError::new("fs-permission").arg("path", raw),
+        _ => ProtoError::new("fs-io")
+            .arg("path", raw)
+            .arg("detail", e.to_string()),
+    })?;
+    if !canon.is_dir() {
+        return Err(ProtoError::new("fs-not-a-dir").arg("path", raw));
+    }
+    // A whole drive (`C:\`, `/`, `\\server\share`) would make the jail meaningless.
+    let normal = canon
+        .components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .count();
+    if normal == 0 {
+        return Err(ProtoError::new("path-denied").arg("path", raw));
+    }
+    Ok(canon)
 }
 
 /// Map an `ide-core` error to a wire error (same ids, named args).

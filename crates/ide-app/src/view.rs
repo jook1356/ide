@@ -8,11 +8,11 @@ use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mo
 use ide_client::Agent;
 use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
-use ide_web::WebViewWidget;
 
 use crate::app::{
-    AGENTS, App, Conn, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, PROFILE_NAME_ID, RENAME_ID,
-    RunState, SIDEBAR_W, SSH_HOST_ID, TERM_ID, URL_ID, path_name, same_path,
+    AGENTS, App, Conn, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, NewForm, PROFILE_NAME_ID,
+    QuickForm, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID, TERM_ID, path_name,
+    same_path,
 };
 use crate::i18n::{self, tr};
 use crate::style;
@@ -29,11 +29,6 @@ const I_RESTART: &str = "↻";
 const I_STOP: &str = "■";
 const I_EDIT: &str = "✎";
 const I_DELETE: &str = "✕";
-const I_BACK: &str = "←";
-const I_FORWARD: &str = "→";
-const I_RELOAD: &str = "⟳";
-const I_COLLAPSE: &str = "»";
-const I_EXPAND: &str = "«";
 const I_DOT: &str = "●";
 const I_RING: &str = "○";
 
@@ -55,7 +50,7 @@ fn status_glyph(state: RunState) -> (&'static str, Color) {
     }
 }
 
-fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
+pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
     tooltip(
         content.into(),
         container(text(label).size(12))
@@ -66,7 +61,7 @@ fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
     .boxed()
 }
 
-fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: String) -> El<'a> {
+pub(crate) fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: String) -> El<'a> {
     let b = button(
         text(glyph)
             .size(13)
@@ -101,7 +96,8 @@ impl App {
                 .style(style::bg(style::BORDER)),
             self.centre(),
             self.divider(),
-            self.detail(),
+            self.detail_area(),
+            self.side_area(),
         ]
         .height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
@@ -535,93 +531,172 @@ impl App {
         .boxed()
     }
 
-    // ------------------------------------------------------------------ detail
-
-    fn detail(&self) -> El<'_> {
-        if self.ui.detail_collapsed {
-            return container(
-                column![icon_button(
-                    I_EXPAND,
-                    Some(Message::ToggleDetail),
-                    tr::show_detail()
-                )]
-                .padding([6, 2]),
-            )
-            .width(30)
-            .height(Fill)
-            .style(style::bg(style::HEADER))
-            .boxed();
-        }
-        let portion = 1000u16.saturating_sub((self.ui.split_ratio * 1000.0).round() as u16);
-        let tabs = container(
-            row![
-                button(text(tr::tab_web()).size(12))
-                    .padding([5, 14])
-                    .style(style::tab(true)),
-                space().width(Fill),
-                icon_button(I_COLLAPSE, Some(Message::ToggleDetail), tr::hide_detail()),
-            ]
-            .align_y(Alignment::End),
-        )
-        .padding(iced::Padding {
-            top: 4.0,
-            right: 6.0,
-            bottom: 0.0,
-            left: 6.0,
-        })
-        .width(Fill)
-        .style(style::bg(style::HEADER));
-
-        let content: El<'_> = match self.selected_live() {
-            Some(live) => {
-                let bar = row![
-                    icon_button(
-                        I_BACK,
-                        live.can_back.then_some(Message::WebBack),
-                        tr::web_back()
-                    ),
-                    icon_button(
-                        I_FORWARD,
-                        live.can_forward.then_some(Message::WebForward),
-                        tr::web_forward()
-                    ),
-                    icon_button(I_RELOAD, Some(Message::WebReload), tr::web_reload()),
-                    text_input(tr::url_placeholder(), &live.url_input)
-                        .id(URL_ID)
-                        .on_input(Message::UrlInput)
-                        .on_submit(Message::UrlSubmit)
-                        .size(12)
-                        .padding([4, 8])
-                        .style(style::input)
-                        .width(Fill),
-                ]
-                .spacing(4)
-                .padding([6, 8])
-                .align_y(Alignment::Center);
-                let page: El<'_> = match &live.web {
-                    // Under a modal the page stays visible as a frozen, dimmed snapshot of its
-                    // last frame (no input reaches it, CEF stops rendering); the backdrop and
-                    // the dialog are drawn above it (see docs, "modal z-order").
-                    Some(w) => WebViewWidget::new(w)
-                        .width(Fill)
-                        .height(Fill)
-                        .dimmed(self.web_covered())
-                        .into(),
-                    None => container(text(live.error.as_deref().unwrap_or("")).size(12))
-                        .center(Fill)
-                        .boxed(),
-                };
-                column![bar, page].boxed()
-            }
-            None => container(text(tr::no_session()).size(13).color(style::DIM))
-                .center(Fill)
-                .boxed(),
+    /// The new-session dialog's folder browser (folders on the server).
+    fn folder_browser<'a>(&'a self, f: &'a NewForm) -> El<'a> {
+        let Some(b) = &f.browser else {
+            return space().height(0).boxed();
         };
-        container(column![tabs, content])
-            .width(FillPortion(portion.max(1)))
-            .height(Fill)
-            .style(style::bg(style::PANEL))
+        let current = b.listing.as_ref();
+        let up = current.and_then(|l| l.parent.clone());
+        let roots = pick_list(
+            // The innermost root containing the listed folder.
+            current.and_then(|l| {
+                b.roots
+                    .iter()
+                    .filter(|r| l.path.starts_with(r.as_str()))
+                    .max_by_key(|r| r.len())
+                    .cloned()
+            }),
+            b.roots.clone(),
+            |s: &String| s.clone(),
+        )
+        .on_select(Message::BrowseGo)
+        .text_size(12)
+        .padding([4, 8])
+        .width(Fill);
+        let head = row![
+            icon_button("↑", up.map(Message::BrowseGo), tr::browse_up()),
+            roots,
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let mut list: Column<El<'a>> = Column::new().spacing(1);
+        if let Some(l) = current {
+            list = list.push(
+                text(l.path.as_str())
+                    .size(11)
+                    .font(style::MONO)
+                    .color(if l.is_git_repo {
+                        style::GREEN
+                    } else {
+                        style::DIM
+                    })
+                    .wrapping(text::Wrapping::None)
+                    .ellipsis(text::Ellipsis::Start)
+                    .boxed(),
+            );
+            if l.entries.is_empty() {
+                list = list.push(
+                    text(tr::browse_empty())
+                        .size(12)
+                        .color(style::FAINT)
+                        .boxed(),
+                );
+            }
+            for e in &l.entries {
+                let mut r = row![
+                    ide_views::icons::folder_icon(
+                        e.is_git_repo,
+                        if e.is_git_repo {
+                            style::GREEN
+                        } else {
+                            style::DIM
+                        }
+                    ),
+                    text(e.name.as_str())
+                        .size(12)
+                        .width(Fill)
+                        .wrapping(text::Wrapping::None)
+                        .ellipsis(text::Ellipsis::End),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                if e.is_git_repo {
+                    r = r.push(tip(
+                        container(text("git").size(10).font(style::BOLD).color(style::GREEN))
+                            .padding([0, 5])
+                            .style(|_| container::Style {
+                                border: iced::Border {
+                                    color: style::GREEN,
+                                    width: 1.0,
+                                    radius: 3.0.into(),
+                                },
+                                ..Default::default()
+                            })
+                            .boxed(),
+                        tr::browse_git(),
+                    ));
+                }
+                list = list.push(
+                    button(r)
+                        .padding([3, 6])
+                        .width(Fill)
+                        .style(style::row(same_path(&e.path, &f.repo)))
+                        .on_press(Message::BrowseGo(e.path.clone()))
+                        .boxed(),
+                );
+            }
+        } else if b.loading {
+            list = list.push(text(tr::tree_loading()).size(12).color(style::DIM).boxed());
+        }
+        let mut c = column![head, scrollable(list).height(200)].spacing(6);
+        if let Some(e) = &b.error {
+            c = c.push(error_box(e));
+        }
+        container(c)
+            .padding(8)
+            .width(Fill)
+            .style(|_| container::Style {
+                background: Some(style::SIDEBAR.into()),
+                border: iced::Border {
+                    color: style::BORDER,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
             .boxed()
+    }
+
+    /// Ctrl+P: files of the selected session by name.
+    fn quick_open_card<'a>(&'a self, f: &'a QuickForm) -> El<'a> {
+        let mut list: Column<El<'a>> = Column::new().spacing(1);
+        for (i, m) in f.results.iter().enumerate() {
+            let name = crate::detail::file_name(&m.path);
+            list = list.push(
+                button(
+                    row![
+                        ide_views::icons::file_icon(name),
+                        text(name).size(13).wrapping(text::Wrapping::None),
+                        text(crate::detail::parent(&m.path).to_owned())
+                            .size(11)
+                            .color(style::DIM)
+                            .wrapping(text::Wrapping::None)
+                            .ellipsis(text::Ellipsis::Start)
+                            .width(Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([4, 8])
+                .width(Fill)
+                .style(style::row(i == f.selected))
+                .on_press(Message::QuickPick(m.path.clone()))
+                .boxed(),
+            );
+        }
+        if f.results.is_empty() && !f.query.is_empty() {
+            list = list.push(
+                container(text(tr::quick_open_none()).size(12).color(style::DIM))
+                    .padding(8)
+                    .boxed(),
+            );
+        }
+        let mut c = column![
+            text_input(tr::quick_open_placeholder(), &f.query)
+                .id(crate::detail::QUICK_ID)
+                .on_input(Message::QuickInput)
+                .on_submit(Message::QuickSubmit)
+                .size(14)
+                .padding([7, 10])
+                .style(style::input),
+            scrollable(list).height(Length::Shrink),
+        ]
+        .spacing(8);
+        if let Some(e) = &f.error {
+            c = c.push(error_box(e));
+        }
+        container(c).width(560).boxed()
     }
 
     /// A modal covers the window: the web view shows a dimmed, frozen snapshot (see
@@ -664,12 +739,20 @@ impl App {
                             .padding([6, 8])
                             .style(style::input)
                             .width(Fill),
-                        button(text(tr::browse()).size(13))
-                            .padding([6, 12])
-                            .style(style::secondary)
-                            .on_press(Message::NewBrowse),
+                        tip(
+                            button(ide_views::icons::folder_icon(
+                                f.browser.is_some(),
+                                style::DIM
+                            ))
+                            .padding([7, 8])
+                            .style(style::choice(f.browser.is_some()))
+                            .on_press_maybe(self.when_connected(Message::NewBrowse))
+                            .boxed(),
+                            tr::browse()
+                        ),
                     ]
                     .spacing(6),
+                    self.folder_browser(f),
                     label(tr::profile_label()),
                     pick_list(Some(f.profile.clone()), names, |s: &String| s.clone())
                         .on_select(Message::NewProfile)
@@ -876,6 +959,111 @@ impl App {
                 );
                 c.width(560).boxed()
             }
+            Modal::QuickOpen(f) => self.quick_open_card(f),
+            Modal::DefPicker(f) => {
+                let mut list = Column::new().spacing(2);
+                for (i, t) in f.targets.iter().enumerate() {
+                    list = list.push(
+                        button(
+                            column![
+                                row![
+                                    ide_views::icons::file_icon(crate::detail::file_name(&t.path)),
+                                    text(format!("{}:{}", t.path, t.line)).size(12),
+                                ]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                                text(t.preview.as_str())
+                                    .size(11)
+                                    .font(style::MONO)
+                                    .color(style::DIM)
+                                    .wrapping(text::Wrapping::None)
+                                    .ellipsis(text::Ellipsis::End),
+                            ]
+                            .spacing(2),
+                        )
+                        .padding([5, 8])
+                        .width(Fill)
+                        .style(style::row(false))
+                        .on_press(Message::DefPick(i))
+                        .boxed(),
+                    );
+                }
+                column![
+                    text(tr::def_pick_title(&f.name)).size(16).font(style::BOLD),
+                    scrollable(list).height(Length::Shrink),
+                ]
+                .spacing(10)
+                .width(560)
+                .boxed()
+            }
+            Modal::DeleteEntry(f) => {
+                let name = crate::detail::file_name(&f.path);
+                let mut c = column![
+                    text(tr::delete_entry_title(name))
+                        .size(18)
+                        .font(style::BOLD),
+                    text(if f.is_dir {
+                        tr::delete_folder_body()
+                    } else {
+                        tr::delete_entry_body()
+                    })
+                    .size(13)
+                    .color(style::DIM),
+                    text(f.path.as_str())
+                        .size(11)
+                        .font(style::MONO)
+                        .color(style::FAINT),
+                ]
+                .spacing(10);
+                if let Some(e) = &f.error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(
+                    row![
+                        space().width(Fill),
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                        button(text(if f.busy { tr::deleting() } else { tr::delete() }).size(13))
+                            .padding([6, 14])
+                            .style(style::danger)
+                            .on_press_maybe(
+                                (!f.busy)
+                                    .then_some(Message::DeleteEntryConfirm)
+                                    .filter(|_| self.connected())
+                            ),
+                    ]
+                    .spacing(8)
+                    .boxed(),
+                );
+                c.width(460).boxed()
+            }
+            Modal::CloseDirty(f) => column![
+                text(tr::unsaved_title(crate::detail::file_name(&f.path)))
+                    .size(18)
+                    .font(style::BOLD),
+                text(tr::unsaved_body()).size(13).color(style::DIM),
+                row![
+                    button(text(tr::cancel()).size(13))
+                        .padding([6, 14])
+                        .style(style::secondary)
+                        .on_press(Message::CloseModal),
+                    space().width(Fill),
+                    button(text(tr::dont_save()).size(13))
+                        .padding([6, 14])
+                        .style(style::danger)
+                        .on_press(Message::CloseDirtyDiscard),
+                    button(text(tr::save()).size(13))
+                        .padding([6, 14])
+                        .style(style::primary)
+                        .on_press_maybe(self.when_connected(Message::CloseDirtySave)),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10)
+            .width(460)
+            .boxed(),
             Modal::Settings(f) => {
                 let online = self.connected();
                 let mut list: Column<El<'_>> = Column::new().spacing(4);
@@ -1037,6 +1225,78 @@ impl App {
                     .align_y(Alignment::Center)
                     .boxed(),
                 );
+                c = c.push(space().height(4).boxed());
+                c = c.push(label(tr::browse_roots_label()));
+                c = c.push(
+                    text(tr::browse_roots_note())
+                        .size(12)
+                        .color(style::DIM)
+                        .boxed(),
+                );
+                if let Some(cfg) = &f.roots {
+                    let mut list: Column<El<'_>> = Column::new().spacing(4);
+                    if let Some(h) = &cfg.home {
+                        list = list.push(
+                            container(
+                                row![
+                                    ide_views::icons::folder_icon(false, style::DIM),
+                                    text(h.as_str()).size(12).width(Fill),
+                                    text(tr::browse_home()).size(11).color(style::DIM),
+                                ]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                            )
+                            .padding([5, 8])
+                            .style(style::bg(style::HEADER))
+                            .boxed(),
+                        );
+                    }
+                    for (i, r) in cfg.roots.iter().enumerate() {
+                        list = list.push(
+                            container(
+                                row![
+                                    ide_views::icons::folder_icon(false, style::DIM),
+                                    text(r.as_str()).size(12).width(Fill),
+                                    icon_button(
+                                        I_DELETE,
+                                        (online && !f.roots_busy).then_some(Message::RootRemove(i)),
+                                        tr::remove()
+                                    ),
+                                ]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                            )
+                            .padding([2, 8])
+                            .style(style::bg(style::HEADER))
+                            .boxed(),
+                        );
+                    }
+                    c = c.push(list.boxed());
+                }
+                c = c.push(
+                    row![
+                        text_input(tr::browse_root_placeholder(), &f.root_input)
+                            .id(ROOT_INPUT_ID)
+                            .on_input(Message::RootInput)
+                            .on_submit(Message::RootAdd)
+                            .size(13)
+                            .padding([5, 8])
+                            .style(style::input)
+                            .width(Fill),
+                        button(text(tr::add()).size(13))
+                            .padding([5, 12])
+                            .style(style::secondary)
+                            .on_press_maybe(
+                                (online && !f.roots_busy && !f.root_input.trim().is_empty())
+                                    .then_some(Message::RootAdd)
+                            ),
+                    ]
+                    .spacing(6)
+                    .boxed(),
+                );
+                if let Some(e) = &f.roots_error {
+                    c = c.push(error_box(e));
+                }
                 c = c.push(label(tr::on_close_label()));
                 let on_close = [
                     (CloseAction::Ask, tr::on_close_ask()),
@@ -1064,7 +1324,9 @@ impl App {
                     ]
                     .boxed(),
                 );
-                c.width(480).boxed()
+                // The settings grew taller than small windows: scroll inside the card.
+                // Shrink = the content's height, capped by the window (scrolls when taller).
+                scrollable(c.width(480)).height(Length::Shrink).boxed()
             }
         };
         opaque(

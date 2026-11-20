@@ -1,0 +1,1800 @@
+//! The per-session detail area (Hermes Desk `DetailTabs` + `ChangesPanel`): open items (the
+//! session's web page, files, diffs) shown one at a time under a header with an "open items"
+//! switcher, and a side panel with Changes / Explore / Search.
+//!
+//! All state lives in [`Detail`], one per session ([`crate::app::Live::detail`]); switching
+//! sessions switches the detail area. Everything on disk is reached through the server
+//! (`fs.*`, `git.*`, `search.*`, `def.lookup`); the visible session is watched (`fs.watch`) and
+//! refreshed from `FsChanged` / `GitChanged`.
+
+use std::collections::{BTreeSet, HashSet};
+use std::time::{Duration, Instant};
+
+use iced::Task;
+use ide_client::{
+    ChangeKind, Client, DefResult, DiffAgainst, EntryKind, FileContent, FsEntry, ProtoError,
+    SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
+};
+use ide_views::{
+    ChangeEntry, ChangeGroup, ChangesEvent, ChangesList, ChangesMessage, CodeEvent, CodeMessage,
+    CodeView, DiffMode, DiffView, DiffViewEvent, DiffViewMessage, FileTree, TreeEntry, TreeEvent,
+    TreeMessage,
+};
+
+use crate::app::{App, Message, Modal};
+use crate::i18n::{self, tr};
+use crate::ui_state::DetailUi;
+
+/// Width of the side panel (Changes / Explore / Search).
+pub const SIDE_W: f32 = 290.0;
+/// How long a transient message stays.
+pub const TOAST_FOR: Duration = Duration::from_secs(5);
+/// Widget ids.
+pub const SEARCH_ID: &str = "ide-search";
+pub const QUICK_ID: &str = "ide-quick-open";
+/// Most quick-open results.
+const QUICK_MAX: u32 = 60;
+/// Largest file the editor opens (bytes; bigger files show the first part read-only).
+const READ_MAX: u64 = 4 * 1024 * 1024;
+
+/// Side panel tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideTab {
+    Changes,
+    Explore,
+    Search,
+}
+
+impl SideTab {
+    pub fn code(self) -> &'static str {
+        match self {
+            SideTab::Changes => "changes",
+            SideTab::Explore => "explore",
+            SideTab::Search => "search",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "changes" => SideTab::Changes,
+            "search" => SideTab::Search,
+            _ => SideTab::Explore,
+        }
+    }
+}
+
+/// Identity of an open item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ItemKey {
+    /// The session's web page (always open).
+    Web,
+    /// A file in the editor.
+    File(String),
+    /// A changed file's diff (`staged` = index vs HEAD, else working tree vs index).
+    Diff { staged: bool, path: String },
+    /// A file on disk compared with the unsaved buffer (save conflict).
+    Compare(String),
+}
+
+impl ItemKey {
+    /// Stable string for `ui.json` (`Compare` is not remembered).
+    pub fn encode(&self) -> Option<String> {
+        Some(match self {
+            ItemKey::Web => "web".into(),
+            ItemKey::File(p) => format!("file:{p}"),
+            ItemKey::Diff { staged: true, path } => format!("diff:s:{path}"),
+            ItemKey::Diff {
+                staged: false,
+                path,
+            } => format!("diff:w:{path}"),
+            ItemKey::Compare(_) => return None,
+        })
+    }
+
+    pub fn decode(s: &str) -> Option<Self> {
+        if s == "web" {
+            return Some(ItemKey::Web);
+        }
+        if let Some(p) = s.strip_prefix("file:") {
+            return (!p.is_empty()).then(|| ItemKey::File(p.into()));
+        }
+        let (staged, p) = if let Some(p) = s.strip_prefix("diff:s:") {
+            (true, p)
+        } else {
+            (false, s.strip_prefix("diff:w:")?)
+        };
+        (!p.is_empty()).then(|| ItemKey::Diff {
+            staged,
+            path: p.into(),
+        })
+    }
+}
+
+/// A bar over an open file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBar {
+    /// Saving failed: the file changed on disk since it was read.
+    Conflict,
+    /// The file changed on disk while the buffer has unsaved edits.
+    ChangedOnDisk,
+    /// The file was deleted on disk.
+    Deleted,
+}
+
+/// An open file.
+pub struct FileItem {
+    pub path: String,
+    pub view: Option<CodeView>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+    pub size: u64,
+    /// Version the buffer was read / saved at (`fs.write` conflict check).
+    pub version: Option<String>,
+    pub encoding: Option<TextEncoding>,
+    pub bar: Option<FileBar>,
+    pub saving: bool,
+    /// Close the item once the save in flight succeeded.
+    pub close_after_save: bool,
+    /// Go to (line, column) once loaded.
+    pub pending_goto: Option<(usize, usize)>,
+}
+
+impl FileItem {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.into(),
+            view: None,
+            loading: false,
+            error: None,
+            binary: false,
+            truncated: false,
+            size: 0,
+            version: None,
+            encoding: None,
+            bar: None,
+            saving: false,
+            close_after_save: false,
+            pending_goto: None,
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.view.as_ref().is_some_and(CodeView::is_dirty)
+    }
+}
+
+/// An open diff (or a disk-vs-buffer comparison).
+pub struct DiffItem {
+    pub view: Option<DiffView>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
+// A handful of items per session: boxing the file variant would only add indirection.
+#[allow(clippy::large_enum_variant)]
+pub enum Item {
+    Web,
+    File(FileItem),
+    Diff(DiffItem),
+}
+
+/// Text search of the side panel.
+#[derive(Default)]
+pub struct SearchState {
+    pub query: String,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+    /// Results grouped by file, in arrival order.
+    pub groups: Vec<(String, Vec<SearchMatch>)>,
+    pub collapsed: HashSet<String>,
+    pub running: bool,
+    pub summary: Option<SearchSummary>,
+    pub error: Option<String>,
+    /// Incremented per search; events of older searches are dropped.
+    pub generation: u64,
+    handle: Option<iced::task::Handle>,
+}
+
+impl SearchState {
+    pub fn hit_count(&self) -> usize {
+        self.groups.iter().map(|(_, h)| h.len()).sum()
+    }
+
+    fn stop(&mut self) {
+        // Aborting drops the `SearchStream`, which cancels the search on the server.
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+        self.running = false;
+    }
+
+    fn add(&mut self, hits: Vec<SearchMatch>) {
+        for h in hits {
+            match self.groups.iter_mut().rev().find(|(p, _)| *p == h.path) {
+                Some((_, v)) => v.push(h),
+                None => self.groups.push((h.path.clone(), vec![h])),
+            }
+        }
+    }
+}
+
+/// The detail area of one session.
+pub struct Detail {
+    pub items: Vec<(ItemKey, Item)>,
+    pub active: ItemKey,
+    pub side: SideTab,
+    pub tree: FileTree,
+    /// Folders listed into the tree (re-listed on changes).
+    pub loaded_dirs: BTreeSet<String>,
+    pub root_loading: bool,
+    pub tree_error: Option<String>,
+    pub changes: ChangesList,
+    pub status_loaded: bool,
+    pub status_error: Option<String>,
+    pub search: SearchState,
+    pub diff_mode: DiffMode,
+    /// `fs.watch` requested on the current client.
+    pub watched: bool,
+    /// Shown state may be outdated (not watched for a while, reconnect): refresh when shown.
+    pub stale: bool,
+    pub toast: Option<(String, Instant)>,
+}
+
+impl Detail {
+    pub fn new(saved: Option<&DetailUi>) -> Self {
+        let mut items: Vec<(ItemKey, Item)> = vec![(ItemKey::Web, Item::Web)];
+        let mut active = ItemKey::Web;
+        let mut side = SideTab::Explore;
+        if let Some(ui) = saved {
+            for k in ui.open.iter().filter_map(|s| ItemKey::decode(s)) {
+                if items.iter().any(|(x, _)| *x == k) {
+                    continue;
+                }
+                let item = match &k {
+                    ItemKey::Web | ItemKey::Compare(_) => continue,
+                    ItemKey::File(p) => Item::File(FileItem::new(p)),
+                    ItemKey::Diff { .. } => Item::Diff(DiffItem {
+                        view: None,
+                        loading: false,
+                        error: None,
+                    }),
+                };
+                items.push((k, item));
+            }
+            if let Some(a) = ui.active.as_deref().and_then(ItemKey::decode)
+                && items.iter().any(|(k, _)| *k == a)
+            {
+                active = a;
+            }
+            side = SideTab::parse(&ui.side);
+        }
+        Self {
+            items,
+            active,
+            side,
+            tree: FileTree::new(),
+            loaded_dirs: BTreeSet::new(),
+            root_loading: false,
+            tree_error: None,
+            changes: ChangesList::new(),
+            status_loaded: false,
+            status_error: None,
+            search: SearchState::default(),
+            diff_mode: DiffMode::Unified,
+            watched: false,
+            stale: false,
+            toast: None,
+        }
+    }
+
+    pub fn to_ui(&self) -> DetailUi {
+        DetailUi {
+            open: self.items.iter().filter_map(|(k, _)| k.encode()).collect(),
+            active: self.active.encode(),
+            side: self.side.code().into(),
+        }
+    }
+
+    pub fn item(&self, key: &ItemKey) -> Option<&Item> {
+        self.items.iter().find(|(k, _)| k == key).map(|(_, i)| i)
+    }
+
+    pub fn item_mut(&mut self, key: &ItemKey) -> Option<&mut Item> {
+        self.items
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, i)| i)
+    }
+
+    pub fn file(&self, path: &str) -> Option<&FileItem> {
+        match self.item(&ItemKey::File(path.into())) {
+            Some(Item::File(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn file_mut(&mut self, path: &str) -> Option<&mut FileItem> {
+        match self.item_mut(&ItemKey::File(path.into())) {
+            Some(Item::File(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn active_item(&self) -> Option<&Item> {
+        self.item(&self.active)
+    }
+
+    /// Show a message for a few seconds.
+    pub fn toast(&mut self, msg: String) {
+        self.toast = Some((msg, Instant::now()));
+    }
+}
+
+/// What a file read is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadReason {
+    /// Opening the item.
+    Open,
+    /// The file may have changed on disk.
+    Refresh,
+    /// Drop the buffer and take the disk content ("reload" on a bar).
+    Force,
+    /// Compare the disk content with the buffer.
+    Compare,
+}
+
+/// A finished `fs.*` mutation from the tree.
+#[derive(Debug, Clone)]
+pub enum FsOp {
+    Created { path: String, is_dir: bool },
+    Renamed { from: String, to: String },
+    Deleted { path: String },
+}
+
+/// One item of the search task's stream.
+#[derive(Debug, Clone)]
+pub enum SearchItem {
+    Event(SearchEvent),
+    Failed(ProtoError),
+    /// The connection dropped before the search ended.
+    Lost,
+}
+
+/// Messages of the detail area of session `.0` of [`Message::Detail`].
+#[derive(Debug, Clone)]
+pub enum DetailMsg {
+    Activate(ItemKey),
+    /// Close an item (asks first when a file has unsaved edits).
+    Close(ItemKey),
+    Side(SideTab),
+    Tree(TreeMessage),
+    Listed(String, Result<Vec<FsEntry>, ProtoError>),
+    Changes(ChangesMessage),
+    Status(Result<ide_client::GitStatus, ProtoError>),
+    Code(String, CodeMessage),
+    Diff(ItemKey, DiffViewMessage),
+    FileLoaded(String, LoadReason, Result<FileContent, ProtoError>),
+    Saved(String, String, Result<String, ProtoError>),
+    BarReload(String),
+    BarOverwrite(String),
+    BarCompare(String),
+    BarDismiss(String),
+    DiffLoaded(
+        ItemKey,
+        Result<(Vec<ide_client::DiffFile>, Option<String>), ProtoError>,
+    ),
+    FsDone(FsOp, Result<(), ProtoError>),
+    SearchInput(String),
+    SearchCase,
+    SearchWord,
+    SearchRegex,
+    SearchSubmit,
+    Search(u64, SearchItem),
+    SearchToggleFile(String),
+    /// Open `path` at 1-based line / column (search hit, definition, quick open).
+    OpenAt(String, u32, u32),
+    Def(Result<DefResult, ProtoError>),
+    Watched(Result<(), ProtoError>),
+}
+
+// ---------------------------------------------------------------------------------- helpers
+
+/// Parent folder of a root-relative path (`""` for top-level entries).
+pub fn parent(path: &str) -> &str {
+    path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// Last component of a root-relative path.
+pub fn file_name(path: &str) -> &str {
+    path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path)
+}
+
+pub fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// `path` is `prefix` or inside it.
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+fn view_status(k: ChangeKind) -> ide_views::GitStatus {
+    use ide_views::GitStatus as V;
+    match k {
+        ChangeKind::Modified | ChangeKind::TypeChanged => V::Modified,
+        ChangeKind::Added | ChangeKind::Copied => V::Added,
+        ChangeKind::Deleted => V::Deleted,
+        ChangeKind::Renamed => V::Renamed,
+        ChangeKind::Conflicted => V::Conflicted,
+        ChangeKind::Untracked => V::Untracked,
+    }
+}
+
+fn tree_entry(e: &FsEntry) -> TreeEntry {
+    let mut t = if e.kind == EntryKind::Dir {
+        TreeEntry::dir(e.name.clone())
+    } else {
+        TreeEntry::file(e.name.clone())
+    };
+    t.status = e.git.map(view_status);
+    t.ignored = e.ignored;
+    t
+}
+
+fn change_entry(c: &ide_client::GitChange) -> ChangeEntry {
+    let mut e = ChangeEntry::new(c.path.clone(), view_status(c.kind));
+    e.old_path = c.orig_path.clone();
+    e
+}
+
+/// Server diff -> view model (`new_text` = the whole new side, for expanding gaps).
+pub fn view_diff(f: &ide_client::DiffFile, new_text: Option<&str>) -> ide_views::DiffFile {
+    use ide_client::LineKind as P;
+    use ide_views::LineKind as V;
+    ide_views::DiffFile {
+        old_path: f.old_path.clone(),
+        new_path: f.path.clone(),
+        binary: f.binary,
+        hunks: f
+            .hunks
+            .iter()
+            .map(|h| ide_views::Hunk {
+                old_start: h.old_start,
+                old_count: h.old_lines,
+                new_start: h.new_start,
+                new_count: h.new_lines,
+                section: h.header.clone(),
+                lines: h
+                    .lines
+                    .iter()
+                    .map(|l| ide_views::DiffLine {
+                        kind: match l.kind {
+                            P::Context => V::Context,
+                            P::Add => V::Add,
+                            P::Del => V::Del,
+                        },
+                        old_no: l.old_line,
+                        new_no: l.new_line,
+                        text: l.text.clone(),
+                        no_newline: l.no_newline,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        new_lines: new_text.map(|t| {
+            t.lines()
+                .map(|l| l.trim_end_matches('\r').to_owned())
+                .collect()
+        }),
+    }
+}
+
+/// Disk content (old) vs the buffer (new) of `path` as a diff.
+pub fn compare_diff(path: &str, disk: &str, buffer: &str) -> Vec<ide_views::DiffFile> {
+    let disk = disk.replace("\r\n", "\n");
+    let buffer = buffer.replace("\r\n", "\n");
+    let text = format!(
+        "diff --git a/{path} b/{path}\n{}",
+        similar::TextDiff::from_lines(&disk, &buffer)
+            .unified_diff()
+            .context_radius(3)
+            .header(&format!("a/{path}"), &format!("b/{path}"))
+    );
+    let mut files = ide_views::DiffFile::parse_unified(&text);
+    if files.is_empty() {
+        files.push(ide_views::DiffFile {
+            new_path: path.into(),
+            ..Default::default()
+        });
+    }
+    for f in &mut files {
+        f.new_lines = Some(buffer.lines().map(str::to_owned).collect());
+    }
+    files
+}
+
+/// Streams a text search's events (dropping the stream cancels the search).
+fn search_stream(
+    c: Client,
+    q: TextSearch,
+) -> impl futures::Stream<Item = SearchItem> + Send + 'static {
+    enum St {
+        Start(Client, TextSearch),
+        Run(SearchStream),
+        Done,
+    }
+    futures::stream::unfold(St::Start(c, q), |st| async move {
+        let mut s = match st {
+            St::Done => return None,
+            St::Start(c, q) => match c.search_text(q).await {
+                Ok(s) => s,
+                Err(e) => return Some((SearchItem::Failed(e), St::Done)),
+            },
+            St::Run(s) => s,
+        };
+        match s.next().await {
+            Some(e @ SearchEvent::Done(_)) => Some((SearchItem::Event(e), St::Done)),
+            Some(e) => Some((SearchItem::Event(e), St::Run(s))),
+            None => Some((SearchItem::Lost, St::Done)),
+        }
+    })
+}
+
+fn msg(sid: &str, m: DetailMsg) -> Message {
+    Message::Detail(sid.to_owned(), m)
+}
+
+// ---------------------------------------------------------------------------------- logic
+
+impl App {
+    pub fn detail(&self, sid: &str) -> Option<&Detail> {
+        self.live(sid).map(|l| &l.detail)
+    }
+
+    pub fn detail_mut(&mut self, sid: &str) -> Option<&mut Detail> {
+        self.sessions
+            .iter_mut()
+            .find(|l| l.info.id == sid)
+            .map(|l| &mut l.detail)
+    }
+
+    /// The session whose detail area is on screen.
+    pub fn shown_detail(&self) -> Option<String> {
+        (!self.ui.detail_collapsed)
+            .then(|| self.selected.clone())
+            .flatten()
+    }
+
+    /// Remember the session's open items in `ui.json`.
+    pub fn persist_detail(&mut self, sid: &str) {
+        let Some(d) = self.detail(sid) else { return };
+        let ui = d.to_ui();
+        if self.ui.detail.get(sid) != Some(&ui) {
+            self.ui.detail.insert(sid.to_owned(), ui);
+            self.ui.save(&self.data_dir);
+        }
+    }
+
+    /// Watch the shown session (and only it), load what it shows and refresh it when stale.
+    pub fn sync_detail(&mut self) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let shown = self.shown_detail();
+        let mut tasks = Vec::new();
+        // Unwatch every other session.
+        let others: Vec<String> = self
+            .sessions
+            .iter_mut()
+            .filter(|l| l.detail.watched && Some(&l.info.id) != shown.as_ref())
+            .map(|l| {
+                l.detail.watched = false;
+                l.detail.stale = true;
+                l.info.id.clone()
+            })
+            .collect();
+        for id in others {
+            let c = c.clone();
+            tasks.push(
+                Task::future(async move {
+                    let _ = c.fs_unwatch(&id).await;
+                })
+                .discard(),
+            );
+        }
+        let Some(sid) = shown else {
+            return Task::batch(tasks);
+        };
+        let Some(d) = self.detail_mut(&sid) else {
+            return Task::batch(tasks);
+        };
+        if !d.watched {
+            d.watched = true;
+            let (c, s) = (c.clone(), sid.clone());
+            tasks.push(Task::perform(async move { c.fs_watch(&s).await }, {
+                let sid = sid.clone();
+                move |r| msg(&sid, DetailMsg::Watched(r))
+            }));
+        }
+        let stale = std::mem::take(&mut d.stale);
+        if d.loaded_dirs.is_empty() && !d.root_loading {
+            d.root_loading = true;
+            tasks.push(self.list_dirs(&sid, vec![String::new()]));
+        } else if stale {
+            let dirs: Vec<String> = d.loaded_dirs.iter().cloned().collect();
+            tasks.push(self.list_dirs(&sid, dirs));
+        }
+        let d = self.detail_mut(&sid).expect("session");
+        if !d.status_loaded || stale {
+            d.status_loaded = true;
+            tasks.push(self.load_status(&sid));
+        }
+        if stale {
+            tasks.push(self.check_files(&sid, None));
+            tasks.push(self.reload_diffs(&sid, None));
+        }
+        tasks.push(self.ensure_active_loaded(&sid));
+        Task::batch(tasks)
+    }
+
+    fn list_dirs(&self, sid: &str, dirs: Vec<String>) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        Task::batch(dirs.into_iter().map(|dir| {
+            let (c, s, d) = (c.clone(), sid.to_owned(), dir.clone());
+            let sid = sid.to_owned();
+            Task::perform(async move { c.fs_list(&s, &d, true).await }, move |r| {
+                msg(&sid, DetailMsg::Listed(dir.clone(), r))
+            })
+        }))
+    }
+
+    fn load_status(&self, sid: &str) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let (s, sid) = (sid.to_owned(), sid.to_owned());
+        Task::perform(async move { c.git_status(&s, None).await }, move |r| {
+            msg(&sid, DetailMsg::Status(r))
+        })
+    }
+
+    fn read_file(&self, sid: &str, path: &str, reason: LoadReason) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let (s, p) = (sid.to_owned(), path.to_owned());
+        let (sid, path) = (sid.to_owned(), path.to_owned());
+        Task::perform(async move { c.fs_read(&s, &p, READ_MAX).await }, move |r| {
+            msg(&sid, DetailMsg::FileLoaded(path.clone(), reason, r))
+        })
+    }
+
+    /// Re-read open files (all, or those in `paths`) to pick up changes on disk.
+    fn check_files(&mut self, sid: &str, paths: Option<&[String]>) -> Task<Message> {
+        let Some(d) = self.detail(sid) else {
+            return Task::none();
+        };
+        let files: Vec<String> = d
+            .items
+            .iter()
+            .filter_map(|(_, i)| match i {
+                Item::File(f)
+                    if f.view.is_some()
+                        && !f.saving
+                        && paths.is_none_or(|p| p.contains(&f.path)) =>
+                {
+                    Some(f.path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        Task::batch(
+            files
+                .iter()
+                .map(|p| self.read_file(sid, p, LoadReason::Refresh)),
+        )
+    }
+
+    /// Reload diffs (all, or those of `paths`) that were loaded.
+    fn reload_diffs(&mut self, sid: &str, paths: Option<&[String]>) -> Task<Message> {
+        let Some(d) = self.detail(sid) else {
+            return Task::none();
+        };
+        let keys: Vec<ItemKey> = d
+            .items
+            .iter()
+            .filter(|(k, i)| {
+                matches!(k, ItemKey::Diff { path, .. } if paths.is_none_or(|p| p.iter().any(|x| x == path)))
+                    && matches!(i, Item::Diff(x) if x.view.is_some() || x.error.is_some())
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        Task::batch(keys.into_iter().map(|k| self.load_diff(sid, k)))
+    }
+
+    fn load_diff(&mut self, sid: &str, key: ItemKey) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let ItemKey::Diff { staged, path } = key.clone() else {
+            return Task::none();
+        };
+        if let Some(Item::Diff(x)) = self.detail_mut(sid).and_then(|d| d.item_mut(&key)) {
+            x.loading = true;
+        }
+        let s = sid.to_owned();
+        let sid = sid.to_owned();
+        Task::perform(
+            async move {
+                let against = if staged {
+                    DiffAgainst::Index
+                } else {
+                    DiffAgainst::WorkingTree
+                };
+                let files = c.git_diff(&s, Some(&path), against, None).await?;
+                // The whole new side lets the view expand unchanged regions.
+                let new_text = if staged {
+                    c.git_file_at(&s, &path, ide_client::GitRev::Index, None)
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|f| !f.binary)
+                        .map(|f| f.text)
+                } else {
+                    c.fs_read(&s, &path, 0)
+                        .await
+                        .ok()
+                        .filter(|f| !f.binary && !f.truncated)
+                        .map(|f| f.text)
+                };
+                Ok((files, new_text))
+            },
+            move |r| msg(&sid, DetailMsg::DiffLoaded(key.clone(), r)),
+        )
+    }
+
+    /// Load the active item if it was never loaded (restored from `ui.json`, or opened while
+    /// offline).
+    fn ensure_active_loaded(&mut self, sid: &str) -> Task<Message> {
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        let key = d.active.clone();
+        match d.item_mut(&key) {
+            Some(Item::File(f)) if f.view.is_none() && !f.loading && !f.binary => {
+                f.loading = true;
+                f.error = None;
+                let p = f.path.clone();
+                self.read_file(sid, &p, LoadReason::Open)
+            }
+            Some(Item::Diff(x)) if x.view.is_none() && !x.loading && x.error.is_none() => {
+                self.load_diff(sid, key)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Show `key` (opening it if needed) and give it focus.
+    pub fn activate(&mut self, sid: &str, key: ItemKey) -> Task<Message> {
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        if d.item(&key).is_none() {
+            let item = match &key {
+                ItemKey::Web => Item::Web,
+                ItemKey::File(p) => Item::File(FileItem::new(p)),
+                ItemKey::Diff { .. } | ItemKey::Compare(_) => Item::Diff(DiffItem {
+                    view: None,
+                    loading: false,
+                    error: None,
+                }),
+            };
+            d.items.push((key.clone(), item));
+        }
+        d.active = key.clone();
+        if let ItemKey::Diff { staged, path } = &key {
+            let g = if *staged {
+                ChangeGroup::Staged
+            } else if d
+                .changes
+                .entries(ChangeGroup::Untracked)
+                .iter()
+                .any(|e| e.path == *path)
+            {
+                ChangeGroup::Untracked
+            } else {
+                ChangeGroup::Unstaged
+            };
+            d.changes.set_selected(Some((g, path.clone())));
+        } else {
+            d.changes.set_selected(None);
+        }
+        let focus = match d.item(&key) {
+            Some(Item::File(f)) => f.view.as_ref().map(|v| v.focus()),
+            _ => None,
+        };
+        self.persist_detail(sid);
+        self.sync_web();
+        Task::batch([
+            self.ensure_active_loaded(sid),
+            focus.unwrap_or_else(Task::none),
+        ])
+    }
+
+    /// Open `path` (1-based line/column; 0 = keep) in the editor.
+    pub fn open_file_at(&mut self, sid: &str, path: &str, line: u32, col: u32) -> Task<Message> {
+        let key = ItemKey::File(path.to_owned());
+        let act = self.activate(sid, key);
+        let goto = (line > 0).then_some((line as usize, col.max(1) as usize));
+        let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(path)) else {
+            return act;
+        };
+        let jump = match (goto, &mut f.view) {
+            (Some((l, c)), Some(v)) => v.go_to::<Message>(l, c),
+            (Some(g), None) => {
+                f.pending_goto = Some(g);
+                Task::none()
+            }
+            _ => Task::none(),
+        };
+        Task::batch([act, jump])
+    }
+
+    fn close_item(&mut self, sid: &str, key: &ItemKey) -> Task<Message> {
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        if *key == ItemKey::Web {
+            return Task::none();
+        }
+        let Some(i) = d.items.iter().position(|(k, _)| k == key) else {
+            return Task::none();
+        };
+        d.items.remove(i);
+        if d.active == *key {
+            d.active = d
+                .items
+                .get(i.min(d.items.len().saturating_sub(1)))
+                .map(|(k, _)| k.clone())
+                .unwrap_or(ItemKey::Web);
+        }
+        let next = d.active.clone();
+        self.activate(sid, next)
+    }
+
+    fn after_fs_change(&mut self, sid: &str, paths: &[String], rescan: bool) -> Task<Message> {
+        let Some(d) = self.detail(sid) else {
+            return Task::none();
+        };
+        let dirs: Vec<String> = if rescan {
+            d.loaded_dirs.iter().cloned().collect()
+        } else {
+            // The folder of each changed path and its ancestors (folder badges), and the
+            // path itself when it is a listed folder.
+            let mut set = BTreeSet::new();
+            for p in paths {
+                let mut dir = p.as_str();
+                if d.loaded_dirs.contains(dir) {
+                    set.insert(dir.to_owned());
+                }
+                loop {
+                    dir = parent(dir);
+                    if d.loaded_dirs.contains(dir) {
+                        set.insert(dir.to_owned());
+                    }
+                    if dir.is_empty() {
+                        break;
+                    }
+                }
+            }
+            set.into_iter().collect()
+        };
+        let p = (!rescan).then_some(paths);
+        Task::batch([
+            self.list_dirs(sid, dirs),
+            self.load_status(sid),
+            self.check_files(sid, p),
+            self.reload_diffs(sid, p),
+        ])
+    }
+
+    fn after_git_change(&mut self, sid: &str) -> Task<Message> {
+        let dirs: Vec<String> = self
+            .detail(sid)
+            .map(|d| d.loaded_dirs.iter().cloned().collect())
+            .unwrap_or_default();
+        Task::batch([
+            self.list_dirs(sid, dirs),
+            self.load_status(sid),
+            self.reload_diffs(sid, None),
+        ])
+    }
+
+    /// `Notify::FsChanged` / `GitChanged` of a session.
+    pub fn on_fs_notify(&mut self, sid: &str, paths: Option<(Vec<String>, bool)>) -> Task<Message> {
+        if !self.detail(sid).is_some_and(|d| d.watched) {
+            return Task::none();
+        }
+        crate::script::log(&format!("watch {sid}: {paths:?}"));
+        match paths {
+            Some((p, rescan)) => self.after_fs_change(sid, &p, rescan),
+            None => self.after_git_change(sid),
+        }
+    }
+
+    pub fn on_detail(&mut self, sid: String, m: DetailMsg) -> Task<Message> {
+        let sid = sid.as_str();
+        if self.live(sid).is_none() {
+            return Task::none();
+        }
+        match m {
+            DetailMsg::Activate(k) => {
+                self.open_items = false;
+                self.activate(sid, k)
+            }
+            DetailMsg::Close(k) => {
+                let dirty = match self.detail(sid).and_then(|d| d.item(&k)) {
+                    Some(Item::File(f)) => f.dirty(),
+                    _ => false,
+                };
+                if dirty && let ItemKey::File(p) = &k {
+                    self.open_items = false;
+                    self.modal = Some(Modal::CloseDirty(crate::app::CloseDirtyForm {
+                        session: sid.to_owned(),
+                        path: p.clone(),
+                    }));
+                    return Task::none();
+                }
+                let t = self.close_item(sid, &k);
+                self.persist_detail(sid);
+                t
+            }
+            DetailMsg::Side(tab) => {
+                let d = self.detail_mut(sid).expect("session");
+                d.side = tab;
+                self.persist_detail(sid);
+                if tab == SideTab::Search {
+                    return iced::widget::operation::focus(SEARCH_ID);
+                }
+                Task::none()
+            }
+            DetailMsg::Tree(tm) => {
+                let d = self.detail_mut(sid).expect("session");
+                let (task, ev) = d.tree.update(tm);
+                let sid2 = sid.to_owned();
+                let task = task.map(move |m| msg(&sid2, DetailMsg::Tree(m)));
+                match ev {
+                    Some(ev) => Task::batch([task, self.on_tree_event(sid, ev)]),
+                    None => task,
+                }
+            }
+            DetailMsg::Listed(dir, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if dir.is_empty() {
+                    d.root_loading = false;
+                }
+                match r {
+                    Ok(entries) => {
+                        d.tree
+                            .set_children(&dir, entries.iter().map(tree_entry).collect());
+                        if dir.is_empty() {
+                            d.tree_error = None;
+                        }
+                        d.loaded_dirs.insert(dir);
+                    }
+                    Err(e) if dir.is_empty() => d.tree_error = Some(i18n::proto_error(&e)),
+                    Err(_) => {
+                        // The folder is gone (deleted / renamed): forget it.
+                        d.tree.forget(&dir);
+                        let prefix = format!("{dir}/");
+                        d.loaded_dirs
+                            .retain(|x| *x != dir && !x.starts_with(&prefix));
+                    }
+                }
+                Task::none()
+            }
+            DetailMsg::Changes(cm) => {
+                let d = self.detail_mut(sid).expect("session");
+                let (task, ev) = d.changes.update(cm);
+                let sid2 = sid.to_owned();
+                let task = task.map(move |m| msg(&sid2, DetailMsg::Changes(m)));
+                match ev {
+                    Some(ChangesEvent::OpenDiff { group, path }) => {
+                        let key = ItemKey::Diff {
+                            staged: group == ChangeGroup::Staged,
+                            path,
+                        };
+                        // Re-opening a diff shows the current state.
+                        let reload = matches!(
+                            self.detail(sid).and_then(|d| d.item(&key)),
+                            Some(Item::Diff(x)) if x.view.is_some()
+                        );
+                        let act = self.activate(sid, key.clone());
+                        let r = if reload {
+                            self.load_diff(sid, key)
+                        } else {
+                            Task::none()
+                        };
+                        Task::batch([task, act, r])
+                    }
+                    None => task,
+                }
+            }
+            DetailMsg::Status(r) => {
+                let d = self.detail_mut(sid).expect("session");
+                match r {
+                    Ok(s) => {
+                        let mut unstaged: Vec<ChangeEntry> =
+                            s.conflicted.iter().map(change_entry).collect();
+                        unstaged.extend(s.unstaged.iter().map(change_entry));
+                        d.changes.set_all(
+                            s.staged.iter().map(change_entry).collect(),
+                            unstaged,
+                            s.untracked
+                                .iter()
+                                .map(|p| {
+                                    ChangeEntry::new(p.clone(), ide_views::GitStatus::Untracked)
+                                })
+                                .collect(),
+                        );
+                        d.status_error = None;
+                    }
+                    Err(e) => d.status_error = Some(i18n::proto_error(&e)),
+                }
+                Task::none()
+            }
+            DetailMsg::Code(path, cm) => {
+                let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) else {
+                    return Task::none();
+                };
+                let Some(v) = f.view.as_mut() else {
+                    return Task::none();
+                };
+                let (task, ev) = v.update(cm);
+                let (sid2, p2) = (sid.to_owned(), path.clone());
+                let task = task.map(move |m| msg(&sid2, DetailMsg::Code(p2.clone(), m)));
+                match ev {
+                    Some(ev) => Task::batch([task, self.on_code_event(sid, &path, ev)]),
+                    None => task,
+                }
+            }
+            DetailMsg::Diff(key, dm) => {
+                let d = self.detail_mut(sid).expect("session");
+                let mut mode = None;
+                let task = match d.item_mut(&key) {
+                    Some(Item::Diff(DiffItem { view: Some(v), .. })) => {
+                        let (task, ev) = v.update(dm);
+                        if let Some(DiffViewEvent::ModeChanged(m)) = ev {
+                            mode = Some(m);
+                        }
+                        task
+                    }
+                    _ => Task::none(),
+                };
+                if let Some(m) = mode {
+                    d.diff_mode = m;
+                }
+                let sid2 = sid.to_owned();
+                task.map(move |m| msg(&sid2, DetailMsg::Diff(key.clone(), m)))
+            }
+            DetailMsg::FileLoaded(path, reason, r) => self.on_file_loaded(sid, path, reason, r),
+            DetailMsg::Saved(path, text, r) => self.on_saved(sid, &path, &text, r),
+            DetailMsg::BarReload(path) => {
+                if let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) {
+                    f.loading = true;
+                }
+                self.read_file(sid, &path, LoadReason::Force)
+            }
+            DetailMsg::BarOverwrite(path) => self.save_file(sid, &path, None, false),
+            DetailMsg::BarCompare(path) => self.read_file(sid, &path, LoadReason::Compare),
+            DetailMsg::BarDismiss(path) => {
+                if let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) {
+                    f.bar = None;
+                }
+                Task::none()
+            }
+            DetailMsg::DiffLoaded(key, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                let mode = d.diff_mode;
+                if let Some(Item::Diff(x)) = d.item_mut(&key) {
+                    x.loading = false;
+                    match r {
+                        Ok((files, new_text)) => {
+                            let files: Vec<_> = files
+                                .iter()
+                                .map(|f| view_diff(f, new_text.as_deref()))
+                                .collect();
+                            match &mut x.view {
+                                Some(v) => v.set_files(files),
+                                None => {
+                                    let mut v = DiffView::new(files);
+                                    v.set_mode(mode);
+                                    x.view = Some(v);
+                                }
+                            }
+                            x.error = None;
+                        }
+                        Err(e) => x.error = Some(i18n::proto_error(&e)),
+                    }
+                }
+                Task::none()
+            }
+            DetailMsg::FsDone(op, r) => self.on_fs_done(sid, op, r),
+            DetailMsg::SearchInput(q) => {
+                self.detail_mut(sid).expect("session").search.query = q;
+                Task::none()
+            }
+            DetailMsg::SearchCase | DetailMsg::SearchWord | DetailMsg::SearchRegex => {
+                let s = &mut self.detail_mut(sid).expect("session").search;
+                match m {
+                    DetailMsg::SearchCase => s.case_sensitive = !s.case_sensitive,
+                    DetailMsg::SearchWord => s.whole_word = !s.whole_word,
+                    _ => s.regex = !s.regex,
+                }
+                if s.query.is_empty() {
+                    Task::none()
+                } else {
+                    self.start_search(sid)
+                }
+            }
+            DetailMsg::SearchSubmit => self.start_search(sid),
+            DetailMsg::Search(generation, item) => {
+                let s = &mut self.detail_mut(sid).expect("session").search;
+                if generation != s.generation {
+                    return Task::none();
+                }
+                match item {
+                    SearchItem::Event(SearchEvent::Hits(h)) => s.add(h),
+                    SearchItem::Event(SearchEvent::Done(sum)) => {
+                        crate::script::log(&format!(
+                            "search done: {} match(es) in {} file(s)",
+                            sum.matches, sum.files
+                        ));
+                        s.error = sum.error.as_ref().map(i18n::proto_error);
+                        s.summary = Some(sum);
+                        s.running = false;
+                        s.handle = None;
+                    }
+                    SearchItem::Failed(e) => {
+                        s.error = Some(i18n::proto_error(&e));
+                        s.running = false;
+                        s.handle = None;
+                    }
+                    SearchItem::Lost => {
+                        s.error = Some(tr::err_disconnected());
+                        s.running = false;
+                        s.handle = None;
+                    }
+                }
+                Task::none()
+            }
+            DetailMsg::SearchToggleFile(p) => {
+                let s = &mut self.detail_mut(sid).expect("session").search;
+                if !s.collapsed.remove(&p) {
+                    s.collapsed.insert(p);
+                }
+                Task::none()
+            }
+            DetailMsg::OpenAt(path, line, col) => {
+                self.modal = None;
+                self.open_file_at(sid, &path, line, col)
+            }
+            DetailMsg::Def(r) => match r {
+                Ok(DefResult::One(t)) => {
+                    crate::script::log(&format!("definition -> {}:{}:{}", t.path, t.line, t.col));
+                    self.open_file_at(sid, &t.path, t.line, t.col)
+                }
+                Ok(DefResult::Many { name, targets }) => {
+                    crate::script::log(&format!("definition of {name}: {} targets", targets.len()));
+                    self.modal = Some(Modal::DefPicker(crate::app::DefPickerForm {
+                        session: sid.to_owned(),
+                        name,
+                        targets,
+                    }));
+                    Task::none()
+                }
+                Ok(DefResult::None { reason }) => {
+                    crate::script::log(&format!("definition: none ({reason})"));
+                    let text = i18n::proto_error(&reason);
+                    self.detail_mut(sid).expect("session").toast(text);
+                    Task::none()
+                }
+                Err(e) => {
+                    let text = i18n::proto_error(&e);
+                    self.detail_mut(sid).expect("session").toast(text);
+                    Task::none()
+                }
+            },
+            DetailMsg::Watched(r) => {
+                if let Err(e) = r {
+                    crate::script::log(&format!("fs.watch {sid}: {e}"));
+                    if e.id != "disconnected" {
+                        let text = i18n::proto_error(&e);
+                        let d = self.detail_mut(sid).expect("session");
+                        d.watched = false;
+                        d.toast(text);
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn on_tree_event(&mut self, sid: &str, ev: TreeEvent) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let (s, sid_owned) = (sid.to_owned(), sid.to_owned());
+        let done = move |op: FsOp| {
+            let sid = sid_owned.clone();
+            move |r: Result<(), ProtoError>| msg(&sid, DetailMsg::FsDone(op.clone(), r))
+        };
+        match ev {
+            TreeEvent::Expand(dir) => self.list_dirs(sid, vec![dir]),
+            TreeEvent::Collapse(_) | TreeEvent::Select(_) => Task::none(),
+            TreeEvent::Open(path) => self.open_file_at(sid, &path, 0, 0),
+            TreeEvent::CreateFile { dir, name } => {
+                let path = join(&dir, &name);
+                let op = FsOp::Created {
+                    path: path.clone(),
+                    is_dir: false,
+                };
+                Task::perform(
+                    async move { c.fs_create_file(&s, &path, "").await.map(drop) },
+                    done(op),
+                )
+            }
+            TreeEvent::CreateFolder { dir, name } => {
+                let path = join(&dir, &name);
+                let op = FsOp::Created {
+                    path: path.clone(),
+                    is_dir: true,
+                };
+                Task::perform(async move { c.fs_create_dir(&s, &path).await }, done(op))
+            }
+            TreeEvent::Rename { path, new_name } => {
+                let to = join(parent(&path), &new_name);
+                if to == path {
+                    return Task::none();
+                }
+                let op = FsOp::Renamed {
+                    from: path.clone(),
+                    to: to.clone(),
+                };
+                Task::perform(async move { c.fs_rename(&s, &path, &to).await }, done(op))
+            }
+            TreeEvent::Delete(path) => {
+                let is_dir = self
+                    .detail(sid)
+                    .is_some_and(|d| d.loaded_dirs.contains(&path) || d.tree.is_expanded(&path));
+                self.modal = Some(Modal::DeleteEntry(crate::app::DeleteEntryForm {
+                    session: sid.to_owned(),
+                    path,
+                    is_dir,
+                    error: None,
+                    busy: false,
+                }));
+                Task::none()
+            }
+        }
+    }
+
+    /// The delete confirm was accepted.
+    pub fn delete_entry(&mut self) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(Modal::DeleteEntry(f)) = &mut self.modal else {
+            return Task::none();
+        };
+        f.busy = true;
+        f.error = None;
+        let (s, path) = (f.session.clone(), f.path.clone());
+        let sid = s.clone();
+        let op = FsOp::Deleted { path: path.clone() };
+        Task::perform(
+            async move { c.fs_delete(&s, &path, true).await },
+            move |r| msg(&sid, DetailMsg::FsDone(op.clone(), r)),
+        )
+    }
+
+    fn on_fs_done(&mut self, sid: &str, op: FsOp, r: Result<(), ProtoError>) -> Task<Message> {
+        crate::script::log(&format!("fs op {op:?}: {r:?}"));
+        if let Err(e) = r {
+            let text = i18n::proto_error(&e);
+            if let Some(Modal::DeleteEntry(f)) = &mut self.modal {
+                f.busy = false;
+                f.error = Some(text);
+            } else if let Some(d) = self.detail_mut(sid) {
+                d.toast(text);
+            }
+            return Task::none();
+        }
+        if matches!(self.modal, Some(Modal::DeleteEntry(_))) {
+            self.modal = None;
+        }
+        // The watcher reports these too; refresh now so the tree follows at once.
+        let (dirs, then): (Vec<String>, Task<Message>) = match &op {
+            FsOp::Created { path, is_dir } => {
+                let t = if *is_dir {
+                    Task::none()
+                } else {
+                    self.open_file_at(sid, path, 0, 0)
+                };
+                (vec![parent(path).to_owned()], t)
+            }
+            FsOp::Renamed { from, to } => {
+                // Open items of the old path follow the rename.
+                if let Some(d) = self.detail_mut(sid) {
+                    for (k, i) in &mut d.items {
+                        if let ItemKey::File(p) = k
+                            && under(p, from)
+                        {
+                            let np = format!("{to}{}", &p[from.len()..]);
+                            // The view keeps its buffer (and unsaved edits); events are routed
+                            // by the item's path, not the view's.
+                            if let Item::File(f) = i {
+                                f.path = np.clone();
+                            }
+                            if d.active == *k {
+                                d.active = ItemKey::File(np.clone());
+                            }
+                            *k = ItemKey::File(np);
+                        }
+                    }
+                    d.tree.forget(from);
+                    let prefix = format!("{from}/");
+                    d.loaded_dirs
+                        .retain(|x| x != from && !x.starts_with(&prefix));
+                }
+                self.persist_detail(sid);
+                (
+                    vec![parent(from).to_owned(), parent(to).to_owned()],
+                    Task::none(),
+                )
+            }
+            FsOp::Deleted { path } => {
+                let keys: Vec<ItemKey> = self
+                    .detail(sid)
+                    .map(|d| {
+                        d.items
+                            .iter()
+                            .filter(|(k, _)| matches!(k, ItemKey::File(p) if under(p, path)))
+                            .map(|(k, _)| k.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut tasks = Vec::new();
+                for k in keys {
+                    tasks.push(self.close_item(sid, &k));
+                }
+                if let Some(d) = self.detail_mut(sid) {
+                    d.tree.forget(path);
+                    let prefix = format!("{path}/");
+                    d.loaded_dirs
+                        .retain(|x| x != path && !x.starts_with(&prefix));
+                }
+                self.persist_detail(sid);
+                (vec![parent(path).to_owned()], Task::batch(tasks))
+            }
+        };
+        let mut dirs = dirs;
+        dirs.dedup();
+        Task::batch([self.list_dirs(sid, dirs), self.load_status(sid), then])
+    }
+
+    fn on_code_event(&mut self, sid: &str, path: &str, ev: CodeEvent) -> Task<Message> {
+        match ev {
+            CodeEvent::Save { text, .. } => self.save_file(sid, path, Some(text), false),
+            CodeEvent::DirtyChanged(_) | CodeEvent::Reverted => Task::none(),
+            CodeEvent::Definition { line, column, .. } => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                // The unsaved buffer: the server looks names up in what is on screen.
+                let text = self
+                    .detail(sid)
+                    .and_then(|d| d.file(path))
+                    .and_then(|f| f.view.as_ref())
+                    .map(|v| v.text());
+                crate::script::log(&format!("go to definition at {path}:{line}:{column}"));
+                let (s, p) = (sid.to_owned(), path.to_owned());
+                let sid = sid.to_owned();
+                Task::perform(
+                    async move { c.def_lookup(&s, &p, line as u32, column as u32, text).await },
+                    move |r| msg(&sid, DetailMsg::Def(r)),
+                )
+            }
+        }
+    }
+
+    /// Write the buffer of `path` (`text` = from the save event, else the current buffer).
+    /// `checked` = with the version the buffer was read at (not after "overwrite").
+    pub fn save_file(
+        &mut self,
+        sid: &str,
+        path: &str,
+        text: Option<String>,
+        close_after: bool,
+    ) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let overwrite = text.is_none() && !close_after;
+        let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(path)) else {
+            return Task::none();
+        };
+        let Some(v) = &f.view else {
+            return Task::none();
+        };
+        let text = text.unwrap_or_else(|| v.text());
+        f.saving = true;
+        f.close_after_save |= close_after;
+        let expected = if overwrite { None } else { f.version.clone() };
+        let encoding = f.encoding.clone();
+        crate::script::log(&format!(
+            "save {path} ({} bytes, expected version {expected:?})",
+            text.len()
+        ));
+        let (s, p, t) = (sid.to_owned(), path.to_owned(), text.clone());
+        let (sid, path) = (sid.to_owned(), path.to_owned());
+        Task::perform(
+            async move { c.fs_write(&s, &p, t, expected.as_deref(), encoding).await },
+            move |r| msg(&sid, DetailMsg::Saved(path.clone(), text.clone(), r)),
+        )
+    }
+
+    fn on_saved(
+        &mut self,
+        sid: &str,
+        path: &str,
+        text: &str,
+        r: Result<String, ProtoError>,
+    ) -> Task<Message> {
+        crate::script::log(&format!("saved {path}: {r:?}"));
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        let Some(f) = d.file_mut(path) else {
+            return Task::none();
+        };
+        f.saving = false;
+        match r {
+            Ok(version) => {
+                f.version = Some(version);
+                f.bar = None;
+                if let Some(v) = &mut f.view {
+                    v.mark_saved(text);
+                }
+                let close = std::mem::take(&mut f.close_after_save);
+                // A comparison of this file is outdated now.
+                let cmp = ItemKey::Compare(path.to_owned());
+                let mut tasks = Vec::new();
+                if d.item(&cmp).is_some() {
+                    tasks.push(self.close_item(sid, &cmp));
+                }
+                if close {
+                    tasks.push(self.close_item(sid, &ItemKey::File(path.to_owned())));
+                    self.persist_detail(sid);
+                }
+                Task::batch(tasks)
+            }
+            Err(e) => {
+                f.close_after_save = false;
+                if e.id == "fs-conflict" {
+                    f.bar = Some(FileBar::Conflict);
+                } else {
+                    let text = i18n::proto_error(&e);
+                    d.toast(text);
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn on_file_loaded(
+        &mut self,
+        sid: &str,
+        path: String,
+        reason: LoadReason,
+        r: Result<FileContent, ProtoError>,
+    ) -> Task<Message> {
+        if reason == LoadReason::Compare {
+            return match r {
+                Ok(fc) => {
+                    let buffer = self
+                        .detail(sid)
+                        .and_then(|d| d.file(&path))
+                        .and_then(|f| f.view.as_ref())
+                        .map(|v| v.text())
+                        .unwrap_or_default();
+                    let files = compare_diff(&path, &fc.text, &buffer);
+                    let key = ItemKey::Compare(path);
+                    let d = self.detail_mut(sid).expect("session");
+                    let mut v = DiffView::new(files);
+                    v.set_mode(d.diff_mode);
+                    let item = Item::Diff(DiffItem {
+                        view: Some(v),
+                        loading: false,
+                        error: None,
+                    });
+                    match d.items.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, i)) => *i = item,
+                        None => d.items.push((key.clone(), item)),
+                    }
+                    self.activate(sid, key)
+                }
+                Err(e) => {
+                    let text = i18n::proto_error(&e);
+                    self.detail_mut(sid).expect("session").toast(text);
+                    Task::none()
+                }
+            };
+        }
+        let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) else {
+            return Task::none();
+        };
+        f.loading = false;
+        let fc = match r {
+            Ok(fc) => fc,
+            Err(e) => {
+                if reason == LoadReason::Open {
+                    f.error = Some(i18n::proto_error(&e));
+                } else if e.id == "fs-not-found" && f.view.is_some() {
+                    f.bar = Some(FileBar::Deleted);
+                }
+                return Task::none();
+            }
+        };
+        match reason {
+            LoadReason::Open => {
+                f.binary = fc.binary;
+                f.truncated = fc.truncated;
+                f.size = fc.size;
+                f.version = Some(fc.version);
+                f.encoding = Some(fc.encoding);
+                f.error = None;
+                if fc.binary {
+                    f.view = None;
+                    return Task::none();
+                }
+                let mut v = CodeView::new(path.clone(), &fc.text);
+                // Only part of the file was read: saving it would cut the file.
+                v.set_read_only(fc.truncated);
+                let goto = f.pending_goto.take();
+                let task = match goto {
+                    Some((l, c)) => v.go_to::<Message>(l, c),
+                    None => v.focus(),
+                };
+                f.view = Some(v);
+                task
+            }
+            LoadReason::Refresh => {
+                if f.version.as_deref() == Some(fc.version.as_str()) {
+                    if f.bar == Some(FileBar::Deleted) {
+                        f.bar = None;
+                    }
+                    return Task::none();
+                }
+                let Some(v) = &mut f.view else {
+                    return Task::none();
+                };
+                if fc.binary || fc.truncated != f.truncated {
+                    return Task::none();
+                }
+                if v.reload(&fc.text) {
+                    crate::script::log(&format!("reloaded clean buffer {path} from disk"));
+                    f.version = Some(fc.version);
+                    f.encoding = Some(fc.encoding);
+                    f.bar = None;
+                } else {
+                    crate::script::log(&format!("{path} changed on disk while dirty"));
+                    f.bar = Some(FileBar::ChangedOnDisk);
+                }
+                Task::none()
+            }
+            LoadReason::Force => {
+                if let Some(v) = &mut f.view {
+                    let _ = v.update(CodeMessage::Revert);
+                    v.reload(&fc.text);
+                }
+                f.version = Some(fc.version);
+                f.encoding = Some(fc.encoding);
+                f.bar = None;
+                let cmp = ItemKey::Compare(path);
+                if self.detail(sid).and_then(|d| d.item(&cmp)).is_some() {
+                    return self.close_item(sid, &cmp);
+                }
+                Task::none()
+            }
+            LoadReason::Compare => Task::none(),
+        }
+    }
+
+    fn start_search(&mut self, sid: &str) -> Task<Message> {
+        let c = self.online();
+        let d = self.detail_mut(sid).expect("session");
+        let s = &mut d.search;
+        s.stop();
+        s.generation += 1;
+        s.groups.clear();
+        s.collapsed.clear();
+        s.summary = None;
+        s.error = None;
+        if s.query.is_empty() {
+            return Task::none();
+        }
+        let Some(c) = c else {
+            s.error = Some(tr::err_disconnected());
+            return Task::none();
+        };
+        let q = TextSearch {
+            session: sid.to_owned(),
+            query: s.query.clone(),
+            regex: s.regex,
+            case_sensitive: s.case_sensitive,
+            whole_word: s.whole_word,
+            globs: Vec::new(),
+            include_ignored: false,
+            max_results: 0,
+        };
+        crate::script::log(&format!("search {:?}", q.query));
+        s.running = true;
+        let generation = s.generation;
+        let sid2 = sid.to_owned();
+        let (task, handle) = Task::run(search_stream(c, q), move |item| {
+            msg(&sid2, DetailMsg::Search(generation, item))
+        })
+        .abortable();
+        s.handle = Some(handle);
+        task
+    }
+
+    /// Select `path` in the tree, expanding (and listing) its folders.
+    pub fn tree_reveal(&mut self, sid: &str, path: &str) -> Task<Message> {
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        let (task, events) = d.tree.reveal(path);
+        let sid2 = sid.to_owned();
+        let mut tasks = vec![task.map(move |m| msg(&sid2, DetailMsg::Tree(m)))];
+        for ev in events {
+            tasks.push(self.on_tree_event(sid, ev));
+        }
+        Task::batch(tasks)
+    }
+
+    // ------------------------------------------------------------------ quick open
+
+    pub fn open_quick(&mut self) -> Task<Message> {
+        if !self.connected() || self.selected.is_none() {
+            return Task::none();
+        }
+        self.open_items = false;
+        self.modal = Some(Modal::QuickOpen(crate::app::QuickForm::default()));
+        Task::batch([
+            iced::widget::operation::focus(QUICK_ID),
+            self.quick_query(String::new()),
+        ])
+    }
+
+    pub fn quick_query(&mut self, q: String) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(sid) = self.selected.clone() else {
+            return Task::none();
+        };
+        let Some(Modal::QuickOpen(f)) = &mut self.modal else {
+            return Task::none();
+        };
+        f.query = q.clone();
+        f.seq += 1;
+        let seq = f.seq;
+        Task::perform(
+            async move { c.search_files(&sid, &q, QUICK_MAX).await },
+            move |r| Message::QuickResults(seq, r),
+        )
+    }
+
+    /// Ctrl+Shift+F: show the search tab with its input focused.
+    pub fn open_search(&mut self) -> Task<Message> {
+        let Some(sid) = self.selected.clone() else {
+            return Task::none();
+        };
+        if self.modal.is_some() {
+            return Task::none();
+        }
+        let mut tasks = Vec::new();
+        if self.ui.detail_collapsed {
+            self.ui.detail_collapsed = false;
+            self.save_ui();
+            self.sync_web();
+            tasks.push(self.sync_detail());
+        }
+        tasks.push(self.on_detail(sid, DetailMsg::Side(SideTab::Search)));
+        Task::batch(tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_round_trip() {
+        for k in [
+            ItemKey::Web,
+            ItemKey::File("src/한글.ts".into()),
+            ItemKey::Diff {
+                staged: true,
+                path: "a/b.rs".into(),
+            },
+            ItemKey::Diff {
+                staged: false,
+                path: "c".into(),
+            },
+        ] {
+            assert_eq!(ItemKey::decode(&k.encode().unwrap()), Some(k));
+        }
+        assert_eq!(ItemKey::Compare("x".into()).encode(), None);
+        assert_eq!(ItemKey::decode("file:"), None);
+        assert_eq!(ItemKey::decode("diff:x:y"), None);
+    }
+
+    #[test]
+    fn path_helpers() {
+        assert_eq!(parent("a/b/c.txt"), "a/b");
+        assert_eq!(parent("c.txt"), "");
+        assert_eq!(file_name("a/b/c.txt"), "c.txt");
+        assert_eq!(join("", "x"), "x");
+        assert_eq!(join("a", "x"), "a/x");
+        assert!(under("a/b/c", "a/b") && under("a/b", "a/b") && !under("a/bc", "a/b"));
+    }
+
+    #[test]
+    fn restore_from_ui() {
+        let ui = DetailUi {
+            open: vec![
+                "file:src/main.ts".into(),
+                "diff:w:README.md".into(),
+                "bogus".into(),
+                "file:src/main.ts".into(),
+            ],
+            active: Some("diff:w:README.md".into()),
+            side: "changes".into(),
+        };
+        let d = Detail::new(Some(&ui));
+        assert_eq!(d.items.len(), 3);
+        assert_eq!(d.side, SideTab::Changes);
+        assert_eq!(
+            d.active,
+            ItemKey::Diff {
+                staged: false,
+                path: "README.md".into()
+            }
+        );
+        assert_eq!(
+            d.to_ui().open,
+            vec!["web", "file:src/main.ts", "diff:w:README.md"]
+        );
+    }
+
+    #[test]
+    fn compare_is_a_diff() {
+        let files = compare_diff("a.txt", "one\ntwo\n", "one\nTWO\nthree\n");
+        assert_eq!(files.len(), 1);
+        assert_eq!((files[0].added(), files[0].removed()), (2, 1));
+        let same = compare_diff("a.txt", "x\r\n", "x\n");
+        assert!(same[0].hunks.is_empty());
+    }
+}

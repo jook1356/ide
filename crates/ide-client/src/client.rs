@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    Attached, BrowseListing, ChunkDecoder, DefResult, DiffAgainst, DiffFile, FileContent,
-    FileMatch, FsEntry, FsStat, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession,
-    Notify, PROTO_VERSION, ProfileInfo, ProtoError, Request, Response, ResumeToken, Role,
-    RpcMessage, RpcReceiver, SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk,
+    Attached, BrowseConfig, BrowseListing, ChunkDecoder, DefResult, DiffAgainst, DiffFile,
+    FileContent, FileMatch, FsEntry, FsStat, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError,
+    NewSession, Notify, PROTO_VERSION, ProfileInfo, ProtoError, Request, Response, ResumeToken,
+    Role, RpcMessage, RpcReceiver, SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk,
     TextEncoding, TextSearch, Welcome,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -682,6 +682,27 @@ impl Client {
             .await,
             |r| match r {
                 Response::Browse(b) => Some(b),
+                _ => None,
+            },
+        )
+    }
+
+    /// `browse.config`: the home dir and the extra browse roots saved on the server.
+    pub async fn browse_config(&self) -> Result<BrowseConfig, ProtoError> {
+        expect(self.call(Request::BrowseConfig).await, |r| match r {
+            Response::BrowseConfig(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// `browse.set_roots`: replace the extra browse roots (saved in the server's
+    /// `server.json`). Each root must be an existing absolute folder (`path-invalid`,
+    /// `fs-not-found`, `fs-not-a-dir`, `path-denied` for a filesystem root).
+    pub async fn browse_set_roots(&self, roots: Vec<String>) -> Result<BrowseConfig, ProtoError> {
+        expect(
+            self.call(Request::BrowseSetRoots { roots }).await,
+            |r| match r {
+                Response::BrowseConfig(c) => Some(c),
                 _ => None,
             },
         )

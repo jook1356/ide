@@ -139,6 +139,15 @@ pub struct BrowseListing {
     pub entries: Vec<BrowseEntry>,
 }
 
+/// `browse.config` / `browse.set_roots` result: the folders repositories can be picked from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseConfig {
+    /// The user's home dir (always a browse root; `None` if unknown).
+    pub home: Option<String>,
+    /// Extra roots stored in the server's `server.json` (`browse_roots`), as saved.
+    pub roots: Vec<String>,
+}
+
 /// `search.text` query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextSearch {

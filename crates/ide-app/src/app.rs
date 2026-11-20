@@ -12,17 +12,19 @@ use std::time::Duration;
 use iced::widget::operation;
 use iced::{Event, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 use ide_client::{
-    Agent, Client, ClientEvent, ClientOptions, LocalChild, NewSession, Notify, ProfileInfo,
-    ProtoError, SessionInfo, SessionState, Ssh, Switchable, Transport, Welcome,
+    Agent, BrowseConfig, BrowseListing, Client, ClientEvent, ClientOptions, DefTarget, FileMatch,
+    LocalChild, NewSession, Notify, ProfileInfo, ProtoError, SessionInfo, SessionState, Ssh,
+    Switchable, Transport, Welcome,
 };
 use ide_i18n::LanguagePref;
 use ide_term::{TermConfig, TermModel, ViewEvent};
 use ide_web::{WebEvent, WebRuntime, WebView, WebViewEvent};
 use tokio::sync::mpsc;
 
+use crate::detail::{Detail, DetailMsg, ItemKey};
 use crate::i18n::{self, tr};
 use crate::script::Script;
-use crate::ui_state::{CloseAction, SPLIT_RANGE, ServerPref, UiState};
+use crate::ui_state::{CloseAction, DetailUi, SPLIT_RANGE, ServerPref, UiState};
 
 /// Width of the left sidebar in logical pixels.
 pub const SIDEBAR_W: f32 = 264.0;
@@ -43,6 +45,7 @@ pub const NEW_REPO_ID: &str = "ide-new-repo";
 pub const URL_ID: &str = "ide-url";
 pub const PROFILE_NAME_ID: &str = "ide-profile-name";
 pub const SSH_HOST_ID: &str = "ide-ssh-host";
+pub const ROOT_INPUT_ID: &str = "ide-root-input";
 
 /// Process state of a session as shown in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,11 +115,14 @@ pub struct Live {
     pub loading: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    /// Files, diffs, tree, changes and search of the session.
+    pub detail: Detail,
 }
 
 impl Live {
-    fn new(info: SessionInfo, url: String, config: &TermConfig) -> Self {
+    fn new(info: SessionInfo, url: String, config: &TermConfig, detail: Option<&DetailUi>) -> Self {
         Self {
+            detail: Detail::new(detail),
             state: info.state.into(),
             info,
             term: TermModel::new(INITIAL_GRID.0, INITIAL_GRID.1, config),
@@ -145,6 +151,53 @@ pub struct NewForm {
     pub base_ref: String,
     pub error: Option<String>,
     pub busy: bool,
+    /// Server-side folder browser (open while `Some`).
+    pub browser: Option<FolderBrowser>,
+}
+
+/// Folders on the server (works over SSH too): the browse roots and one listed folder.
+#[derive(Default)]
+pub struct FolderBrowser {
+    pub roots: Vec<String>,
+    pub listing: Option<BrowseListing>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Incremented per request; older answers are dropped.
+    pub seq: u64,
+    /// The folder last asked for.
+    pub dir: String,
+}
+
+/// Ctrl+P: files of the session by fuzzy name.
+#[derive(Default)]
+pub struct QuickForm {
+    pub query: String,
+    pub results: Vec<FileMatch>,
+    pub selected: usize,
+    pub seq: u64,
+    pub error: Option<String>,
+}
+
+/// Several go-to-definition candidates.
+pub struct DefPickerForm {
+    pub session: String,
+    pub name: String,
+    pub targets: Vec<DefTarget>,
+}
+
+/// Confirm deleting a file / folder from the tree.
+pub struct DeleteEntryForm {
+    pub session: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub error: Option<String>,
+    pub busy: bool,
+}
+
+/// Closing a file with unsaved edits.
+pub struct CloseDirtyForm {
+    pub session: String,
+    pub path: String,
 }
 
 pub struct DeleteForm {
@@ -165,6 +218,11 @@ pub struct SettingsForm {
     pub ssh_host: String,
     pub ssh_command: String,
     pub server_error: Option<String>,
+    /// Browse roots on the server (`None` until loaded).
+    pub roots: Option<BrowseConfig>,
+    pub root_input: String,
+    pub roots_error: Option<String>,
+    pub roots_busy: bool,
 }
 
 impl SettingsForm {
@@ -220,6 +278,10 @@ pub enum Modal {
     /// Confirm switching to another server.
     SwitchServer(ServerPref),
     Close(CloseForm),
+    QuickOpen(QuickForm),
+    DefPicker(DefPickerForm),
+    DeleteEntry(DeleteEntryForm),
+    CloseDirty(CloseDirtyForm),
 }
 
 /// A profile change requested from the settings dialog.
@@ -259,8 +321,12 @@ pub enum Message {
 
     OpenNew,
     NewRepo(String),
+    /// Show / hide the folder browser of the new-session dialog.
     NewBrowse,
-    NewBrowsed(Option<PathBuf>),
+    BrowseRoots(Result<Vec<String>, ProtoError>),
+    /// List a folder in the browser (`""` = the first root).
+    BrowseGo(String),
+    BrowseListed(u64, Result<BrowseListing, ProtoError>),
     NewProfile(String),
     NewAgent(Agent),
     NewTitle(String),
@@ -308,6 +374,29 @@ pub enum Message {
     DividerPressed,
     DragMoved(Point),
     DragEnd,
+
+    /// Detail area of a session.
+    Detail(String, DetailMsg),
+    ToggleOpenItems,
+    CloseOpenItems,
+    QuickOpen,
+    QuickInput(String),
+    QuickResults(u64, Result<Vec<FileMatch>, ProtoError>),
+    QuickMove(i32),
+    QuickSubmit,
+    QuickPick(String),
+    FindInFiles,
+    DefPick(usize),
+    DeleteEntryConfirm,
+    CloseDirtySave,
+    CloseDirtyDiscard,
+    /// Drop expired transient messages.
+    Expire,
+    RootsLoaded(Result<BrowseConfig, ProtoError>),
+    RootInput(String),
+    RootAdd,
+    RootRemove(usize),
+    RootsSaved(Result<BrowseConfig, ProtoError>),
 
     WindowOpened(Option<window::Id>),
     WindowResized(Size),
@@ -448,6 +537,8 @@ pub struct App {
     /// `Welcome::server_instance` of the last connection: terminal offsets are only valid
     /// within one server process.
     pub server_instance: Option<String>,
+    /// The "open items" list of the detail header is open.
+    pub open_items: bool,
 }
 
 impl App {
@@ -495,6 +586,7 @@ impl App {
             script: None,
             modal_web_unsafe: false,
             server_instance: None,
+            open_items: false,
         }
     }
 
@@ -531,6 +623,8 @@ impl App {
         self.conn = Conn::Connecting;
         for l in &mut self.sessions {
             l.attached = false;
+            l.detail.watched = false;
+            l.detail.stale = true;
         }
     }
 
@@ -540,6 +634,8 @@ impl App {
         self.conn = Conn::Disconnected(reason);
         for l in &mut self.sessions {
             l.attached = false;
+            l.detail.watched = false;
+            l.detail.stale = true;
         }
     }
 
@@ -558,8 +654,19 @@ impl App {
     }
 
     /// The client, if connected (actions are disabled otherwise).
-    fn online(&self) -> Option<Client> {
+    pub(crate) fn online(&self) -> Option<Client> {
         self.conn.is_connected().then(|| self.client()).flatten()
+    }
+
+    /// Width shared by the terminal and the detail pane (the divider's range): the window
+    /// minus the sidebar, the divider and the side panel.
+    pub fn split_avail(&self) -> f32 {
+        let side = if self.ui.detail_collapsed || self.selected.is_none() {
+            0.0
+        } else {
+            crate::detail::SIDE_W + 1.0
+        };
+        (self.window_size.width - SIDEBAR_W - 1.0 - DIVIDER_W - side).max(1.0)
     }
 
     pub fn connected(&self) -> bool {
@@ -570,7 +677,7 @@ impl App {
         self.sessions.iter().find(|l| l.id() == id)
     }
 
-    fn live_mut(&mut self, id: &str) -> Option<&mut Live> {
+    pub(crate) fn live_mut(&mut self, id: &str) -> Option<&mut Live> {
         self.sessions.iter_mut().find(|l| l.id() == id)
     }
 
@@ -603,7 +710,7 @@ impl App {
         (total, self.running_in_profile(profile))
     }
 
-    fn save_ui(&mut self) {
+    pub(crate) fn save_ui(&mut self) {
         self.ui.selected = self.selected.clone();
         self.ui.save(&self.data_dir);
     }
@@ -648,7 +755,8 @@ impl App {
                         .get(&info.id)
                         .cloned()
                         .unwrap_or_else(|| DEFAULT_URL.into());
-                    next.push(Live::new(info, url, &self.term_config));
+                    let saved = self.ui.detail.get(&info.id).cloned();
+                    next.push(Live::new(info, url, &self.term_config, saved.as_ref()));
                 }
             }
         }
@@ -743,13 +851,19 @@ impl App {
                     }
                 }
                 self.conn = Conn::Connected(Box::new(w));
+                // Watches and listings start over on the new connection (the gap is not
+                // replayed): refresh the shown detail area.
+                for l in &mut self.sessions {
+                    l.detail.watched = false;
+                    l.detail.stale = true;
+                }
                 // The PTY size follows the most recent client: re-send ours.
                 if let Some(l) = self.selected_live()
                     && let Some((c, r)) = l.size
                 {
                     self.send_input(Input::Resize(l.info.id.clone(), c, r));
                 }
-                Task::batch([self.refresh(), self.ensure_attached()])
+                Task::batch([self.refresh(), self.ensure_attached(), self.sync_detail()])
             }
             ClientEvent::Disconnected { error } => {
                 crate::script::log(&format!("disconnected: {error:?}"));
@@ -801,6 +915,14 @@ impl App {
             }
             Notify::Bell { .. } => Task::none(),
             Notify::SessionsChanged | Notify::ProfilesChanged => self.refresh(),
+            Notify::FsChanged {
+                session,
+                paths,
+                rescan,
+            } => self.on_fs_notify(&session, Some((paths, rescan))),
+            Notify::GitChanged { session } => self.on_fs_notify(&session, None),
+            // Routed to the `SearchStream`s by the client; late ones are dropped.
+            Notify::SearchHits { .. } | Notify::SearchDone { .. } => Task::none(),
         }
     }
 
@@ -810,12 +932,17 @@ impl App {
         !self.ui.detail_collapsed
     }
 
-    /// Create the selected session's web view if needed and hide every other one.
-    fn sync_web(&mut self) {
+    /// Create the selected session's web view if needed and hide every other one (and the
+    /// selected one while another detail item is shown).
+    pub(crate) fn sync_web(&mut self) {
         let show = self
             .detail_visible()
             .then(|| self.selected.clone())
-            .flatten();
+            .flatten()
+            .filter(|id| {
+                self.live(id)
+                    .is_some_and(|l| l.detail.active == ItemKey::Web)
+            });
         if let Some(id) = &show {
             let runtime = self.runtime.clone();
             if let Some(live) = self.live_mut(id)
@@ -841,7 +968,8 @@ impl App {
 
     fn after_select(&mut self) -> Task<Message> {
         self.sync_web();
-        let attach = self.ensure_attached();
+        self.open_items = false;
+        let attach = Task::batch([self.ensure_attached(), self.sync_detail()]);
         if self.selected_live().is_some() && self.modal.is_none() && self.rename.is_none() {
             Task::batch([attach, operation::focus(TERM_ID)])
         } else {
@@ -1076,6 +1204,7 @@ impl App {
                             }
                         }
                         self.ui.web_urls.remove(&id);
+                        self.ui.detail.remove(&id);
                         if self.selected.as_deref() == Some(id.as_str()) {
                             let profile = self.current_profile();
                             self.selected = self
@@ -1113,33 +1242,85 @@ impl App {
                     base_ref: String::new(),
                     error: None,
                     busy: false,
+                    browser: None,
                 }));
+                self.open_items = false;
                 operation::focus(NEW_REPO_ID)
             }
             Message::NewRepo(v) => self.with_new(|f| f.repo = v),
             Message::NewBrowse => {
-                let start = match &self.modal {
-                    Some(Modal::NewSession(f)) if !f.repo.trim().is_empty() => {
-                        Some(PathBuf::from(f.repo.trim()))
-                    }
-                    _ => None,
+                let Some(c) = self.online() else {
+                    return Task::none();
                 };
-                let title = tr::repo_dialog_title();
-                Task::perform(
-                    async move {
-                        let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
-                        if let Some(dir) = start.filter(|d| d.is_dir()) {
-                            dialog = dialog.set_directory(dir);
-                        }
-                        dialog.pick_folder().await.map(|h| h.path().to_path_buf())
+                let Some(Modal::NewSession(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                if f.browser.take().is_some() {
+                    return Task::none();
+                }
+                f.browser = Some(FolderBrowser::default());
+                // Start at the typed folder when it is browsable, else at the first root.
+                let start = f.repo.trim().trim_matches('"').to_owned();
+                let roots = Task::perform(
+                    {
+                        let c = c.clone();
+                        async move { c.browse_roots().await }
                     },
-                    Message::NewBrowsed,
-                )
+                    Message::BrowseRoots,
+                );
+                Task::batch([roots, self.browse_go(start)])
             }
-            Message::NewBrowsed(path) => match path {
-                Some(p) => self.with_new(|f| f.repo = p.display().to_string()),
-                None => Task::none(),
-            },
+            Message::BrowseRoots(r) => {
+                if let Some(Modal::NewSession(NewForm {
+                    browser: Some(b), ..
+                })) = &mut self.modal
+                {
+                    match r {
+                        Ok(roots) => b.roots = roots,
+                        Err(e) => b.error = Some(i18n::proto_error(&e)),
+                    }
+                }
+                Task::none()
+            }
+            Message::BrowseGo(dir) => self.browse_go(dir),
+            Message::BrowseListed(seq, r) => {
+                let Some(Modal::NewSession(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                let Some(b) = &mut f.browser else {
+                    return Task::none();
+                };
+                if seq != b.seq {
+                    return Task::none();
+                }
+                b.loading = false;
+                match r {
+                    Ok(l) => {
+                        crate::script::log(&format!(
+                            "browse {} (git repo {}, {} folder(s))",
+                            l.path,
+                            l.is_git_repo,
+                            l.entries.len()
+                        ));
+                        // Browsing into a repository picks it.
+                        if l.is_git_repo {
+                            f.repo = l.path.clone();
+                            f.error = None;
+                        }
+                        b.error = None;
+                        b.listing = Some(l);
+                        Task::none()
+                    }
+                    // A typed path outside the roots: start at the first root instead.
+                    Err(_) if b.listing.is_none() && !b.dir.is_empty() => {
+                        self.browse_go(String::new())
+                    }
+                    Err(e) => {
+                        b.error = Some(i18n::proto_error(&e));
+                        Task::none()
+                    }
+                }
+            }
             Message::NewProfile(v) => self.with_new(|f| f.profile = v),
             Message::NewAgent(a) => self.with_new(|f| f.agent = a),
             Message::NewTitle(v) => self.with_new(|f| f.title = v),
@@ -1152,6 +1333,7 @@ impl App {
                     return self.after_select();
                 }
                 let busy = match &self.modal {
+                    Some(Modal::DeleteEntry(f)) => f.busy,
                     Some(Modal::Delete(f)) => f.busy,
                     Some(Modal::StopServer(f)) => f.busy,
                     Some(Modal::Close(f)) => f.busy,
@@ -1180,9 +1362,74 @@ impl App {
                 self.after_select()
             }
             Message::OpenSettings => {
+                self.open_items = false;
                 self.modal = Some(Modal::Settings(SettingsForm::new(&self.ui.server)));
-                operation::focus(PROFILE_NAME_ID)
+                let roots = match self.online() {
+                    Some(c) => {
+                        Task::perform(async move { c.browse_config().await }, Message::RootsLoaded)
+                    }
+                    None => Task::none(),
+                };
+                Task::batch([operation::focus(PROFILE_NAME_ID), roots])
             }
+            Message::RootsLoaded(r) => self.with_settings(|f| {
+                f.roots_busy = false;
+                match r {
+                    Ok(c) => {
+                        crate::script::log(&format!("browse roots: {:?}", c.roots));
+                        f.roots = Some(c);
+                    }
+                    Err(e) => f.roots_error = Some(i18n::proto_error(&e)),
+                }
+            }),
+            Message::RootInput(v) => self.with_settings(|f| f.root_input = v),
+            Message::RootAdd | Message::RootRemove(_) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(Modal::Settings(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                let mut roots = f
+                    .roots
+                    .as_ref()
+                    .map(|c| c.roots.clone())
+                    .unwrap_or_default();
+                match message {
+                    Message::RootRemove(i) if i < roots.len() => {
+                        roots.remove(i);
+                    }
+                    Message::RootAdd => {
+                        let v = f.root_input.trim().trim_matches('"').to_owned();
+                        if v.is_empty() {
+                            return Task::none();
+                        }
+                        roots.push(v);
+                    }
+                    _ => return Task::none(),
+                }
+                f.roots_busy = true;
+                f.roots_error = None;
+                Task::perform(
+                    async move { c.browse_set_roots(roots).await },
+                    Message::RootsSaved,
+                )
+            }
+            Message::RootsSaved(r) => self.with_settings(|f| {
+                f.roots_busy = false;
+                match r {
+                    Ok(c) => {
+                        crate::script::log(&format!("browse roots saved: {:?}", c.roots));
+                        f.roots = Some(c);
+                        f.root_input.clear();
+                        f.roots_error = None;
+                    }
+                    Err(e) => {
+                        crate::script::log(&format!("browse roots refused: {e}"));
+                        f.roots_error = Some(i18n::proto_error(&e));
+                    }
+                }
+            }),
             Message::SettingsNewName(v) => {
                 if let Some(Modal::Settings(f)) = &mut self.modal {
                     f.new_name = v;
@@ -1389,8 +1636,113 @@ impl App {
 
             Message::ToggleDetail => {
                 self.ui.detail_collapsed = !self.ui.detail_collapsed;
+                self.open_items = false;
                 self.save_ui();
                 self.sync_web();
+                self.sync_detail()
+            }
+
+            Message::Detail(sid, m) => self.on_detail(sid, m),
+            Message::ToggleOpenItems => {
+                self.open_items = !self.open_items;
+                Task::none()
+            }
+            Message::CloseOpenItems => {
+                self.open_items = false;
+                Task::none()
+            }
+            Message::QuickOpen => {
+                if self.modal.is_some() {
+                    return Task::none();
+                }
+                self.open_quick()
+            }
+            Message::QuickInput(q) => self.quick_query(q),
+            Message::QuickResults(seq, r) => {
+                if let Some(Modal::QuickOpen(f)) = &mut self.modal
+                    && f.seq == seq
+                {
+                    match r {
+                        Ok(m) => {
+                            f.results = m;
+                            f.error = None;
+                        }
+                        Err(e) => f.error = Some(i18n::proto_error(&e)),
+                    }
+                    f.selected = 0;
+                }
+                Task::none()
+            }
+            Message::QuickMove(d) => {
+                if let Some(Modal::QuickOpen(f)) = &mut self.modal
+                    && !f.results.is_empty()
+                {
+                    let n = f.results.len() as i64;
+                    f.selected = (f.selected as i64 + d as i64).rem_euclid(n) as usize;
+                }
+                Task::none()
+            }
+            Message::QuickSubmit => {
+                let path = match &self.modal {
+                    Some(Modal::QuickOpen(f)) => f.results.get(f.selected).map(|m| m.path.clone()),
+                    _ => None,
+                };
+                match path {
+                    Some(p) => self.update(Message::QuickPick(p)),
+                    None => Task::none(),
+                }
+            }
+            Message::QuickPick(path) => {
+                self.modal = None;
+                let Some(sid) = self.selected.clone() else {
+                    return Task::none();
+                };
+                crate::script::log(&format!("quick open {path}"));
+                if self.ui.detail_collapsed {
+                    self.ui.detail_collapsed = false;
+                    self.save_ui();
+                }
+                let t = self.open_file_at(&sid, &path, 0, 0);
+                Task::batch([t, self.sync_detail()])
+            }
+            Message::FindInFiles => self.open_search(),
+            Message::DefPick(i) => {
+                let Some(Modal::DefPicker(f)) = self.modal.take() else {
+                    return Task::none();
+                };
+                match f.targets.get(i) {
+                    Some(t) => self.open_file_at(&f.session, &t.path, t.line, t.col),
+                    None => Task::none(),
+                }
+            }
+            Message::DeleteEntryConfirm => self.delete_entry(),
+            Message::CloseDirtySave | Message::CloseDirtyDiscard => {
+                let Some(Modal::CloseDirty(f)) = self.modal.take() else {
+                    return Task::none();
+                };
+                if matches!(message, Message::CloseDirtySave) {
+                    return self.save_file(&f.session, &f.path, None, true);
+                }
+                if let Some(file) = self
+                    .detail_mut(&f.session)
+                    .and_then(|d| d.file_mut(&f.path))
+                    && let Some(v) = &mut file.view
+                {
+                    let _ = v.update(ide_views::CodeMessage::Revert);
+                }
+                self.on_detail(f.session, DetailMsg::Close(ItemKey::File(f.path)))
+            }
+            Message::Expire => {
+                let now = std::time::Instant::now();
+                for l in &mut self.sessions {
+                    if l.detail
+                        .toast
+                        .as_ref()
+                        .is_some_and(|(_, t)| now.duration_since(*t) > crate::detail::TOAST_FOR)
+                    {
+                        l.detail.toast = None;
+                    }
+                }
                 Task::none()
             }
             Message::DividerPressed => {
@@ -1399,9 +1751,9 @@ impl App {
             }
             Message::DragMoved(p) => {
                 if self.dragging {
-                    let avail = (self.window_size.width - SIDEBAR_W - DIVIDER_W).max(1.0);
+                    let avail = self.split_avail();
                     self.ui.split_ratio =
-                        ((p.x - SIDEBAR_W) / avail).clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
+                        ((p.x - SIDEBAR_W - 1.0) / avail).clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
                 }
                 Task::none()
             }
@@ -1558,6 +1910,26 @@ impl App {
         iced::exit()
     }
 
+    /// List `dir` in the new-session dialog's folder browser.
+    fn browse_go(&mut self, dir: String) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(Modal::NewSession(NewForm {
+            browser: Some(b), ..
+        })) = &mut self.modal
+        else {
+            return Task::none();
+        };
+        b.seq += 1;
+        b.loading = true;
+        b.dir = dir.clone();
+        let seq = b.seq;
+        Task::perform(async move { c.browse_list(&dir).await }, move |r| {
+            Message::BrowseListed(seq, r)
+        })
+    }
+
     fn with_new(&mut self, f: impl FnOnce(&mut NewForm)) -> Task<Message> {
         if let Some(Modal::NewSession(form)) = &mut self.modal {
             f(form);
@@ -1635,7 +2007,7 @@ impl App {
                 l.info = info;
             }
             None => {
-                let live = Live::new(info, DEFAULT_URL.into(), &self.term_config);
+                let live = Live::new(info, DEFAULT_URL.into(), &self.term_config, None);
                 self.sessions.push(live);
             }
         }
@@ -1650,7 +2022,11 @@ impl App {
         let show = self
             .detail_visible()
             .then(|| self.selected.clone())
-            .flatten();
+            .flatten()
+            .filter(|id| {
+                self.live(id)
+                    .is_some_and(|l| l.detail.active == ItemKey::Web)
+            });
         let Some(live) = self
             .sessions
             .iter_mut()
@@ -1725,6 +2101,47 @@ impl App {
                 }) => Some(Message::CloseModal),
                 _ => None,
             }));
+        }
+        if matches!(self.modal, Some(Modal::QuickOpen(_))) {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowDown),
+                    ..
+                }) => Some(Message::QuickMove(1)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
+                    ..
+                }) => Some(Message::QuickMove(-1)),
+                _ => None,
+            }));
+        } else if self.open_items {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::CloseOpenItems),
+                _ => None,
+            }));
+        }
+        // Window-wide shortcuts: Ctrl+P (quick open), Ctrl+Shift+F (find in files). The
+        // physical key is used so they also work with the Korean input mode on.
+        subs.push(event::listen_with(|e, _, _| match e {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) if modifiers.command() && !modifiers.alt() => {
+                match (key.to_latin(physical_key), modifiers.shift()) {
+                    (Some('p'), false) => Some(Message::QuickOpen),
+                    (Some('f'), true) => Some(Message::FindInFiles),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }));
+        if self.sessions.iter().any(|l| l.detail.toast.is_some()) {
+            subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Expire));
         }
         if self.script.as_ref().is_some_and(|s| !s.done()) {
             subs.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));

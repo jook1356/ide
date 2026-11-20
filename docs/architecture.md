@@ -14,7 +14,8 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 | `ide-i18n` | UI translations: Fluent files embedded at build time, generated type-safe `tr::` API, current language. | no |
 | `ide-term` | Client-side terminal model fed by server bytes (`TermModel`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. No PTY. | iced |
 | `ide-web` | CEF runtime init/subprocess handling and an iced widget showing one browser off-screen (GPU texture import, input forwarding, IME). | iced |
-| `ide-app` | The binary (client only): window layout, sidebar, connection status, `ide-client` calls, one `TermModel` per session, web tabs, `ui.json`. | iced |
+| `ide-views` | File tree, code view/editor, diff view, changes list widgets fed by plain view models. | iced |
+| `ide-app` | The binary (client only): window layout, sidebar, connection status, `ide-client` calls, one `TermModel` per session, the per-session detail area (web page, files, diffs, tree, changes, search), `ui.json`. | iced |
 
 ## Core concepts
 - **Profile**: a named set of agent config. Holds its own Claude config dir and Codex home so skills
@@ -25,8 +26,10 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   (`worktrees/<repo-slug>/<session-id>`), so sessions never share a checkout.
 - **Agent kind**: `Claude` (`claude`), `Codex` (`codex`), `Shell` (cmd / pwsh / $SHELL).
   The agent's own TUI is the chat UI (no structured stream parsing in the MVP).
-- **Detail area**: per-session tabs (web preview first; files/diffs later). Tabs belong to a session,
-  so switching sessions switches the detail area.
+- **Detail area**: per-session open items (the web page, files, diffs) shown one at a time under a
+  header with an "open items" switcher, plus a side panel (Changes / Explore / Search). Items
+  belong to a session, so switching sessions switches the detail area (see
+  `docs/server-architecture.md`, "App integration (phase 2)").
 
 ## Languages (i18n)
 - All UI text lives in `crates/ide-i18n/locales/<code>/ide.ftl` ([Project Fluent](https://projectfluent.org)).

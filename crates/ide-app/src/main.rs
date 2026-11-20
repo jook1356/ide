@@ -14,6 +14,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod detail;
+mod detail_view;
 mod i18n;
 mod script;
 mod style;

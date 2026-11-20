@@ -21,12 +21,18 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use iced::keyboard::{Key, Modifiers, key::Named};
 use iced::{Task, window};
 use ide_client::Agent;
 use ide_i18n::{Lang, LanguagePref, tr};
+use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMessage, TreeMessage};
 
-use crate::app::{App, Conn, Message, Modal, RunState};
+use crate::app::{App, Conn, Message, Modal, NewForm, RunState};
+use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
 use crate::ui_state::{CloseAction, ServerPref};
+
+/// Session index meaning "the phase 2 session" (created through the folder browser).
+const P2: usize = 99;
 
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 static T0: OnceLock<Instant> = OnceLock::new();
@@ -141,6 +147,64 @@ enum Step {
     CloseStop,
     ExpectSavedOnClose(CloseAction),
     Exit,
+
+    // ---- phase 2: files, changes, search, definitions (on the phase 2 session)
+    /// Settings: add a browse root (`None` = the test repo's parent folder).
+    AddRoot(Option<&'static str>),
+    /// The settings list the repo's parent as a browse root and `server.json` stores it.
+    WaitRoots(u64),
+    ExpectRootsError(&'static str, u64),
+    /// Open the new-session dialog with an empty folder, a Shell agent and a title.
+    OpenNewBlank(&'static str),
+    /// Open the dialog's folder browser.
+    BrowseOpen,
+    /// List the test repo's parent (like picking that root).
+    BrowseParent,
+    /// Wait until the browser lists the parent with the repo marked as git.
+    WaitBrowseRepo(u64),
+    /// Click the repo entry: it is listed and picked into the folder field.
+    BrowseIntoRepo,
+    ExpectRepoPicked(u64),
+    /// Remember the newest session as the phase 2 session.
+    MarkP2,
+    /// A detail message to the phase 2 session.
+    D(DetailMsg),
+    /// An app message.
+    App(Message),
+    TreeReveal(&'static str),
+    TreeKey(Named),
+    TreeRename(&'static str, &'static str),
+    WaitDir(&'static str, u64),
+    /// The file is open, shown and loaded.
+    WaitFile(&'static str, u64),
+    TypeIn(&'static str, &'static str),
+    /// Put the cursor at 1-based line / column.
+    GoTo(&'static str, usize, usize),
+    /// Put the cursor on the first occurrence of the needle (plus a char offset) and Ctrl+click.
+    CtrlClickOn(&'static str, &'static str, usize),
+    Code(&'static str, CodeMessage),
+    ExpectDirty(&'static str, bool),
+    /// The buffer was saved and the file on disk contains (or not) the needle.
+    WaitSaved(&'static str, &'static str, bool, u64),
+    WaitBuffer(&'static str, &'static str, u64),
+    WaitBar(&'static str, Option<FileBar>, u64),
+    WaitActive(ItemKey, u64),
+    WaitChange(&'static str, u64),
+    OpenChange(ChangeGroup, &'static str),
+    WaitDiff(u64),
+    WaitSearch(usize, u64),
+    OpenFirstHit(&'static str),
+    ExpectCursorLine(&'static str, usize),
+    WaitQuick(&'static str, u64),
+    WaitToast(u64),
+    /// A path in the phase 2 worktree exists (or not).
+    WaitExists(&'static str, bool, u64),
+    ExpectSavedDetail(&'static str),
+    ExpectDeleteModal,
+    /// The item is open (e.g. it followed a rename).
+    ExpectOpen(ItemKey),
+    /// Write raw bytes to the phase 2 session terminal.
+    WriteP2(&'static str),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -171,6 +235,8 @@ pub struct Script {
     probe: Probe,
     children: Option<std::sync::mpsc::Receiver<String>>,
     finished: bool,
+    /// Index of the phase 2 session in `ids`.
+    p2: Option<usize>,
 }
 
 fn data_url(html: &str) -> String {
@@ -225,6 +291,8 @@ impl Script {
             .map(PathBuf::from)
             .unwrap_or_else(|| data.join("test-repo"));
         let claude = std::env::var("IDE_APP_SCRIPT_CLAUDE").is_ok_and(|v| v == "1");
+        // `IDE_APP_SCRIPT_ONLY=p2`: startup, the phase 2 checks and the server stop only.
+        let only_p2 = std::env::var("IDE_APP_SCRIPT_ONLY").is_ok_and(|v| v == "p2");
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -232,7 +300,11 @@ impl Script {
             evidence.display()
         ));
         Some(Script {
-            steps: steps(claude),
+            steps: if only_p2 {
+                steps_p2_only()
+            } else {
+                steps(claude)
+            },
             pc: 0,
             started: None,
             waiting_shot: false,
@@ -249,6 +321,7 @@ impl Script {
             probe: Probe::default(),
             children: None,
             finished: false,
+            p2: None,
         })
     }
 
@@ -257,7 +330,22 @@ impl Script {
     }
 
     fn id(&self, i: usize) -> Option<String> {
+        let i = if i == P2 { self.p2? } else { i };
         self.ids.get(i).cloned()
+    }
+
+    fn repo_parent(&self) -> String {
+        self.repo
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+
+    fn repo_name(&self) -> String {
+        self.repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     fn check(&mut self, ok: bool, what: &str) {
@@ -509,6 +597,7 @@ fn steps(claude: bool) -> Vec<Step> {
             GitWorktreeList,
         ]);
     }
+    s.extend(phase2());
     s.extend([
         Log("--- stop the server from the settings (sessions end, daemon exits)"),
         OpenSettings,
@@ -574,6 +663,275 @@ fn steps(claude: bool) -> Vec<Step> {
     s
 }
 
+/// Startup, phase 2 and the server stop (`IDE_APP_SCRIPT_ONLY=p2`).
+fn steps_p2_only() -> Vec<Step> {
+    use Step::*;
+    let mut s = vec![
+        Log("--- startup (phase 2 only)"),
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        WaitReady(30_000),
+        MarkDaemon,
+        EnsureRepo,
+    ];
+    s.extend(phase2());
+    s.extend([
+        OpenSettings,
+        AskStopServer,
+        ConfirmStopServer,
+        WaitDisconnected(15_000),
+        WaitDaemonGone(10_000),
+        Exit,
+    ]);
+    s
+}
+
+/// Phase 2: browse roots, the server-side folder browser, the detail area (tree, editor,
+/// live refresh, save conflicts, changes + diffs, search, quick open, go to definition,
+/// rename / delete) and a Korean pass.
+fn phase2() -> Vec<Step> {
+    use Step::*;
+    let main = "src/main.ts";
+    let util = "src/util.ts";
+    let memo = "한글 메모.txt";
+    let renamed = "메모-바뀜.txt";
+    let enter = |n: Named| TreeKey(n);
+    vec![
+        Log("--- phase 2: browse roots in the settings (browse.set_roots)"),
+        OpenSettings,
+        AddRoot(Some("relative\\folder")),
+        ExpectRootsError("Invalid path", 5000),
+        AddRoot(None),
+        WaitRoots(5000),
+        Wait(300),
+        Shot("30_settings_browse_roots"),
+        Pause("settings_browse_roots"),
+        CloseModal,
+        Log("--- new session through the server-side folder browser"),
+        OpenNewBlank("phase 2"),
+        BrowseOpen,
+        BrowseParent,
+        WaitBrowseRepo(10_000),
+        Wait(200),
+        Shot("31_new_session_browser"),
+        Pause("new_session_browser"),
+        BrowseIntoRepo,
+        ExpectRepoPicked(10_000),
+        Wait(200),
+        Shot("32_new_session_repo_picked"),
+        Submit,
+        WaitCreated(20_000),
+        MarkP2,
+        WaitText(P2, ">", 15_000),
+        Log("--- explorer: lazy tree, open a file"),
+        D(DetailMsg::Side(SideTab::Explore)),
+        WaitDir("", 10_000),
+        TreeReveal("src/main.ts"),
+        WaitDir("src", 10_000),
+        TreeReveal("src/main.ts"),
+        enter(Named::Enter),
+        WaitFile(main, 10_000),
+        Wait(400),
+        Shot("33_tree_file_open"),
+        Pause("tree_file_open"),
+        Log("--- edit + save (fs.write with the read version)"),
+        GoTo(main, 1, 1),
+        TypeIn(main, "// edited in ide\n"),
+        ExpectDirty(main, true),
+        Wait(200),
+        Shot("34_dirty"),
+        Pause("dirty"),
+        Code(main, CodeMessage::Save),
+        WaitSaved(main, "// edited in ide", true, 10_000),
+        Log("--- external change (terminal) on a clean buffer: reload + tree/changes refresh"),
+        WriteP2("echo external-1>> src\\main.ts\r"),
+        WaitBuffer(main, "external-1", 10_000),
+        D(DetailMsg::Side(SideTab::Changes)),
+        WaitChange(main, 10_000),
+        Wait(400),
+        Shot("35_external_change_reloaded"),
+        Log("--- external change on a dirty buffer: 'changed on disk' bar"),
+        D(DetailMsg::Side(SideTab::Explore)),
+        GoTo(main, 1, 1),
+        TypeIn(main, "// unsaved line\n"),
+        ExpectDirty(main, true),
+        WriteP2("echo external-2>> src\\main.ts\r"),
+        WaitBar(main, Some(FileBar::ChangedOnDisk), 10_000),
+        Wait(300),
+        Shot("36_changed_on_disk_bar"),
+        Pause("changed_on_disk_bar"),
+        Log("--- save conflict: inline bar, compare, overwrite"),
+        Code(main, CodeMessage::Save),
+        WaitBar(main, Some(FileBar::Conflict), 10_000),
+        Wait(300),
+        Shot("37_save_conflict_bar"),
+        D(DetailMsg::BarCompare(main.into())),
+        WaitActive(ItemKey::Compare(main.into()), 10_000),
+        Wait(400),
+        Shot("38_compare_disk_vs_buffer"),
+        Pause("compare"),
+        D(DetailMsg::Activate(ItemKey::File(main.into()))),
+        D(DetailMsg::BarOverwrite(main.into())),
+        WaitSaved(main, "// unsaved line", true, 10_000),
+        WaitSaved(main, "external-2", false, 10_000),
+        WaitBar(main, None, 5000),
+        Log("--- changes -> diff (unified / split)"),
+        D(DetailMsg::Side(SideTab::Changes)),
+        WaitChange(main, 10_000),
+        OpenChange(ChangeGroup::Unstaged, main),
+        WaitDiff(10_000),
+        Wait(400),
+        Shot("39_diff_unified"),
+        Pause("diff_unified"),
+        D(DetailMsg::Diff(
+            ItemKey::Diff {
+                staged: false,
+                path: main.into(),
+            },
+            DiffViewMessage::SetMode(DiffMode::Split),
+        )),
+        Wait(400),
+        Shot("40_diff_split"),
+        Pause("diff_split"),
+        D(DetailMsg::Diff(
+            ItemKey::Diff {
+                staged: false,
+                path: main.into(),
+            },
+            DiffViewMessage::SetMode(DiffMode::Unified),
+        )),
+        Log("--- open items list"),
+        App(Message::ToggleOpenItems),
+        Wait(300),
+        Shot("41_open_items"),
+        Pause("open_items"),
+        App(Message::CloseOpenItems),
+        Log("--- text search (streamed), open a result at its line"),
+        App(Message::FindInFiles),
+        D(DetailMsg::SearchInput("greet".into())),
+        D(DetailMsg::SearchSubmit),
+        WaitSearch(2, 10_000),
+        Wait(300),
+        Shot("42_search_results"),
+        Pause("search"),
+        OpenFirstHit(util),
+        WaitFile(util, 10_000),
+        ExpectCursorLine(util, 1),
+        Wait(300),
+        Shot("43_search_hit_opened"),
+        Log("--- Ctrl+P quick open (Korean file name)"),
+        App(Message::QuickOpen),
+        App(Message::QuickInput("메모".into())),
+        WaitQuick(memo, 10_000),
+        Wait(300),
+        Shot("44_quick_open"),
+        Pause("quick_open"),
+        App(Message::QuickSubmit),
+        WaitFile(memo, 10_000),
+        WaitBuffer(memo, "첫 줄", 5000),
+        Wait(300),
+        Shot("45_korean_file"),
+        Log("--- binary file placeholder"),
+        D(DetailMsg::Side(SideTab::Explore)),
+        TreeReveal("logo.bin"),
+        enter(Named::Enter),
+        WaitFile("logo.bin", 10_000),
+        Wait(300),
+        Shot("46_binary_file"),
+        Log("--- go to definition across files (unsaved buffer sent)"),
+        D(DetailMsg::Activate(ItemKey::File(main.into()))),
+        WaitFile(main, 5000),
+        CtrlClickOn(main, "greet('world')", 1),
+        WaitActive(ItemKey::File(util.into()), 10_000),
+        ExpectCursorLine(util, 1),
+        Wait(300),
+        Shot("47_definition_opened"),
+        Pause("definition"),
+        TreeReveal("src/notes.md"),
+        enter(Named::Enter),
+        WaitFile("src/notes.md", 10_000),
+        CtrlClickOn("src/notes.md", "notes", 0),
+        WaitToast(10_000),
+        Wait(200),
+        Shot("48_definition_none_toast"),
+        Log("--- rename / delete through the tree"),
+        D(DetailMsg::Side(SideTab::Explore)),
+        TreeRename(memo, renamed),
+        WaitExists(renamed, true, 10_000),
+        WaitExists(memo, false, 5000),
+        ExpectOpen(ItemKey::File(renamed.into())),
+        Wait(300),
+        Shot("49_renamed"),
+        TreeReveal("logo.bin"),
+        TreeKey(Named::Delete),
+        ExpectDeleteModal,
+        Wait(200),
+        Shot("50_delete_confirm"),
+        Pause("delete_confirm"),
+        App(Message::DeleteEntryConfirm),
+        WaitExists("logo.bin", false, 10_000),
+        Wait(300),
+        Shot("51_deleted"),
+        ExpectSavedDetail("file:src/main.ts"),
+        Log("--- phase 2 Korean pass"),
+        SetLang(LanguagePref::Fixed(Lang::Ko)),
+        ExpectLang(Lang::Ko, "새 세션"),
+        D(DetailMsg::Side(SideTab::Changes)),
+        OpenChange(ChangeGroup::Unstaged, main),
+        WaitDiff(10_000),
+        Wait(300),
+        Shot("ko_10_changes_diff"),
+        Pause("ko_changes_diff"),
+        D(DetailMsg::Side(SideTab::Search)),
+        Wait(300),
+        Shot("ko_11_search"),
+        D(DetailMsg::Activate(ItemKey::File(main.into()))),
+        WaitFile(main, 5000),
+        GoTo(main, 1, 1),
+        TypeIn(main, "// 저장 안 한 줄\n"),
+        WriteP2("echo external-3>> src\\main.ts\r"),
+        WaitBar(main, Some(FileBar::ChangedOnDisk), 10_000),
+        Wait(300),
+        Shot("ko_12_changed_on_disk"),
+        Pause("ko_changed_on_disk"),
+        D(DetailMsg::BarReload(main.into())),
+        WaitBar(main, None, 10_000),
+        ExpectDirty(main, false),
+        App(Message::ToggleOpenItems),
+        Wait(300),
+        Shot("ko_13_open_items"),
+        App(Message::CloseOpenItems),
+        App(Message::QuickOpen),
+        App(Message::QuickInput("util".into())),
+        WaitQuick(util, 10_000),
+        Wait(300),
+        Shot("ko_14_quick_open"),
+        CloseModal,
+        TreeReveal("src/notes.md"),
+        enter(Named::Enter),
+        WaitFile("src/notes.md", 10_000),
+        CtrlClickOn("src/notes.md", "notes", 0),
+        WaitToast(10_000),
+        Wait(200),
+        Shot("ko_15_definition_none"),
+        OpenNewBlank(""),
+        BrowseOpen,
+        BrowseParent,
+        WaitBrowseRepo(10_000),
+        Wait(300),
+        Shot("ko_16_new_session_browser"),
+        Pause("ko_new_session_browser"),
+        CloseModal,
+        OpenSettings,
+        WaitRoots(5000),
+        Wait(300),
+        Shot("ko_17_settings_roots"),
+        Pause("ko_settings_roots"),
+        CloseModal,
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        ExpectLang(Lang::En, "New session"),
+    ]
+}
+
 /// A command without a console window (the app is a GUI process).
 fn command(program: &str) -> Command {
     #[allow(unused_mut)]
@@ -626,7 +984,34 @@ fn ensure_repo(repo: &Path) -> Result<(), String> {
     std::fs::create_dir_all(repo).map_err(|e| e.to_string())?;
     git(repo, &["init", "-q", "-b", "main"])?;
     std::fs::write(repo.join("README.md"), "# ide test repo\n").map_err(|e| e.to_string())?;
-    git(repo, &["add", "README.md"])?;
+    // Phase 2 fixtures: a TS import for go-to-definition, a Korean file name, a binary file.
+    let src = repo.join("src");
+    std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
+    let files: [(PathBuf, &[u8]); 5] = [
+        (
+            src.join("util.ts"),
+            b"export function greet(name: string): string {\n  return `hello ${name}`\n}\n",
+        ),
+        (
+            src.join("main.ts"),
+            b"import { greet } from './util'\n\nconsole.log(greet('world'))\n",
+        ),
+        (src.join("notes.md"), b"# notes\n\nPlain markdown.\n"),
+        (
+            repo.join("한글 메모.txt"),
+            "첫 줄\n둘째 줄: 한국어 파일 이름\n".as_bytes(),
+        ),
+        (
+            repo.join("logo.bin"),
+            &[
+                0x89, b'P', b'N', b'G', 0, 0, 0, 0x0d, 1, 2, 3, 0, 0xff, 0xfe,
+            ],
+        ),
+    ];
+    for (p, bytes) in files {
+        std::fs::write(&p, bytes).map_err(|e| e.to_string())?;
+    }
+    git(repo, &["add", "."])?;
     git(repo, &["commit", "-q", "-m", "init"])?;
     Ok(())
 }
@@ -674,6 +1059,446 @@ impl Probe {
     }
 }
 
+/// The phase 2 session's detail area.
+fn p2_detail<'a>(sc: &Script, app: &'a App) -> Option<&'a crate::detail::Detail> {
+    sc.id(P2).and_then(|s| app.detail(&s))
+}
+
+fn p2_file<'a>(sc: &Script, app: &'a App, path: &str) -> Option<&'a crate::detail::FileItem> {
+    p2_detail(sc, app).and_then(|d| d.file(path))
+}
+
+/// Phase 2 steps: `(advance, task)`.
+fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Task<Message>) {
+    let timeout = |ms: u64| el > Duration::from_millis(ms);
+    let sid = sc.id(P2).unwrap_or_default();
+    let mut task = Task::none();
+    // `wait(cond, ms, what)`: pass, fail on timeout, or keep waiting.
+    macro_rules! wait {
+        ($ok:expr, $ms:expr, $what:expr) => {{
+            if $ok {
+                sc.check(true, &$what);
+                true
+            } else if timeout($ms) {
+                sc.check(false, &format!("timeout: {}", $what));
+                true
+            } else {
+                false
+            }
+        }};
+    }
+    let next = match st {
+        Step::AddRoot(v) => {
+            let v = v.map(str::to_owned).unwrap_or_else(|| sc.repo_parent());
+            log(&format!("settings: add browse root {v:?}"));
+            task = Task::batch([
+                app.update(Message::RootInput(v)),
+                app.update(Message::RootAdd),
+            ]);
+            true
+        }
+        Step::WaitRoots(ms) => {
+            let parent = sc.repo_parent();
+            let listed = match &app.modal {
+                Some(Modal::Settings(f)) => f
+                    .roots
+                    .as_ref()
+                    .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &parent))),
+                _ => false,
+            };
+            let stored = std::fs::read_to_string(sc.data.join("server.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| {
+                    v.get("browse_roots")?.as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .any(|r| crate::app::same_path(r, &parent))
+                    })
+                })
+                .unwrap_or(false);
+            wait!(
+                listed && stored,
+                ms,
+                format!("browse root {parent} listed={listed} in server.json={stored}")
+            )
+        }
+        Step::ExpectRootsError(needle, ms) => {
+            let err = match &app.modal {
+                Some(Modal::Settings(f)) => f.roots_error.clone(),
+                _ => None,
+            };
+            wait!(
+                err.as_deref().is_some_and(|e| e.contains(needle)),
+                ms,
+                format!("browse root refused: {err:?}")
+            )
+        }
+        Step::OpenNewBlank(title) => {
+            task = Task::batch([
+                app.update(Message::OpenNew),
+                app.update(Message::NewRepo(String::new())),
+                app.update(Message::NewAgent(Agent::Shell)),
+                app.update(Message::NewTitle(title.into())),
+            ]);
+            true
+        }
+        Step::BrowseOpen => {
+            task = app.update(Message::NewBrowse);
+            true
+        }
+        Step::BrowseParent => {
+            task = app.update(Message::BrowseGo(sc.repo_parent()));
+            true
+        }
+        Step::WaitBrowseRepo(ms) => {
+            let (parent, name) = (sc.repo_parent(), sc.repo_name());
+            let ok = match &app.modal {
+                Some(Modal::NewSession(NewForm {
+                    browser: Some(b), ..
+                })) => {
+                    b.listing.as_ref().is_some_and(|l| {
+                        crate::app::same_path(&l.path, &parent)
+                            && l.entries.iter().any(|e| e.name == name && e.is_git_repo)
+                    }) && !b.roots.is_empty()
+                }
+                _ => false,
+            };
+            wait!(
+                ok,
+                ms,
+                format!("folder browser lists {parent} with {name} marked git")
+            )
+        }
+        Step::BrowseIntoRepo => {
+            let name = sc.repo_name();
+            let path = match &app.modal {
+                Some(Modal::NewSession(NewForm {
+                    browser: Some(b), ..
+                })) => b.listing.as_ref().and_then(|l| {
+                    l.entries
+                        .iter()
+                        .find(|e| e.name == name)
+                        .map(|e| e.path.clone())
+                }),
+                _ => None,
+            };
+            match path {
+                Some(p) => task = app.update(Message::BrowseGo(p)),
+                None => sc.check(false, "repo entry not in the browser"),
+            }
+            true
+        }
+        Step::ExpectRepoPicked(ms) => {
+            let repo = match &app.modal {
+                Some(Modal::NewSession(f)) => f.repo.clone(),
+                _ => String::new(),
+            };
+            let want = sc.repo.display().to_string();
+            wait!(
+                crate::app::same_path(&repo, &want),
+                ms,
+                format!("browsing into the repo picked it: {repo:?}")
+            )
+        }
+        Step::MarkP2 => {
+            sc.p2 = sc.ids.len().checked_sub(1);
+            log(&format!("phase 2 session: {:?}", sc.id(P2)));
+            true
+        }
+        Step::D(m) => {
+            log(&format!("detail <- {m:?}"));
+            task = app.update(Message::Detail(sid, m));
+            true
+        }
+        Step::App(m) => {
+            log(&format!("app <- {m:?}"));
+            task = app.update(m);
+            true
+        }
+        Step::TreeReveal(p) => {
+            task = app.tree_reveal(&sid, p);
+            true
+        }
+        Step::TreeKey(k) => {
+            task = app.update(Message::Detail(
+                sid,
+                DetailMsg::Tree(TreeMessage::Key(Key::Named(k), Modifiers::empty())),
+            ));
+            true
+        }
+        Step::TreeRename(from, to) => {
+            let t1 = app.tree_reveal(&sid, from);
+            let m = |x| Message::Detail(sid.clone(), DetailMsg::Tree(x));
+            let t2 = app.update(m(TreeMessage::Key(
+                Key::Named(Named::F2),
+                Modifiers::empty(),
+            )));
+            let t3 = app.update(m(TreeMessage::EditInput(to.into())));
+            let t4 = app.update(m(TreeMessage::EditSubmit));
+            task = Task::batch([t1, t2, t3, t4]);
+            true
+        }
+        Step::WaitDir(dir, ms) => {
+            let ok = p2_detail(sc, app).is_some_and(|d| d.loaded_dirs.contains(dir));
+            let rows = p2_detail(sc, app)
+                .map(|d| d.tree.visible_rows())
+                .unwrap_or(0);
+            wait!(ok, ms, format!("tree listed {dir:?} ({rows} rows shown)"))
+        }
+        Step::WaitFile(path, ms) => {
+            let active = p2_detail(sc, app).is_some_and(|d| d.active == ItemKey::File(path.into()));
+            let f = p2_file(sc, app, path);
+            let loaded = f.is_some_and(|f| f.view.is_some() || f.binary);
+            let what = f
+                .map(|f| {
+                    format!(
+                        "lines {:?}, binary {}, error {:?}",
+                        f.view.as_ref().map(|v| v.line_count()),
+                        f.binary,
+                        f.error
+                    )
+                })
+                .unwrap_or_default();
+            wait!(active && loaded, ms, format!("file {path} shown: {what}"))
+        }
+        Step::TypeIn(path, s) => {
+            use iced::advanced::text::editor::{Action, Edit};
+            let mut ts = Vec::new();
+            for c in s.chars() {
+                let edit = if c == '\n' {
+                    Edit::Enter
+                } else {
+                    Edit::Insert(c)
+                };
+                ts.push(app.update(Message::Detail(
+                    sid.clone(),
+                    DetailMsg::Code(path.into(), CodeMessage::Action(Action::Edit(edit))),
+                )));
+            }
+            log(&format!("typed {s:?} into {path}"));
+            task = Task::batch(ts);
+            true
+        }
+        Step::GoTo(path, l, c) => {
+            if let Some(v) = app
+                .detail_mut(&sid)
+                .and_then(|d| d.file_mut(path))
+                .and_then(|f| f.view.as_mut())
+            {
+                task = v.go_to(l, c);
+            }
+            true
+        }
+        Step::CtrlClickOn(path, needle, off) => {
+            let pos = p2_file(sc, app, path)
+                .and_then(|f| f.view.as_ref())
+                .and_then(|v| {
+                    v.text().lines().enumerate().find_map(|(i, l)| {
+                        l.find(needle)
+                            .map(|b| (i + 1, l[..b].chars().count() + 1 + off))
+                    })
+                });
+            match pos {
+                Some((l, c)) => {
+                    log(&format!("ctrl+click {path}:{l}:{c} ({needle:?})"));
+                    let t = app
+                        .detail_mut(&sid)
+                        .and_then(|d| d.file_mut(path))
+                        .and_then(|f| f.view.as_mut())
+                        .map(|v| v.go_to::<Message>(l, c))
+                        .unwrap_or_else(Task::none);
+                    let t2 = app.update(Message::Detail(
+                        sid,
+                        DetailMsg::Code(path.into(), CodeMessage::CtrlClick),
+                    ));
+                    task = Task::batch([t, t2]);
+                }
+                None => sc.check(false, &format!("{needle:?} not in {path}")),
+            }
+            true
+        }
+        Step::Code(path, m) => {
+            task = app.update(Message::Detail(sid, DetailMsg::Code(path.into(), m)));
+            true
+        }
+        Step::ExpectDirty(path, want) => {
+            let d = p2_file(sc, app, path).map(|f| f.dirty());
+            sc.check(d == Some(want), &format!("{path} dirty={d:?}"));
+            true
+        }
+        Step::WaitSaved(path, needle, present, ms) => {
+            let f = p2_file(sc, app, path);
+            let clean = f.is_some_and(|f| !f.dirty() && !f.saving && f.bar.is_none());
+            let wt = app
+                .live(&sid)
+                .map(|l| PathBuf::from(&l.info.worktree_path))
+                .unwrap_or_default();
+            let disk = std::fs::read_to_string(wt.join(path)).unwrap_or_default();
+            wait!(
+                clean && disk.contains(needle) == present,
+                ms,
+                format!("{path} saved; on disk contains {needle:?} = {present}")
+            )
+        }
+        Step::WaitBuffer(path, needle, ms) => {
+            let text = p2_file(sc, app, path)
+                .and_then(|f| f.view.as_ref())
+                .map(|v| v.text())
+                .unwrap_or_default();
+            wait!(
+                text.contains(needle),
+                ms,
+                format!("buffer of {path} shows {needle:?}")
+            )
+        }
+        Step::WaitBar(path, bar, ms) => {
+            let got = p2_file(sc, app, path).map(|f| f.bar);
+            wait!(
+                got == Some(bar),
+                ms,
+                format!("{path} bar {got:?} (want {bar:?})")
+            )
+        }
+        Step::WaitActive(key, ms) => {
+            let got = p2_detail(sc, app).map(|d| d.active.clone());
+            let loaded = match p2_detail(sc, app).and_then(|d| d.item(&key)) {
+                Some(Item::File(f)) => f.view.is_some(),
+                Some(Item::Diff(x)) => x.view.is_some(),
+                _ => true,
+            };
+            wait!(
+                got.as_ref() == Some(&key) && loaded,
+                ms,
+                format!("detail shows {got:?}")
+            )
+        }
+        Step::WaitChange(path, ms) => {
+            let total = p2_detail(sc, app).map(|d| d.changes.total()).unwrap_or(0);
+            let ok = p2_detail(sc, app).is_some_and(|d| {
+                ChangeGroup::ALL
+                    .iter()
+                    .any(|g| d.changes.entries(*g).iter().any(|e| e.path == path))
+            });
+            wait!(ok, ms, format!("changes list has {path} ({total} changed)"))
+        }
+        Step::OpenChange(g, path) => {
+            let i = p2_detail(sc, app)
+                .and_then(|d| d.changes.entries(g).iter().position(|e| e.path == path));
+            match i {
+                Some(i) => {
+                    task = app.update(Message::Detail(
+                        sid,
+                        DetailMsg::Changes(ChangesMessage::Open(g, i)),
+                    ))
+                }
+                None => sc.check(false, &format!("{path} not in {g:?}")),
+            }
+            true
+        }
+        Step::WaitDiff(ms) => {
+            let d = p2_detail(sc, app);
+            let ok = d.is_some_and(|d| {
+                matches!(d.active, ItemKey::Diff { .. })
+                    && matches!(d.active_item(), Some(Item::Diff(x)) if x.view.is_some())
+            });
+            let rows = d.and_then(|d| match d.active_item() {
+                Some(Item::Diff(x)) => x.view.as_ref().map(|v| (v.mode(), v.row_count())),
+                _ => None,
+            });
+            wait!(ok, ms, format!("diff shown: {rows:?}"))
+        }
+        Step::WaitSearch(files, ms) => {
+            let s = p2_detail(sc, app).map(|d| &d.search);
+            let done = s.is_some_and(|s| !s.running && s.summary.is_some());
+            let got = s.map(|s| (s.groups.len(), s.hit_count(), s.error.clone()));
+            wait!(
+                done && got.as_ref().is_some_and(|g| g.0 >= files),
+                ms,
+                format!("search streamed (files, hits, error) = {got:?}")
+            )
+        }
+        Step::OpenFirstHit(path) => {
+            let hit = p2_detail(sc, app).and_then(|d| {
+                d.search
+                    .groups
+                    .iter()
+                    .find(|(p, _)| p == path)
+                    .and_then(|(_, h)| h.first().cloned())
+            });
+            match hit {
+                Some(h) => {
+                    log(&format!("open search hit {}:{}:{}", h.path, h.line, h.col));
+                    task = app.update(Message::Detail(
+                        sid,
+                        DetailMsg::OpenAt(h.path, h.line, h.col),
+                    ));
+                }
+                None => sc.check(false, &format!("no search hit in {path}")),
+            }
+            true
+        }
+        Step::ExpectCursorLine(path, line) => {
+            let c = p2_file(sc, app, path)
+                .and_then(|f| f.view.as_ref())
+                .map(|v| v.cursor());
+            sc.check(
+                c.is_some_and(|c| c.0 == line),
+                &format!("{path} cursor {c:?} (want line {line})"),
+            );
+            true
+        }
+        Step::WaitQuick(needle, ms) => {
+            let r: Vec<String> = match &app.modal {
+                Some(Modal::QuickOpen(f)) => f.results.iter().map(|m| m.path.clone()).collect(),
+                _ => Vec::new(),
+            };
+            wait!(
+                r.first().is_some_and(|p| p.contains(needle)),
+                ms,
+                format!("quick open results {r:?}")
+            )
+        }
+        Step::WaitToast(ms) => {
+            let t = p2_detail(sc, app).and_then(|d| d.toast.as_ref().map(|t| t.0.clone()));
+            wait!(t.is_some(), ms, format!("transient message {t:?}"))
+        }
+        Step::WaitExists(rel, want, ms) => {
+            let wt = app
+                .live(&sid)
+                .map(|l| PathBuf::from(&l.info.worktree_path))
+                .unwrap_or_default();
+            let exists = wt.join(rel).exists();
+            wait!(exists == want, ms, format!("{rel} exists={exists}"))
+        }
+        Step::ExpectSavedDetail(key) => {
+            let saved = crate::ui_state::UiState::load(&app.data_dir);
+            let open = saved.detail.get(&sid).map(|d| d.open.clone());
+            sc.check(
+                open.as_ref().is_some_and(|o| o.iter().any(|k| k == key)),
+                &format!("ui.json remembers the open items: {open:?}"),
+            );
+            true
+        }
+        Step::ExpectDeleteModal => {
+            let ok = matches!(&app.modal, Some(Modal::DeleteEntry(f)) if f.path == "logo.bin");
+            sc.check(ok, "delete confirm shown for logo.bin");
+            true
+        }
+        Step::ExpectOpen(key) => {
+            let open = p2_detail(sc, app).is_some_and(|d| d.item(&key).is_some());
+            wait!(open, 5000, format!("{key:?} is open"))
+        }
+        Step::WriteP2(s) => {
+            log(&format!("type into the phase 2 terminal: {s:?}"));
+            task = app.update(Message::TermInput(sid, s.as_bytes().to_vec()));
+            true
+        }
+        _ => true,
+    };
+    (next, task)
+}
+
 /// Called on every `Message::Tick` while the script runs.
 pub fn tick(app: &mut App) -> Task<Message> {
     let Some(mut script) = app.script.take() else {
@@ -686,11 +1511,24 @@ pub fn tick(app: &mut App) -> Task<Message> {
     task
 }
 
-/// Mean luma of the detail area (right part of the window, below the URL bar and outside the
-/// centred modal card) of a screenshot.
-fn detail_luma(shot: &window::Screenshot) -> f32 {
+/// Mean luma of the detail pane (between the divider and the side panel, below the header and
+/// right of the centred modal card) of a screenshot.
+fn detail_luma(app: &App, shot: &window::Screenshot) -> f32 {
     let (w, h) = (shot.size.width as usize, shot.size.height as usize);
-    let (x0, x1, y0, y1) = (w * 80 / 100, w * 96 / 100, h * 30 / 100, h * 90 / 100);
+    let scale = shot.size.width as f32 / app.window_size.width.max(1.0);
+    let lw = app.window_size.width;
+    let pane_l = crate::app::SIDEBAR_W
+        + 1.0
+        + app.ui.split_ratio * app.split_avail()
+        + crate::app::DIVIDER_W;
+    let pane_r = lw - crate::detail::SIDE_W - 1.0 - 8.0;
+    let left = pane_l.max(lw / 2.0 + 270.0);
+    let px = |x: f32| ((x * scale) as usize).min(w);
+    let (mut x0, x1) = (px(left), px(pane_r));
+    if x0 + 8 >= x1 {
+        x0 = x1.saturating_sub(8);
+    }
+    let (y0, y1) = (h * 30 / 100, h * 90 / 100);
     let mut sum = 0.0f64;
     let mut n = 0u64;
     for y in (y0..y1).step_by(4) {
@@ -706,6 +1544,7 @@ fn detail_luma(shot: &window::Screenshot) -> f32 {
 }
 
 pub fn save_shot(app: &mut App, name: &str, shot: &window::Screenshot) {
+    let luma = detail_luma(app, shot);
     let Some(script) = app.script.as_mut() else {
         return;
     };
@@ -718,7 +1557,6 @@ pub fn save_shot(app: &mut App, name: &str, shot: &window::Screenshot) {
         enc.write_header()?.write_image_data(&shot.rgba)?;
         Ok(())
     })();
-    let luma = detail_luma(shot);
     script.luma.insert(name.to_owned(), luma);
     match result {
         Ok(()) => log(&format!(
@@ -908,8 +1746,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::SetSplit(r) => {
                 // Same path as dragging the divider: press, move, release.
-                let avail = app.window_size.width - crate::app::SIDEBAR_W - crate::app::DIVIDER_W;
-                let x = crate::app::SIDEBAR_W + r * avail;
+                let x = crate::app::SIDEBAR_W + 1.0 + r * app.split_avail();
                 tasks.push(app.update(Message::DividerPressed));
                 tasks.push(app.update(Message::DragMoved(iced::Point::new(x, 300.0))));
                 tasks.push(app.update(Message::DragEnd));
@@ -1326,6 +2163,49 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 sc.check(saved == a, &format!("ui.json on_close {saved:?}"));
             }
             Step::Retry => tasks.push(app.update(Message::Retry)),
+            st @ (Step::AddRoot(_)
+            | Step::WaitRoots(_)
+            | Step::ExpectRootsError(..)
+            | Step::OpenNewBlank(_)
+            | Step::BrowseOpen
+            | Step::BrowseParent
+            | Step::WaitBrowseRepo(_)
+            | Step::BrowseIntoRepo
+            | Step::ExpectRepoPicked(_)
+            | Step::MarkP2
+            | Step::D(_)
+            | Step::App(_)
+            | Step::TreeReveal(_)
+            | Step::TreeKey(_)
+            | Step::TreeRename(..)
+            | Step::WaitDir(..)
+            | Step::WaitFile(..)
+            | Step::TypeIn(..)
+            | Step::GoTo(..)
+            | Step::CtrlClickOn(..)
+            | Step::Code(..)
+            | Step::ExpectDirty(..)
+            | Step::WaitSaved(..)
+            | Step::WaitBuffer(..)
+            | Step::WaitBar(..)
+            | Step::WaitActive(..)
+            | Step::WaitChange(..)
+            | Step::OpenChange(..)
+            | Step::WaitDiff(_)
+            | Step::WaitSearch(..)
+            | Step::OpenFirstHit(_)
+            | Step::ExpectCursorLine(..)
+            | Step::WaitQuick(..)
+            | Step::WaitToast(_)
+            | Step::WaitExists(..)
+            | Step::ExpectSavedDetail(_)
+            | Step::ExpectDeleteModal
+            | Step::ExpectOpen(_)
+            | Step::WriteP2(_)) => {
+                let (n, t) = step_p2(sc, app, st, el);
+                next = n;
+                tasks.push(t);
+            }
             Step::Exit => {
                 sc.finished = true;
                 log(&format!("DONE: {} passed, {} failed", sc.pass, sc.fail));

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ProtoError;
 use crate::files::{
-    BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
-    GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
+    BrowseConfig, BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
+    FsStat, GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
@@ -273,6 +273,13 @@ pub enum Request {
     BrowseList {
         abs_dir: String,
     },
+    /// The home dir and the extra browse roots stored in `server.json`.
+    BrowseConfig,
+    /// Replace the extra browse roots stored in `server.json` (absolute existing folders;
+    /// filesystem roots are refused). Returns the new [`BrowseConfig`].
+    BrowseSetRoots {
+        roots: Vec<String>,
+    },
     /// Start a text search; `search` is a client-chosen id echoed in `Notify::SearchHits` /
     /// `Notify::SearchDone` (sent to this connection only, after the `Unit` reply).
     SearchText {
@@ -353,6 +360,8 @@ impl Request {
             Request::FsUnwatch { .. } => "fs.unwatch",
             Request::BrowseRoots => "browse.roots",
             Request::BrowseList { .. } => "browse.list",
+            Request::BrowseConfig => "browse.config",
+            Request::BrowseSetRoots { .. } => "browse.set_roots",
             Request::SearchText { .. } => "search.text",
             Request::SearchCancel { .. } => "search.cancel",
             Request::SearchFiles { .. } => "search.files",
@@ -385,6 +394,7 @@ pub enum Response {
     },
     Roots(Vec<String>),
     Browse(BrowseListing),
+    BrowseConfig(BrowseConfig),
     FileMatches(Vec<FileMatch>),
     GitStatus(GitStatus),
     Diff(Vec<DiffFile>),

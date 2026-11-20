@@ -23,11 +23,11 @@ pub mod transport;
 
 pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, SearchStream};
 pub use ide_proto::{
-    Agent, AheadBehind, Attached, BrowseEntry, BrowseListing, ByteRange, ChangeKind, DefResult,
-    DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent, FileMatch,
-    FsEntry, FsStat, GitChange, GitRev, GitStatus, LineKind, NewSession, Notify, ProfileInfo,
-    ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding,
-    TextSearch, UserInfo, Welcome,
+    Agent, AheadBehind, Attached, BrowseConfig, BrowseEntry, BrowseListing, ByteRange, ChangeKind,
+    DefResult, DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent,
+    FileMatch, FsEntry, FsStat, GitChange, GitRev, GitStatus, LineKind, NewSession, Notify,
+    ProfileInfo, ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk,
+    TextEncoding, TextSearch, UserInfo, Welcome,
 };
 pub use transport::{
     AsyncIo, ConnectFuture, Connection, LocalChild, Memory, SERVER_BIN_ENV, Ssh, Switchable,

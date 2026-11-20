@@ -63,7 +63,6 @@ no-session = No session
 
 repo-folder-label = REPOSITORY FOLDER
 repo-placeholder = C:/src/my-repo
-repo-dialog-title = Repository folder
 browse = Browse…
 agent-label = AGENT
 title-label = TITLE (OPTIONAL)
@@ -236,3 +235,83 @@ git-deleted = Deleted
 git-untracked = Untracked
 git-renamed = Renamed
 git-conflicted = Conflicted
+
+# Detail area (open items, side panel)
+open-items = Open items
+group-browser = Browser
+side-changes = Changes
+side-explore = Explore
+side-search = Search
+changes-count = { $count ->
+    [one] 1 changed file
+   *[other] { $count } changed files
+}
+kind-file = File
+kind-changed = Changed
+kind-staged = Staged
+kind-compare = Disk vs. unsaved edits
+file-binary = Binary file ({ $size }): not shown.
+file-truncated = Large file ({ $size }): only the first part is shown, read-only.
+file-conflict = The file changed on disk since it was opened. Your edits were not saved.
+file-changed-on-disk = The file changed on disk. Your edits are not saved yet.
+file-deleted-on-disk = The file was deleted on disk.
+bar-reload = Reload from disk (discard my edits)
+bar-overwrite = Save my version
+bar-compare = Compare with the disk
+search-placeholder = Search in files
+search-case = Match case
+search-word = Whole word
+search-regex = Regular expression
+search-running = Searching…
+search-summary = { $matches ->
+    [one] 1 result
+   *[other] { $matches } results
+} in { $files ->
+    [one] 1 file
+   *[other] { $files } files
+}
+search-truncated = (limit reached)
+search-none = No results.
+quick-open-placeholder = Go to file
+quick-open-none = No matching files.
+def-pick-title = Definitions of “{ $name }”
+delete-entry-title = Delete “{ $name }”?
+delete-entry-body = The file is deleted permanently.
+delete-folder-body = The folder and everything in it are deleted permanently.
+unsaved-title = Save changes to “{ $name }”?
+unsaved-body = Your changes are lost if you don't save them.
+dont-save = Don't save
+browse-up = Parent folder
+browse-empty = No subfolders.
+browse-git = Git repository
+browse-roots-label = REPOSITORY FOLDERS
+browse-roots-note = The new-session dialog can browse these folders on the server. Your home folder is always included.
+browse-root-placeholder = Absolute folder path on the server
+browse-home = home
+remove = Remove
+
+# Phase 2 server errors
+err-path-invalid = Invalid path: { $path }
+err-fs-not-found = Not found: { $path }
+err-fs-exists = Already exists: { $path }
+err-fs-permission = Permission denied: { $path }
+err-fs-dir-not-empty = The folder is not empty: { $path }
+err-fs-not-a-dir = Not a folder: { $path }
+err-fs-is-a-dir = { $path } is a folder.
+err-fs-io = Could not access { $path }: { $detail }
+err-fs-conflict = { $path } changed on disk since it was read.
+err-fs-bad-encoding = Unknown text encoding: { $encoding }
+err-fs-unencodable = { $path } contains characters the { $encoding } encoding cannot store.
+err-watch-failed = Cannot watch the folder for changes: { $detail }
+err-search-empty = Enter something to search for.
+err-search-bad-regex = Invalid regular expression: { $detail }
+err-search-bad-glob = Invalid file pattern { $glob }: { $detail }
+err-git-bad-rev = Invalid revision: { $rev }
+err-git-no-base = Base branch not found: { $base }
+err-def-invalid-position = There is nothing to look up at this position.
+err-def-unsupported-file = Go to definition is not available for this file type: { $path }
+err-def-no-name = Put the cursor on a name to go to its definition.
+err-def-external-module = { $spec } is an external module.
+err-def-module-not-found = Module not found: { $spec }
+err-def-external-name = Defined in the external module { $spec }.
+err-def-not-found = No definition found for “{ $name }”.

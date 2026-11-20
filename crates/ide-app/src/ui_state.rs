@@ -1,6 +1,7 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
 //! detail collapsed, active profile, per-session web URL, last repo folder, UI language,
-//! which server to use (local / SSH) and what closing the window does.
+//! which server to use (local / SSH), what closing the window does and each session's open
+//! detail items.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use ide_i18n::LanguagePref;
 use serde::{Deserialize, Serialize};
 
 /// Default share of the centre (terminal) in the centre+detail area.
-pub const DEFAULT_SPLIT: f32 = 0.6;
+pub const DEFAULT_SPLIT: f32 = 0.5;
 /// Limits of the centre share while dragging the divider.
 pub const SPLIT_RANGE: (f32, f32) = (0.2, 0.85);
 
@@ -39,6 +40,19 @@ pub enum ServerPref {
         #[serde(default)]
         command: String,
     },
+}
+
+/// Open items of one session's detail area.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DetailUi {
+    /// Open items in order: `web`, `file:<path>`, `diff:s:<path>` (staged) /
+    /// `diff:w:<path>` (working tree).
+    pub open: Vec<String>,
+    /// The item shown.
+    pub active: Option<String>,
+    /// Side panel tab: `changes`, `explore` or `search`.
+    pub side: String,
 }
 
 /// Deserialize a field, falling back to its default when the value is invalid (so one bad
@@ -75,6 +89,9 @@ pub struct UiState {
     /// Server to connect to (`IDE_REMOTE` overrides it).
     #[serde(deserialize_with = "lenient")]
     pub server: ServerPref,
+    /// Open detail items per session id.
+    #[serde(deserialize_with = "lenient")]
+    pub detail: BTreeMap<String, DetailUi>,
 }
 
 impl Default for UiState {
@@ -89,6 +106,7 @@ impl Default for UiState {
             language: LanguagePref::System,
             on_close: CloseAction::Ask,
             server: ServerPref::Local,
+            detail: BTreeMap::new(),
         }
     }
 }
@@ -158,6 +176,14 @@ mod tests {
             ..Default::default()
         };
         s.web_urls.insert("abc".into(), "about:blank".into());
+        s.detail.insert(
+            "abc".into(),
+            DetailUi {
+                open: vec!["web".into(), "file:src/한글.ts".into()],
+                active: Some("file:src/한글.ts".into()),
+                side: "search".into(),
+            },
+        );
         s.save(&base);
         assert_eq!(UiState::load(&base), s);
 

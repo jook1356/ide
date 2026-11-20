@@ -200,6 +200,47 @@ Known gaps (phase 1):
   unfixed build also showed the backdrop over the page (pixel check: page 109 -> 74, linear-space
   blending, so a bright page still looks bright); the fix holds whatever the cause.
 
+## App integration (phase 2)
+`ide-app/src/detail.rs` (state + logic) and `detail_view.rs` (drawing), mirroring Hermes Desk's
+`DetailTabs` + `ChangesPanel`:
+- **Layout**: sidebar | terminal | divider | detail pane | side panel (fixed 290 px, outside the
+  split; the divider shares the rest). The detail pane has one header row: the shown item's
+  identity (file-type icon, name, dirty dot, "kind · folder") or, for the web page, its
+  navigation (back / forward / reload / URL); then an "Open items" switcher (popover grouped
+  Browser / Changes / Explore with close buttons) and the collapse button. No tab strip.
+  The side panel has the tabs Changes (count badge) / Explore / Search.
+- **Per session** ([`Detail`] in `Live`): open items (`Web` is always there; files in
+  `CodeView`, diffs in `DiffView`, disk-vs-buffer comparisons), the tree, the changes list, the
+  search. Open items, the shown item and the side tab are stored in `ui.json`
+  (`detail.<session>`) and restored lazily (files are read when shown).
+- **Watch**: only the shown session is watched (`fs.watch`; the others are unwatched and
+  marked stale, refreshed when shown again; everything is marked stale on reconnect).
+  `FsChanged` re-lists the loaded folders on the changed paths' ancestry (all on `rescan`),
+  refreshes `git.status`, re-reads open files (clean buffers reload; dirty ones get a "changed on
+  disk" bar; a missing file gets a "deleted on disk" bar) and reloads open diffs of those paths.
+  `GitChanged` re-lists loaded folders (badges), `git.status` and diffs.
+- **Files**: `fs.read` (4 MiB; binary -> placeholder, truncated -> read-only + note), save with
+  `fs.write{expected_version}`; `fs-conflict` -> bar with reload (drop edits) / save my version
+  (no version check) / compare (DiffView disk -> buffer, computed client-side with `similar`) /
+  dismiss. Closing a dirty file asks (save / don't save / cancel).
+- **Tree actions** (context menu / F2 / Delete of `FileTree`): new file / folder, rename (open
+  items follow), delete (confirm; recursive for folders; open items below are closed).
+- **Changes**: `git.status` -> staged / unstaged (+ conflicted) / untracked; click -> `git.diff`
+  (`Index` for staged, else `WorkingTree`) plus the whole new side (`fs.read` / `git.file_at`
+  Index) so gaps can expand; unified / split from the diff header, remembered per session.
+- **Search** (Ctrl+Shift+F): `search.text` streamed into the panel through `Task::run` +
+  `abortable` (a new search aborts the old one, dropping the `SearchStream` cancels it on the
+  server); results grouped by file (collapsible), matches highlighted; click opens at line:col.
+- **Ctrl+P**: quick-open modal over `search.files` (stale replies dropped by sequence number),
+  arrows + Enter. Shortcuts are window-wide (`event::listen_with`, physical keys so they work in
+  Korean input mode); the terminal also receives the key.
+- **Go to definition**: `CodeEvent::Definition` -> `def.lookup` with the buffer text; `One` opens
+  the target at line:col, `Many` shows a picker, `None` shows the translated reason as a
+  transient message (5 s) at the bottom of the pane.
+- **New-session dialog**: the native folder picker (`rfd`) is gone; a folder icon opens a
+  server-side browser (`browse.roots` in a picker, `browse.list`, parent button, git repos marked
+  green; browsing into a repository fills the folder field). The text field stays.
+
 ## Phase 2 backend (files, search, git, definitions)
 Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify` variants),
 `ide-server` (`jail`, `fsops`, `watch`, `search`, `git`, `def/`) and `ide-client` (typed methods,
@@ -227,6 +268,12 @@ Error ids added (args): `path-invalid` (`path`), `fs-not-found` / `fs-exists` / 
 `def-module-not-found` (`spec`), `def-external-name` (`spec`), `def-not-found` (`name`).
 Existing ids reused: `path-denied` (`path`), `session-not-found` (`id`), `git` / `git-spawn`,
 `message-too-large` (now also sent when a reply exceeds 16 MiB).
+
+Browse roots are editable from the app (Settings -> Repository folders): `browse.config`
+(home dir + the `browse_roots` stored in `server.json`) and `browse.set_roots{roots}` (each root
+absolute, existing, a folder and not a filesystem root -> canonical, deduplicated, at most 64;
+`path-invalid` / `path-denied` / `fs-not-found` / `fs-not-a-dir`; other keys of `server.json`
+are kept; written atomically; audited as `browse.set_roots`).
 
 Known gaps (phase 2): no file-list cache for `search.files` (walks per call); text search is
 single-threaded; diff lines strip a trailing `\r` (CRLF is not shown); `fs.list` badges run one

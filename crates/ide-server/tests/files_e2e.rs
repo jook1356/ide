@@ -382,6 +382,86 @@ async fn files_over_memory() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `browse.set_roots` validates, persists `server.json` (keeping other keys) and the new roots
+/// take effect for `browse.*` and `session.create` right away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_set_roots() {
+    let dir = tmp_dir("p2roots");
+    let data = dir.join("data");
+    let extra = dir.join("extra");
+    std::fs::create_dir_all(extra.join("sub")).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join(ide_server::SERVER_CONFIG_FILE),
+        r#"{ "other": 7 }"#,
+    )
+    .unwrap();
+    std::fs::write(extra.join("file.txt"), "x").unwrap();
+    let server = Server::new(ServerConfig::for_paths(Paths::new(data.clone())));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+
+    let cfg = c.browse_config().await.unwrap();
+    assert!(cfg.roots.is_empty(), "{cfg:?}");
+    let extra_s = extra.display().to_string();
+    // Refused: relative, missing, a file, `..`, a drive root, control characters.
+    let missing = dir.join("missing").display().to_string();
+    let file = extra.join("file.txt").display().to_string();
+    let dotdot = format!(
+        "{}{}..{}extra",
+        extra_s,
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    );
+    let drive_root = if cfg!(windows) {
+        "C:\\".to_owned()
+    } else {
+        "/".to_owned()
+    };
+    for (root, id) in [
+        ("relative/dir".to_owned(), "path-invalid"),
+        (String::new(), "path-invalid"),
+        (format!("{extra_s}\u{1}"), "path-invalid"),
+        (missing, "fs-not-found"),
+        (file, "fs-not-a-dir"),
+        (dotdot, "path-denied"),
+        (drive_root, "path-denied"),
+    ] {
+        let e = c.browse_set_roots(vec![root.clone()]).await.unwrap_err();
+        assert_eq!(e.id, id, "{root:?}: {e}");
+    }
+    assert!(c.browse_config().await.unwrap().roots.is_empty());
+
+    // Accepted (twice = deduplicated), canonical, stored, effective.
+    let cfg = c
+        .browse_set_roots(vec![
+            extra_s.clone(),
+            format!("{extra_s}{}", std::path::MAIN_SEPARATOR),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(cfg.roots.len(), 1, "{cfg:?}");
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data.join(ide_server::SERVER_CONFIG_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["other"], 7);
+    assert_eq!(
+        stored["browse_roots"][0].as_str(),
+        Some(cfg.roots[0].as_str())
+    );
+    let roots = c.browse_roots().await.unwrap();
+    assert!(roots.contains(&cfg.roots[0]), "{roots:?}");
+    let l = c.browse_list(&cfg.roots[0]).await.unwrap();
+    assert_eq!(l.entries.len(), 1);
+    assert_eq!(l.entries[0].name, "sub");
+
+    // Cleared again: the folder is no longer browsable (unless it is under the home dir).
+    let cfg = c.browse_set_roots(Vec::new()).await.unwrap();
+    assert!(cfg.roots.is_empty());
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn files_over_real_child() {
     let dir = tmp_dir("p2child");
