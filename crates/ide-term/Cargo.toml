@@ -11,3 +11,7 @@ portable-pty.workspace = true
 unicode-width.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# examples/term.rs: in-app screenshots for the test scripts
+png = "0.18.1"
