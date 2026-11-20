@@ -200,3 +200,39 @@ err-git-spawn = Failed to run git: { $detail }
 err-git = git { $args } failed ({ $status }): { $detail }
 err-worktree-exists = Worktree path already exists: { $path }
 err-program-not-found = “{ $program }” not found on PATH; install it or add it to PATH.
+
+## File views (ide-views): file tree, code view, diff view, changes list
+
+tree-open = Open
+tree-new-file = New file
+tree-new-folder = New folder
+tree-loading = Loading…
+tree-name-placeholder = Name
+code-find-placeholder = Find
+code-find-none = No results
+code-find-prev = Previous match (Shift+Enter)
+code-find-next = Next match (Enter)
+code-goto-placeholder = Go to line (line:column)
+code-modified = Modified
+code-revert = Revert
+code-save = Save (Ctrl+S)
+diff-binary = Binary file not shown.
+diff-no-changes = No content changes (only metadata such as permissions changed).
+diff-renamed-only = Renamed without content changes: { $from } → { $to }
+diff-expand-lines = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+diff-unified = Unified view
+diff-split = Side-by-side view
+diff-no-newline = No newline at end of file
+changes-staged = Staged
+changes-unstaged = Changes
+changes-untracked = Untracked
+changes-empty = No changes.
+git-modified = Modified
+git-added = Added
+git-deleted = Deleted
+git-untracked = Untracked
+git-renamed = Renamed
+git-conflicted = Conflicted

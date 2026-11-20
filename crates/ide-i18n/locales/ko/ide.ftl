@@ -184,3 +184,36 @@ err-git-spawn = git을 실행하지 못했어요: { $detail }
 err-git = git { $args } 실패 ({ $status }): { $detail }
 err-worktree-exists = worktree 경로가 이미 있어요: { $path }
 err-program-not-found = PATH에서 “{ $program }” 프로그램을 찾을 수 없어요. 설치하거나 PATH에 추가하세요.
+
+## File views (ide-views): file tree, code view, diff view, changes list
+
+tree-open = 열기
+tree-new-file = 새 파일
+tree-new-folder = 새 폴더
+tree-loading = 불러오는 중…
+tree-name-placeholder = 이름
+code-find-placeholder = 찾기
+code-find-none = 결과 없음
+code-find-prev = 이전 결과 (Shift+Enter)
+code-find-next = 다음 결과 (Enter)
+code-goto-placeholder = 줄로 이동 (줄:열)
+code-modified = 수정됨
+code-revert = 되돌리기
+code-save = 저장 (Ctrl+S)
+diff-binary = 바이너리 파일은 표시하지 않아요.
+diff-no-changes = 내용 변경이 없어요 (권한 등 메타데이터만 바뀌었어요).
+diff-renamed-only = 내용 변경 없이 이름만 바뀌었어요: { $from } → { $to }
+diff-expand-lines = 변경 없는 줄 { $count }개 보기
+diff-unified = 한 열로 보기
+diff-split = 나란히 보기
+diff-no-newline = 파일 끝에 줄바꿈 없음
+changes-staged = 스테이징됨
+changes-unstaged = 변경
+changes-untracked = 추적 안 됨
+changes-empty = 변경 사항이 없어요.
+git-modified = 수정
+git-added = 추가
+git-deleted = 삭제
+git-untracked = 새 파일
+git-renamed = 이름 변경
+git-conflicted = 충돌

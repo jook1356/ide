@@ -1,0 +1,732 @@
+//! The code editor widget behind [`crate::CodeView`]: iced's text editor core (cosmic-text
+//! buffer, `text::editor::State` for keys / mouse / IME / clipboard) drawn with a line-number
+//! gutter, a current-line highlight and find-match highlights, plus Ctrl/Cmd+click reporting.
+//!
+//! It is a fork of `iced::widget::text_editor` (same `Action`s and `Binding`s) specialised to
+//! `iced::Renderer`, because the stock widget exposes neither the scroll position (needed for
+//! the gutter) nor the laid-out lines (needed for match highlights).
+
+use crate::syntax;
+use crate::theme;
+use iced::advanced::graphics::text::Editor as GEditor;
+use iced::advanced::graphics::text::cosmic_text;
+use iced::advanced::layout;
+use iced::advanced::mouse;
+use iced::advanced::renderer::{self, Renderer as _};
+use iced::advanced::text::editor::{self as core_editor, Action, Binding, Cursor, KeyPress};
+use iced::advanced::text::{self, Editor as _, LineHeight, Position, Renderer as _, Wrapping};
+use iced::advanced::widget::{self, Operation, Tree, Widget, tree};
+use iced::advanced::{Layout, Shell, clipboard};
+use iced::keyboard::{self, Modifiers};
+use iced::{Code, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, alignment, window};
+use std::cell::{Cell, RefCell};
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const PAD_LEFT: f32 = 8.0;
+const PAD_TOP: f32 = 4.0;
+const GUTTER_PAD: f32 = 12.0;
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A find match: byte range `start..end` on 0-based `line`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Match {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Text buffer of a [`CodeEditor`].
+pub struct Content {
+    editor: RefCell<GEditor>,
+    generation: u64,
+    /// Cursor to put in the middle of the view at the next layout (`reveal`).
+    pending_reveal: Cell<Option<Position>>,
+}
+
+impl Content {
+    pub fn with_text(text: &str) -> Self {
+        Self {
+            editor: RefCell::new(load(text)),
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+            pending_reveal: Cell::new(None),
+        }
+    }
+
+    pub fn perform(&mut self, action: Action) {
+        self.editor.get_mut().perform(action);
+    }
+
+    pub fn text(&self) -> String {
+        self.editor.borrow().text()
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.editor.borrow().line_count()
+    }
+
+    pub fn line(&self, i: usize) -> Option<String> {
+        self.editor.borrow().line(i).map(|l| l.text.into_owned())
+    }
+
+    /// Calls `f` with every line (0-based index, text) without copying the buffer.
+    pub fn for_each_line(&self, mut f: impl FnMut(usize, &str)) {
+        let ed = self.editor.borrow();
+        for (i, line) in ed.buffer().lines.iter().enumerate() {
+            f(i, line.text());
+        }
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        self.editor.borrow().cursor()
+    }
+
+    /// Selected text, if any.
+    pub fn selection(&self) -> Option<String> {
+        self.editor.borrow().copy()
+    }
+
+    pub fn move_to(&mut self, cursor: Cursor) {
+        self.editor.get_mut().move_to(cursor);
+    }
+
+    /// Moves the cursor to `line` / byte `index` (clamped) and scrolls it to the middle of the
+    /// view at the next layout.
+    pub fn reveal(&mut self, line: usize, index: usize) {
+        let ed = self.editor.get_mut();
+        let line = line.min(ed.line_count().saturating_sub(1));
+        let len = ed.line(line).map(|l| l.text.len()).unwrap_or(0);
+        let position = Position {
+            line,
+            index: index.min(len),
+        };
+        ed.move_to(Cursor {
+            position,
+            selection: None,
+        });
+        self.pending_reveal.set(Some(position));
+    }
+
+    /// Selects `start..end` on `line` (bytes) and reveals it.
+    pub fn select(&mut self, line: usize, start: usize, end: usize) {
+        self.reveal(line, end);
+        self.editor.get_mut().move_to(Cursor {
+            position: Position { line, index: end },
+            selection: Some(Position { line, index: start }),
+        });
+    }
+
+    /// Buffer line at the top of the view.
+    pub fn top_line(&self) -> usize {
+        self.editor.borrow().buffer().scroll().line
+    }
+
+    /// Number of (visual) lines that fit in the view.
+    pub fn visible_lines(&self) -> usize {
+        let ed = self.editor.borrow();
+        let lh = ed.buffer().metrics().line_height.max(1.0);
+        (ed.bounds().height * ed.hint_factor().unwrap_or(1.0) / lh).floor() as usize
+    }
+
+    fn apply_reveal(&self) {
+        let Some(p) = self.pending_reveal.take() else {
+            return;
+        };
+        let mut ed = self.editor.borrow_mut();
+        if ed.bounds().height <= 0.0 {
+            self.pending_reveal.set(Some(p));
+            return;
+        }
+        let lh = ed.buffer().metrics().line_height.max(1.0);
+        let window = (ed.bounds().height * ed.hint_factor().unwrap_or(1.0) / lh) as i64;
+        let top = ed.buffer().scroll().line as i64;
+        let want_top = (p.line as i64 - window / 2).max(0);
+        let delta = want_top - top;
+        if delta != 0 {
+            ed.perform(Action::Scroll {
+                lines: delta as i32,
+            });
+        }
+    }
+}
+
+/// Texts up to this size go straight to `Editor::with_text`, which shapes every line (the
+/// buffer has no height yet): ~50 µs per line, so 1 s for 20 000 lines.
+const DIRECT_LOAD_BYTES: usize = 64 * 1024;
+/// Lines per paste when loading a large text (cosmic-text inserts the lines of one paste one by
+/// one in the middle of its line vector: quadratic in the paste size).
+const LOAD_CHUNK_LINES: usize = 128;
+
+/// Builds the editor buffer for `text`. Large texts are pasted in chunks into an editor that is
+/// one line tall, so only the lines in view are ever shaped.
+fn load(text: &str) -> GEditor {
+    if text.len() <= DIRECT_LOAD_BYTES {
+        return GEditor::with_text(text);
+    }
+    let mut ed = GEditor::with_text("");
+    ed.update(
+        Size::new(1000.0, theme::CODE_LINE),
+        theme::MONO,
+        Pixels(theme::CODE_SIZE),
+        LineHeight::Absolute(Pixels(theme::CODE_LINE)),
+        Wrapping::None,
+        text::Alignment::Default,
+        None,
+        &mut Parser::Plain(0),
+    );
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest
+            .match_indices('\n')
+            .nth(LOAD_CHUNK_LINES - 1)
+            .map(|(i, _)| i + 1)
+            .unwrap_or(rest.len());
+        let (chunk, tail) = rest.split_at(end);
+        ed.perform(Action::Move(core_editor::Motion::DocumentEnd));
+        ed.perform(Action::Edit(core_editor::Edit::Paste(std::sync::Arc::new(chunk.to_owned()))));
+        rest = tail;
+    }
+    ed.perform(Action::Move(core_editor::Motion::DocumentStart));
+    ed
+}
+
+/// Lines the parser may run ahead of the view before it restarts near the view instead (a jump
+/// far down a large file would otherwise parse every line above it first; syntect manages only
+/// a few thousand lines per second).
+const PARSE_JUMP_LINES: usize = 300;
+/// Lines parsed above the view after such a restart, so that most constructs have settled.
+const PARSE_LEAD_LINES: usize = 60;
+
+/// Syntax parser of the editor: iced's syntect parser, or nothing (plain text / large files).
+///
+/// The syntect parser starts at line `base` (0 unless the view jumped far ahead, see
+/// [`Parser::follow_view`]): highlighting after a restart assumes the restart line is at the top
+/// level of the grammar, like editors that highlight only the viewport.
+pub enum Parser {
+    Syntax {
+        inner: iced::highlighter::Parser,
+        token: String,
+        base: usize,
+    },
+    Plain(usize),
+}
+
+impl Parser {
+    fn restart(&mut self, at: usize) {
+        if let Parser::Syntax { inner, token, base } = self {
+            *inner = iced::highlighter::Parser::new(&iced::highlighter::Settings { token: token.clone() });
+            *base = at;
+        }
+    }
+
+    /// Called before highlighting with the first line in view: restarts the parser near the view
+    /// when it is far behind it (jump down) or the view is above where it started (jump back up).
+    pub fn follow_view(&mut self, top: usize) {
+        let Parser::Syntax { inner, base, .. } = self else {
+            return;
+        };
+        let current = *base + inner.current_line();
+        if top > current + PARSE_JUMP_LINES || top < *base {
+            let at = top.saturating_sub(PARSE_LEAD_LINES);
+            // Back to the start when it is close anyway (exact highlighting).
+            let at = if at <= PARSE_JUMP_LINES { 0 } else { at };
+            self.restart(at);
+        }
+    }
+}
+
+impl text::Parser for Parser {
+    type Settings = Option<String>;
+    type Output = Code;
+    type Iterator<'a> = Box<dyn Iterator<Item = (Range<usize>, Code)> + 'a>;
+
+    fn new(settings: &Self::Settings) -> Self {
+        match settings {
+            Some(token) => Parser::Syntax {
+                inner: iced::highlighter::Parser::new(&iced::highlighter::Settings { token: token.clone() }),
+                token: token.clone(),
+                base: 0,
+            },
+            None => Parser::Plain(0),
+        }
+    }
+
+    fn update(&mut self, settings: &Self::Settings) {
+        *self = <Self as text::Parser>::new(settings);
+    }
+
+    fn change_line(&mut self, line: usize) {
+        match self {
+            Parser::Syntax { inner, base, .. } => {
+                if line >= *base {
+                    inner.change_line(line - *base);
+                } else {
+                    // An edit above the restart point: restart there.
+                    let at = if line <= PARSE_JUMP_LINES { 0 } else { line };
+                    self.restart(at);
+                }
+            }
+            Parser::Plain(l) => *l = line,
+        }
+    }
+
+    fn parse_line(&mut self, line: &str) -> Self::Iterator<'_> {
+        match self {
+            Parser::Syntax { inner, .. } => inner.parse_line(line),
+            Parser::Plain(l) => {
+                *l += 1;
+                Box::new(std::iter::empty())
+            }
+        }
+    }
+
+    fn current_line(&self) -> usize {
+        match self {
+            Parser::Syntax { inner, base, .. } => *base + inner.current_line(),
+            Parser::Plain(l) => *l,
+        }
+    }
+}
+
+type KeyBindingFn<'a, M> = Box<dyn Fn(KeyPress) -> Option<Binding<M>> + 'a>;
+
+/// The editor widget. Build it in `view` from a [`Content`] kept in your state.
+pub struct CodeEditor<'a, M> {
+    content: &'a Content,
+    id: Option<widget::Id>,
+    language: Option<String>,
+    wrap: bool,
+    size: f32,
+    line_height: f32,
+    on_action: Option<Box<dyn Fn(Action) -> M + 'a>>,
+    key_binding: Option<KeyBindingFn<'a, M>>,
+    on_ctrl_click: Option<M>,
+    matches: &'a [Match],
+    current_match: Option<usize>,
+}
+
+struct State {
+    editor: core_editor::State,
+    parser: RefCell<Parser>,
+    settings: Option<String>,
+    generation: u64,
+    modifiers: Modifiers,
+}
+
+impl<'a, M: Clone> CodeEditor<'a, M> {
+    pub fn new(content: &'a Content) -> Self {
+        Self {
+            content,
+            id: None,
+            language: None,
+            wrap: false,
+            size: theme::CODE_SIZE,
+            line_height: theme::CODE_LINE,
+            on_action: None,
+            key_binding: None,
+            on_ctrl_click: None,
+            matches: &[],
+            current_match: None,
+        }
+    }
+
+    pub fn id(mut self, id: widget::Id) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Syntax token (see [`syntax::language_token`]); `None` = plain text.
+    pub fn language(mut self, token: Option<String>) -> Self {
+        self.language = token;
+        self
+    }
+
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        self.wrap = wrap;
+        self
+    }
+
+    pub fn on_action(mut self, f: impl Fn(Action) -> M + 'a) -> Self {
+        self.on_action = Some(Box::new(f));
+        self
+    }
+
+    pub fn key_binding(mut self, f: impl Fn(KeyPress) -> Option<Binding<M>> + 'a) -> Self {
+        self.key_binding = Some(Box::new(f));
+        self
+    }
+
+    /// Published right after the click action of a Ctrl/Cmd+click (the cursor is already at the
+    /// clicked position when it arrives).
+    pub fn on_ctrl_click(mut self, message: M) -> Self {
+        self.on_ctrl_click = Some(message);
+        self
+    }
+
+    pub fn matches(mut self, matches: &'a [Match], current: Option<usize>) -> Self {
+        self.matches = matches;
+        self.current_match = current;
+        self
+    }
+
+    fn gutter_width(&self) -> f32 {
+        let digits = self.content.line_count().max(1).ilog10() as f32 + 1.0;
+        (digits.max(3.0) * self.size * 0.6 + 2.0 * GUTTER_PAD).ceil()
+    }
+
+    fn text_bounds(&self, bounds: Rectangle) -> Rectangle {
+        let g = self.gutter_width() + PAD_LEFT;
+        Rectangle {
+            x: bounds.x + g,
+            y: bounds.y + PAD_TOP,
+            width: (bounds.width - g).max(0.0),
+            height: (bounds.height - PAD_TOP).max(0.0),
+        }
+    }
+}
+
+impl<M> widget::Meta for CodeEditor<'_, M> {}
+
+impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State {
+            editor: core_editor::State::new(),
+            parser: RefCell::new(<Parser as text::Parser>::new(&self.language)),
+            settings: self.language.clone(),
+            generation: self.content.generation,
+            modifiers: Modifiers::empty(),
+        })
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) {
+        let state = tree.state.downcast_mut::<State>();
+        let parser = state.parser.get_mut();
+        if state.settings != self.language {
+            text::Parser::update(parser, &self.language);
+            state.settings = self.language.clone();
+        }
+        if state.generation != self.content.generation {
+            text::Parser::change_line(parser, 0);
+            state.generation = self.content.generation;
+        }
+        let size = limits.resolve(Length::Fill, Length::Fill, Size::ZERO);
+        let text = self.text_bounds(Rectangle::new(Point::ORIGIN, size));
+        self.content.editor.borrow_mut().update(
+            text.size(),
+            theme::MONO,
+            Pixels(self.size),
+            LineHeight::Absolute(Pixels(self.line_height)),
+            if self.wrap {
+                Wrapping::WordOrGlyph
+            } else {
+                Wrapping::None
+            },
+            text::Alignment::Default,
+            renderer.hint_factor(),
+            parser,
+        );
+        self.content.apply_reveal();
+        tree.size = size;
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        shell: &mut Shell<'_, M>,
+        _viewport: &Rectangle,
+    ) {
+        let Some(on_action) = self.on_action.as_ref() else {
+            return;
+        };
+        let state = tree.state.downcast_mut::<State>();
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
+            state.modifiers = *m;
+        }
+        let bounds = layout.bounds();
+        let text_bounds = self.text_bounds(bounds);
+        // The wheel scrolls over the gutter too.
+        let cursor = match (event, cursor.position()) {
+            (Event::Mouse(mouse::Event::WheelScrolled { .. }), Some(p))
+                if bounds.contains(p) && !text_bounds.contains(p) =>
+            {
+                mouse::Cursor::Available(Point::new(text_bounds.x + 1.0, p.y))
+            }
+            _ => cursor,
+        };
+        let ctrl_click = matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        ) && state.modifiers.command()
+            && cursor.is_over(text_bounds);
+
+        let editor = self.content.editor.borrow();
+        let key_binding = self
+            .key_binding
+            .as_deref()
+            .unwrap_or(&Binding::from_key_press as _);
+        if let Some(update) = state.editor.update(
+            &*editor,
+            event,
+            text_bounds,
+            iced::Padding::ZERO,
+            cursor,
+            key_binding,
+        ) {
+            apply_update(update, shell, on_action.as_ref());
+            if ctrl_click && let Some(m) = &self.on_ctrl_click {
+                shell.publish(m.clone());
+            }
+        }
+        if let Event::Window(window::Event::RedrawRequested(_)) = event {
+            shell.request_input_method(
+                &state
+                    .editor
+                    .input_method(&*editor, text_bounds.position()),
+            );
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout,
+        _cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let state = tree.state.downcast_ref::<State>();
+        let text_bounds = self.text_bounds(bounds);
+        let gutter_w = self.gutter_width();
+
+        let mut ed = self.content.editor.borrow_mut();
+        {
+            let mut parser = state.parser.borrow_mut();
+            parser.follow_view(ed.buffer().scroll().line);
+            ed.highlight(theme::MONO, &mut *parser, syntax::code_style);
+        }
+
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds,
+                ..Default::default()
+            },
+            theme::BG,
+        );
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle {
+                    x: bounds.x + gutter_w - 1.0,
+                    width: 1.0,
+                    ..bounds
+                },
+                ..Default::default()
+            },
+            theme::HOVER,
+        );
+
+        let hf = ed.hint_factor().unwrap_or(1.0);
+        let cur = ed.cursor();
+        let focused = state.editor.is_focused();
+        let clip = bounds.intersection(viewport).unwrap_or(bounds);
+        let text_clip = text_bounds
+            .expand(iced::Padding {
+                left: PAD_LEFT,
+                ..Default::default()
+            })
+            .intersection(viewport)
+            .unwrap_or(text_bounds);
+        {
+            let buffer = ed.buffer();
+            let scroll = buffer.scroll();
+            let mut last_line = usize::MAX;
+            renderer.with_layer(clip, |renderer| {
+                for run in buffer.layout_runs() {
+                    let y = text_bounds.y + run.line_top / hf;
+                    let h = run.line_height / hf;
+                    let is_cursor_line = run.line_i == cur.position.line;
+                    if is_cursor_line && cur.selection.is_none() {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(bounds.x + gutter_w, y),
+                                    Size::new(bounds.width - gutter_w, h),
+                                ),
+                                ..Default::default()
+                            },
+                            theme::ACTIVE_LINE,
+                        );
+                    }
+                    if run.line_i != last_line {
+                        last_line = run.line_i;
+                        renderer.fill_text(
+                            text::Text {
+                                content: (run.line_i + 1).to_string(),
+                                bounds: Size::new(gutter_w, h),
+                                size: Pixels(self.size),
+                                line_height: LineHeight::Absolute(Pixels(self.line_height)),
+                                font: theme::MONO,
+                                align_x: text::Alignment::Right,
+                                align_y: alignment::Vertical::Top,
+                                shaping: text::Shaping::Basic,
+                                wrapping: Wrapping::None,
+                                ellipsis: text::Ellipsis::None,
+                                hint_factor: renderer.hint_factor(),
+                            },
+                            Point::new(bounds.x + gutter_w - GUTTER_PAD, y),
+                            if is_cursor_line && focused {
+                                theme::LINE_NO_ACTIVE
+                            } else {
+                                theme::LINE_NO
+                            },
+                            clip,
+                        );
+                    }
+                }
+            });
+            // Find matches, clipped to the text area.
+            if !self.matches.is_empty() {
+                renderer.with_layer(text_clip, |renderer| {
+                    for run in buffer.layout_runs() {
+                        let first = self.matches.partition_point(|m| m.line < run.line_i);
+                        for (k, m) in self.matches[first..]
+                            .iter()
+                            .enumerate()
+                            .take_while(|(_, m)| m.line == run.line_i)
+                        {
+                            let current = self.current_match == Some(first + k);
+                            let a = cosmic_text::Cursor::new(m.line, m.start);
+                            let b = cosmic_text::Cursor::new(m.line, m.end);
+                            for (x, w) in run.highlight(a, b) {
+                                let r = Rectangle::new(
+                                    Point::new(
+                                        text_bounds.x + (x - scroll.horizontal) / hf,
+                                        text_bounds.y + run.line_top / hf,
+                                    ),
+                                    Size::new(w / hf, run.line_height / hf),
+                                );
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: r,
+                                        border: iced::Border {
+                                            color: theme::FIND_MATCH_BORDER,
+                                            width: 1.0,
+                                            radius: 2.0.into(),
+                                        },
+                                        ..Default::default()
+                                    },
+                                    if current {
+                                        theme::FIND_CURRENT
+                                    } else {
+                                        theme::FIND_MATCH
+                                    },
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        renderer.with_layer(text_clip, |renderer| {
+            state.editor.draw(
+                &*ed,
+                renderer,
+                text_bounds.position(),
+                text_clip,
+                core_editor::Style {
+                    value: theme::CODE_TEXT,
+                    selection: theme::SELECTION,
+                },
+            );
+        });
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        let state = tree.state.downcast_ref::<State>();
+        if cursor.is_over(self.text_bounds(layout.bounds())) {
+            if state.modifiers.command() && self.on_ctrl_click.is_some() {
+                mouse::Interaction::Pointer
+            } else {
+                mouse::Interaction::Text
+            }
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout,
+        _viewport: &Rectangle,
+        _renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        let state = tree.state.downcast_mut::<State>();
+        operation.focusable(self.id.as_ref(), layout.bounds(), &mut state.editor);
+    }
+}
+
+fn apply_update<M>(
+    update: core_editor::Update<M>,
+    shell: &mut Shell<'_, M>,
+    on_action: &dyn Fn(Action) -> M,
+) {
+    match update {
+        core_editor::Update::Action(action) => {
+            shell.publish(on_action(action));
+            shell.capture_event();
+        }
+        core_editor::Update::Release => {}
+        core_editor::Update::Custom(message) => {
+            shell.publish(message);
+            shell.capture_event();
+        }
+        core_editor::Update::Sequence(updates) => {
+            for update in updates {
+                apply_update(update, shell, on_action);
+            }
+        }
+        core_editor::Update::Copy(content) => {
+            shell.write_clipboard(clipboard::Content::Text(content));
+            shell.capture_event();
+        }
+        core_editor::Update::Paste => {
+            shell.read_clipboard(clipboard::Kind::Text);
+            shell.capture_event();
+        }
+        core_editor::Update::RedrawAt(at) => shell.request_redraw_at(at),
+        core_editor::Update::Focus
+        | core_editor::Update::Unfocus
+        | core_editor::Update::InputMethod => shell.request_redraw(),
+    }
+}
+
+impl<'a, M: Clone + 'a> From<CodeEditor<'a, M>> for Element<'a, M> {
+    fn from(w: CodeEditor<'a, M>) -> Self {
+        Widget::<M, Theme, iced::Renderer>::_boxed(w)
+    }
+}

@@ -9,6 +9,7 @@ members = [
     "crates/ide-proto",
     "crates/ide-server",
     "crates/ide-client",
+    "crates/ide-views",
 ]
 
 [workspace.package]
@@ -36,6 +37,8 @@ tokio = { version = "1", default-features = false }
 rmp-serde = "1"
 bytes = "1"
 futures = "0.3"
+# ide-views: word-level diff of changed line pairs.
+similar = "2"
 
 ide-core = { path = "crates/ide-core" }
 ide-i18n = { path = "crates/ide-i18n" }
@@ -43,6 +46,7 @@ ide-term = { path = "crates/ide-term" }
 ide-web = { path = "crates/ide-web" }
 ide-proto = { path = "crates/ide-proto" }
 ide-client = { path = "crates/ide-client" }
+ide-views = { path = "crates/ide-views" }
 
 [profile.release]
 debug = 1
