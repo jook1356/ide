@@ -10,6 +10,7 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 | Crate | Role | Depends on UI? |
 |---|---|---|
 | `ide-core` | Profiles, sessions, git worktrees, agent launch specs, persistence. Pure logic, unit-tested. | no |
+| `ide-i18n` | UI translations: Fluent files embedded at build time, generated type-safe `tr::` API, current language. | no |
 | `ide-term` | PTY + `alacritty_terminal` state (`TermSession`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. | iced |
 | `ide-web` | CEF runtime init/subprocess handling and an iced widget showing one browser off-screen (GPU texture import, input forwarding, IME). | iced |
 | `ide-app` | The binary: window layout, sidebar, session lifecycle, wiring core + term + web. | iced |
@@ -25,6 +26,28 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   The agent's own TUI is the chat UI (no structured stream parsing in the MVP).
 - **Detail area**: per-session tabs (web preview first; files/diffs later). Tabs belong to a session,
   so switching sessions switches the detail area.
+
+## Languages (i18n)
+- All UI text lives in `crates/ide-i18n/locales/<code>/ide.ftl` ([Project Fluent](https://projectfluent.org)).
+  English (`en`) is the reference and fallback; Korean (`ko`) is complete.
+- `ide-i18n/build.rs` reads the English file and generates one function per message
+  (`new-session` -> `tr::new_session()`, `profile-sessions` -> `tr::profile_sessions(total: i64,
+  running: i64)`), plus the `Lang` enum (one variant per locale directory, `Lang::native_name()` from
+  the reserved `language-name` message). Variables used as a plural selector or in `NUMBER()` are
+  `i64`, all others `&str`. A wrong key or missing argument is a compile error.
+- The build fails on Fluent syntax errors and when a locale's message set or per-message variables
+  differ from English. Unit tests format every message in every locale and fail on generated
+  functions no crate calls.
+- Runtime: a global current language (`set_language`, `current`); views call `tr::` on every
+  `view`, so switching is instant. `LanguagePref { System, Fixed(Lang) }` is stored in `ui.json`
+  (`"language": "system" | "en" | "ko"`, missing = system); `System` negotiates the OS UI locales
+  (`sys-locale`) against the available languages, falling back to English.
+- `ide-core` stays language-agnostic: `Error::i18n()` returns an `ErrorMessage` (stable id + args,
+  untranslatable details such as git's stderr passed through); `ide-app/src/i18n.rs` maps it to
+  `tr::err_*`. `Display` stays English for logs. Errors are translated when they happen, so an error
+  already on screen keeps its language after a switch.
+- Korean UI text renders through iced's `Shaping::Auto` (advanced shaping for non-ASCII text) and
+  cosmic-text's system fallback (Malgun Gothic on Windows); terminal output is never translated.
 
 ## MVP (milestone 1)
 1. Window layout: left sidebar (profiles + sessions), centre terminal of the selected session,

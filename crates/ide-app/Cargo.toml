@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
 ide-core.workspace = true
+ide-i18n.workspace = true
 ide-term.workspace = true
 ide-web.workspace = true
 anyhow.workspace = true

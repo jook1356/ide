@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, IoAction, Result};
 use crate::paths::{Paths, ensure_dir, now_unix, read_json, write_json};
 use crate::slug::validate_slug;
 
@@ -110,7 +110,7 @@ impl ProfileStore {
         let from = self.paths.profile_dir(old);
         let to = self.paths.profile_dir(new);
         if from.exists() {
-            std::fs::rename(&from, &to).map_err(|e| Error::io("renaming", &from, e))?;
+            std::fs::rename(&from, &to).map_err(|e| Error::io(IoAction::Renaming, &from, e))?;
         }
         let renamed = self.make_profile(new, self.profiles[idx].created_at);
         ensure_dir(&renamed.claude_config_dir)?;
@@ -134,7 +134,7 @@ impl ProfileStore {
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Error::io("removing", dir, e)),
+                Err(e) => return Err(Error::io(IoAction::Removing, dir, e)),
             }
         }
         Ok(profile)

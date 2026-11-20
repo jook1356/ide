@@ -1,9 +1,10 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
-//! detail collapsed, active profile, per-session web URL, last repo folder.
+//! detail collapsed, active profile, per-session web URL, last repo folder, UI language.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use ide_i18n::LanguagePref;
 use serde::{Deserialize, Serialize};
 
 /// Default share of the centre (terminal) in the centre+detail area.
@@ -26,6 +27,8 @@ pub struct UiState {
     pub web_urls: BTreeMap<String, String>,
     /// Last repository folder used in the new-session dialog.
     pub last_repo: Option<String>,
+    /// UI language (`"system"` or a language code); missing in older files = system.
+    pub language: LanguagePref,
 }
 
 impl Default for UiState {
@@ -37,6 +40,7 @@ impl Default for UiState {
             detail_collapsed: false,
             web_urls: BTreeMap::new(),
             last_repo: None,
+            language: LanguagePref::System,
         }
     }
 }
@@ -97,6 +101,7 @@ mod tests {
             selected: Some("abc".into()),
             split_ratio: 0.42,
             detail_collapsed: true,
+            language: LanguagePref::Fixed(ide_i18n::Lang::Ko),
             ..Default::default()
         };
         s.web_urls.insert("abc".into(), "about:blank".into());
@@ -108,6 +113,19 @@ mod tests {
         let l = UiState::load(&base);
         assert_eq!(l.split_ratio, SPLIT_RANGE.1);
         assert!(l.web_urls.is_empty() && !l.detail_collapsed);
+        assert_eq!(l.language, LanguagePref::System);
+        std::fs::write(
+            UiState::file(&base),
+            r#"{"language": "xx", "split_ratio": 0.5}"#,
+        )
+        .unwrap();
+        let l = UiState::load(&base);
+        assert_eq!((l.language, l.split_ratio), (LanguagePref::System, 0.5));
+        std::fs::write(UiState::file(&base), r#"{"language": "en"}"#).unwrap();
+        assert_eq!(
+            UiState::load(&base).language,
+            LanguagePref::Fixed(ide_i18n::Lang::En)
+        );
 
         std::fs::write(UiState::file(&base), "not json").unwrap();
         assert_eq!(UiState::load(&base), UiState::default());

@@ -16,7 +16,8 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - App end-to-end test (in-app, no OS input): `IDE_APP_SCRIPT=1 IDE_DATA_DIR=<scratch>
   IDE_APP_TEST_REPO=<scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
   Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture);
-  results in `<evidence>/script.log`. iced's `window::screenshot` (this iced rev) leaves
+  results in `<evidence>/script.log` (`IDE_APP_SCRIPT_PAUSE_MS` lengthens the pauses). The script
+  runs in English and has one Korean pass (`ko_*` screenshots). iced's `window::screenshot` (this iced rev) leaves
   `text_input` values blank; capture the real window to check those.
 
 ## Conventions
@@ -29,3 +30,23 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - Never send prompts to `claude`/`codex` from tests: they run on paid subscriptions. Opening the TUI,
   screenshots and exiting are fine.
 - Commit messages: imperative, one topic per commit.
+
+## UI text and languages
+- No hard-coded user-visible strings in UI code: labels, buttons, tooltips, placeholders, dialog
+  text, status words and error messages go through `ide_i18n::tr::*` (or `crate::i18n` helpers in
+  `ide-app`). Not translated: the window title / brand `ide`, icon glyphs, user data (session and
+  profile names, paths), terminal and web content, log lines and `Display` of errors.
+- Add a string: add the message to `crates/ide-i18n/locales/en/ide.ftl` **and every other locale**
+  with the same variables, then call the generated `tr::<snake_case_id>(...)`. The build lists missing
+  or extra keys and variable mismatches; `cargo test -p ide-i18n` flags messages no code uses (remove
+  them from every locale).
+- Variables: plural counts use a selector (`{ $count -> [one] ... *[other] ... }`) or `NUMBER($n)` in
+  English and become `i64`; everything else is `&str`. No message references (`{ other-message }`).
+- Korean: short nouns for buttons/labels (`새 세션`, `취소`, `저장`), polite 해요체 for messages
+  (`세션이 아직 없어요.`). Never put a particle right after a variable (`{ $name }을(를)`): rephrase
+  (`“{ $name }” 프로필을 ...`) so the particle follows a fixed word.
+- `ide-core` errors: add the variant to `ErrorMessage` in `ide-core/src/error.rs`, an `err-*` message
+  to every locale, and the mapping in `ide-app/src/i18n.rs` (the match is exhaustive).
+- Add a language: create `crates/ide-i18n/locales/<code>/ide.ftl` (copy `en`, translate every message,
+  set `language-name` to the language's own name). `Lang`, the settings picker and OS-locale
+  negotiation pick it up automatically.

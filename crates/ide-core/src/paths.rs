@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, IoAction, Result};
 
 /// Environment variable overriding the app data root.
 pub const DATA_DIR_ENV: &str = "IDE_DATA_DIR";
@@ -70,7 +70,7 @@ impl Paths {
 
 /// `create_dir_all` with a contextual error.
 pub(crate) fn ensure_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path).map_err(|e| Error::io("creating directory", path, e))
+    std::fs::create_dir_all(path).map_err(|e| Error::io(IoAction::CreatingDirectory, path, e))
 }
 
 /// Read a JSON file; `Ok(None)` if it does not exist.
@@ -78,7 +78,7 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<O
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::io("reading", path, e)),
+        Err(e) => return Err(Error::io(IoAction::Reading, path, e)),
     };
     serde_json::from_slice(&bytes)
         .map(Some)
@@ -100,8 +100,8 @@ pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).map_err(|e| Error::io("writing", &tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| Error::io("replacing", path, e))
+    std::fs::write(&tmp, bytes).map_err(|e| Error::io(IoAction::Writing, &tmp, e))?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::io(IoAction::Replacing, path, e))
 }
 
 /// Current time as Unix seconds.

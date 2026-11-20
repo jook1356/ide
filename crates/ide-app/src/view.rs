@@ -6,6 +6,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
 use ide_core::{AgentKind, Session, same_path};
+use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 use ide_web::WebViewWidget;
 
@@ -13,6 +14,7 @@ use crate::app::{
     App, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, PROFILE_NAME_ID, RENAME_ID, RunState,
     SIDEBAR_W, TERM_ID, URL_ID,
 };
+use crate::i18n::{self, tr};
 use crate::style;
 
 type El<'a> = Element<'a, Message>;
@@ -42,17 +44,17 @@ pub fn agent_glyph(agent: AgentKind) -> (&'static str, Color) {
     }
 }
 
-fn status_glyph(state: RunState) -> (&'static str, Color, &'static str) {
+fn status_glyph(state: RunState) -> (&'static str, Color) {
     match state {
-        RunState::Stopped => (I_RING, style::FAINT, "stopped"),
-        RunState::Starting => (I_DOT, style::AMBER, "starting"),
-        RunState::Running => (I_DOT, style::GREEN, "running"),
-        RunState::Exited(_) => (I_DOT, style::FAINT, "exited"),
-        RunState::Failed => (I_DOT, style::RED, "failed"),
+        RunState::Stopped => (I_RING, style::FAINT),
+        RunState::Starting => (I_DOT, style::AMBER),
+        RunState::Running => (I_DOT, style::GREEN),
+        RunState::Exited(_) => (I_DOT, style::FAINT),
+        RunState::Failed => (I_DOT, style::RED),
     }
 }
 
-fn tip<'a>(content: impl Into<El<'a>>, label: &'a str) -> El<'a> {
+fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
     tooltip(
         content.into(),
         container(text(label).size(12))
@@ -63,7 +65,7 @@ fn tip<'a>(content: impl Into<El<'a>>, label: &'a str) -> El<'a> {
     .boxed()
 }
 
-fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: &'a str) -> El<'a> {
+fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: String) -> El<'a> {
     let b = button(
         text(glyph)
             .size(13)
@@ -76,7 +78,7 @@ fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: &'a str) -> El<'
     tip(b.boxed(), label)
 }
 
-fn label<'a>(s: &'a str) -> El<'a> {
+fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
 }
 
@@ -118,11 +120,11 @@ impl App {
         let header = row![
             text("ide").size(15).font(style::BOLD),
             space().width(Fill),
-            icon_button(I_GEAR, Some(Message::OpenSettings), "Profiles"),
+            icon_button(I_GEAR, Some(Message::OpenSettings), tr::settings()),
         ]
         .align_y(Alignment::Center);
         let profile = row![
-            label("PROFILE"),
+            label(tr::profile_label()),
             space().width(8),
             pick_list(Some(self.current_profile()), names, |s: &String| s.clone())
                 .on_select(Message::ProfilePicked)
@@ -132,9 +134,9 @@ impl App {
         ]
         .align_y(Alignment::Center);
         let sessions_header = row![
-            label("SESSIONS"),
+            label(tr::sessions_label()),
             space().width(Fill),
-            icon_button(I_PLUS, Some(Message::OpenNew), "New session"),
+            icon_button(I_PLUS, Some(Message::OpenNew), tr::new_session()),
         ]
         .align_y(Alignment::Center);
 
@@ -181,13 +183,9 @@ impl App {
         }
         if mine.is_empty() {
             list = list.push(
-                container(
-                    text("No sessions yet. Click + to start one.")
-                        .size(12)
-                        .color(style::DIM),
-                )
-                .padding([8, 4])
-                .boxed(),
+                container(text(tr::no_sessions()).size(12).color(style::DIM))
+                    .padding([8, 4])
+                    .boxed(),
             );
         }
 
@@ -221,12 +219,12 @@ impl App {
     fn session_row<'a>(&'a self, s: &'a Session, live: &'a Live) -> El<'a> {
         let selected = self.selected.as_ref() == Some(&s.id);
         let (glyph, gcolor) = agent_glyph(s.agent);
-        let (dot, dcolor, status) = status_glyph(live.state);
+        let (dot, dcolor) = status_glyph(live.state);
 
         if let Some((id, value)) = &self.rename
             && id == &s.id
         {
-            return text_input("Session title", value)
+            return text_input(tr::session_title_placeholder(), value)
                 .id(RENAME_ID)
                 .on_input(Message::RenameInput)
                 .on_submit(Message::RenameCommit)
@@ -239,10 +237,7 @@ impl App {
         let subtitle = if !live.term_title.is_empty() {
             live.term_title.clone()
         } else {
-            match live.state {
-                RunState::Exited(Some(c)) => format!("exited ({c})"),
-                _ => status.to_owned(),
-            }
+            i18n::status_label(live.state)
         };
         let main = button(
             row![
@@ -272,18 +267,28 @@ impl App {
 
         let run: El<'a> = match live.state {
             RunState::Starting | RunState::Running => {
-                icon_button(I_STOP, Some(Message::Stop(s.id.clone())), "Stop")
+                icon_button(I_STOP, Some(Message::Stop(s.id.clone())), tr::stop())
             }
-            RunState::Stopped => icon_button(I_PLAY, Some(Message::Start(s.id.clone())), "Start"),
+            RunState::Stopped => {
+                icon_button(I_PLAY, Some(Message::Start(s.id.clone())), tr::start())
+            }
             RunState::Exited(_) | RunState::Failed => {
-                icon_button(I_RESTART, Some(Message::Start(s.id.clone())), "Restart")
+                icon_button(I_RESTART, Some(Message::Start(s.id.clone())), tr::restart())
             }
         };
         row![
             main,
             run,
-            icon_button(I_EDIT, Some(Message::StartRename(s.id.clone())), "Rename"),
-            icon_button(I_DELETE, Some(Message::AskDelete(s.id.clone())), "Delete"),
+            icon_button(
+                I_EDIT,
+                Some(Message::StartRename(s.id.clone())),
+                tr::rename()
+            ),
+            icon_button(
+                I_DELETE,
+                Some(Message::AskDelete(s.id.clone())),
+                tr::delete()
+            ),
         ]
         .spacing(1)
         .align_y(Alignment::Center)
@@ -306,8 +311,8 @@ impl App {
         else {
             return container(
                 column![
-                    text("No session selected").size(18).color(style::DIM),
-                    button(text("New session").size(13))
+                    text(tr::no_session_selected()).size(18).color(style::DIM),
+                    button(text(tr::new_session()).size(13))
                         .padding([6, 14])
                         .style(style::primary)
                         .on_press(Message::OpenNew),
@@ -356,14 +361,14 @@ impl App {
                     col = col.push(
                         container(
                             row![
-                                text(format!(
-                                    "Process exited{}",
-                                    code.map(|c| format!(" with code {c}")).unwrap_or_default()
-                                ))
+                                text(match code {
+                                    Some(c) => tr::process_exited_code(&c.to_string()),
+                                    None => tr::process_exited(),
+                                })
                                 .size(12)
                                 .color(style::DIM),
                                 space().width(Fill),
-                                button(text(format!("{I_RESTART}  Restart")).size(12))
+                                button(text(format!("{I_RESTART}  {}", tr::restart())).size(12))
                                     .padding([3, 10])
                                     .style(style::secondary)
                                     .on_press(Message::Start(s.id.clone())),
@@ -380,15 +385,21 @@ impl App {
             None => {
                 let mut c = column![
                     text(match live.state {
-                        RunState::Failed => "The session could not be started",
-                        _ => "Session stopped",
+                        RunState::Failed => tr::session_start_failed(),
+                        _ => tr::session_stopped(),
                     })
                     .size(16)
                     .color(style::DIM),
-                    button(text(format!("{I_PLAY}  Start {}", s.agent.label())).size(13))
-                        .padding([6, 14])
-                        .style(style::primary)
-                        .on_press(Message::Start(s.id.clone())),
+                    button(
+                        text(format!(
+                            "{I_PLAY}  {}",
+                            tr::start_agent(&i18n::agent_label(s.agent))
+                        ))
+                        .size(13),
+                    )
+                    .padding([6, 14])
+                    .style(style::primary)
+                    .on_press(Message::Start(s.id.clone())),
                 ]
                 .spacing(12)
                 .align_x(Alignment::Center)
@@ -448,7 +459,7 @@ impl App {
                 column![icon_button(
                     I_EXPAND,
                     Some(Message::ToggleDetail),
-                    "Show detail"
+                    tr::show_detail()
                 )]
                 .padding([6, 2]),
             )
@@ -460,11 +471,11 @@ impl App {
         let portion = 1000u16.saturating_sub((self.ui.split_ratio * 1000.0).round() as u16);
         let tabs = container(
             row![
-                button(text("Web").size(12))
+                button(text(tr::tab_web()).size(12))
                     .padding([5, 14])
                     .style(style::tab(true)),
                 space().width(Fill),
-                icon_button(I_COLLAPSE, Some(Message::ToggleDetail), "Hide detail"),
+                icon_button(I_COLLAPSE, Some(Message::ToggleDetail), tr::hide_detail()),
             ]
             .align_y(Alignment::End),
         )
@@ -480,14 +491,18 @@ impl App {
         let content: El<'_> = match self.selected_live() {
             Some(live) => {
                 let bar = row![
-                    icon_button(I_BACK, live.can_back.then_some(Message::WebBack), "Back"),
+                    icon_button(
+                        I_BACK,
+                        live.can_back.then_some(Message::WebBack),
+                        tr::web_back()
+                    ),
                     icon_button(
                         I_FORWARD,
                         live.can_forward.then_some(Message::WebForward),
-                        "Forward"
+                        tr::web_forward()
                     ),
-                    icon_button(I_RELOAD, Some(Message::WebReload), "Reload"),
-                    text_input("Enter a URL", &live.url_input)
+                    icon_button(I_RELOAD, Some(Message::WebReload), tr::web_reload()),
+                    text_input(tr::url_placeholder(), &live.url_input)
                         .id(URL_ID)
                         .on_input(Message::UrlInput)
                         .on_submit(Message::UrlSubmit)
@@ -507,7 +522,7 @@ impl App {
                 };
                 column![bar, page].boxed()
             }
-            None => container(text("No session").size(13).color(style::DIM))
+            None => container(text(tr::no_session()).size(13).color(style::DIM))
                 .center(Fill)
                 .boxed(),
         };
@@ -533,7 +548,11 @@ impl App {
                     let (g, c) = agent_glyph(*a);
                     r.push(
                         button(
-                            row![text(g).color(c).size(13), text(a.label()).size(13)].spacing(6),
+                            row![
+                                text(g).color(c).size(13),
+                                text(i18n::agent_label(*a)).size(13)
+                            ]
+                            .spacing(6),
                         )
                         .padding([5, 12])
                         .style(style::choice(f.agent == *a))
@@ -542,10 +561,10 @@ impl App {
                     )
                 });
                 let mut c = column![
-                    text("New session").size(18).font(style::BOLD),
-                    label("REPOSITORY FOLDER"),
+                    text(tr::new_session()).size(18).font(style::BOLD),
+                    label(tr::repo_folder_label()),
                     row![
-                        text_input("C:/src/my-repo", &f.repo)
+                        text_input(tr::repo_placeholder(), &f.repo)
                             .id(NEW_REPO_ID)
                             .on_input(Message::NewRepo)
                             .on_submit(Message::NewSubmit)
@@ -553,37 +572,35 @@ impl App {
                             .padding([6, 8])
                             .style(style::input)
                             .width(Fill),
-                        button(text("Browse…").size(13))
+                        button(text(tr::browse()).size(13))
                             .padding([6, 12])
                             .style(style::secondary)
                             .on_press(Message::NewBrowse),
                     ]
                     .spacing(6),
-                    label("PROFILE"),
+                    label(tr::profile_label()),
                     pick_list(Some(f.profile.clone()), names, |s: &String| s.clone())
                         .on_select(Message::NewProfile)
                         .text_size(13)
                         .padding([5, 8])
                         .width(Fill),
-                    label("AGENT"),
+                    label(tr::agent_label()),
                     agents,
-                    label("TITLE (OPTIONAL)"),
-                    text_input("Defaults to agent · repo", &f.title)
+                    label(tr::title_label()),
+                    text_input(tr::title_placeholder(), &f.title)
                         .on_input(Message::NewTitle)
                         .on_submit(Message::NewSubmit)
                         .size(13)
                         .padding([6, 8])
                         .style(style::input),
-                    label("BASE REF (OPTIONAL)"),
-                    text_input("HEAD", &f.base_ref)
+                    label(tr::base_ref_label()),
+                    text_input(tr::base_ref_placeholder(), &f.base_ref)
                         .on_input(Message::NewBase)
                         .on_submit(Message::NewSubmit)
                         .size(13)
                         .padding([6, 8])
                         .style(style::input),
-                    text("A new worktree on branch ide/<session-id> is created for the session.")
-                        .size(11)
-                        .color(style::FAINT),
+                    text(tr::worktree_note()).size(11).color(style::FAINT),
                 ]
                 .spacing(8);
                 if let Some(e) = &f.error {
@@ -598,11 +615,11 @@ impl App {
                 c = c.push(
                     row![
                         space().width(Fill),
-                        button(text("Cancel").size(13))
+                        button(text(tr::cancel()).size(13))
                             .padding([6, 14])
                             .style(style::secondary)
                             .on_press(Message::CloseModal),
-                        button(text(if f.busy { "Creating…" } else { "Create" }).size(13))
+                        button(text(if f.busy { tr::creating() } else { tr::create() }).size(13))
                             .padding([6, 14])
                             .style(style::primary)
                             .on_press_maybe((!f.busy).then_some(Message::NewSubmit)),
@@ -616,14 +633,12 @@ impl App {
                 let s = self.session(&f.id);
                 let title = s.map(|s| s.title.as_str()).unwrap_or("?");
                 let mut c = column![
-                    text(format!("Delete session \u{201c}{title}\u{201d}?"))
+                    text(tr::delete_session_title(title))
                         .size(18)
                         .font(style::BOLD),
-                    text("The process is stopped and the session is removed from the list.")
-                        .size(13)
-                        .color(style::DIM),
+                    text(tr::delete_session_body()).size(13).color(style::DIM),
                     checkbox(f.remove_worktree)
-                        .label("Also remove its worktree and branch (uncommitted changes are lost)")
+                        .label(tr::delete_remove_worktree())
                         .on_toggle(Message::DeleteWorktree)
                         .size(16)
                         .text_size(13),
@@ -650,11 +665,11 @@ impl App {
                 c = c.push(
                     row![
                         space().width(Fill),
-                        button(text("Cancel").size(13))
+                        button(text(tr::cancel()).size(13))
                             .padding([6, 14])
                             .style(style::secondary)
                             .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
-                        button(text(if f.busy { "Deleting…" } else { "Delete" }).size(13))
+                        button(text(if f.busy { tr::deleting() } else { tr::delete() }).size(13))
                             .padding([6, 14])
                             .style(style::danger)
                             .on_press_maybe((!f.busy).then_some(Message::DeleteConfirm)),
@@ -670,14 +685,14 @@ impl App {
                     let (total, running) = self.sessions_in_profile(&p.name);
                     let row_el: El<'_> = match &f.renaming {
                         Some((old, new)) if old == &p.name => row![
-                            text_input("new-name", new)
+                            text_input(tr::profile_rename_placeholder(), new)
                                 .on_input(Message::SettingsRenameInput)
                                 .on_submit(Message::SettingsRenameCommit)
                                 .size(13)
                                 .padding([4, 8])
                                 .style(style::input)
                                 .width(Fill),
-                            button(text("Save").size(12))
+                            button(text(tr::save()).size(12))
                                 .padding([4, 10])
                                 .style(style::primary)
                                 .on_press(Message::SettingsRenameCommit),
@@ -686,18 +701,21 @@ impl App {
                         .boxed(),
                         _ => row![
                             text(p.name.as_str()).size(13).width(Fill),
-                            text(format!("{total} sessions, {running} running"))
-                                .size(11)
-                                .color(style::DIM),
+                            text(tr::profile_sessions(
+                                i18n::count(total),
+                                i18n::count(running)
+                            ))
+                            .size(11)
+                            .color(style::DIM),
                             icon_button(
                                 I_EDIT,
                                 Some(Message::SettingsStartRename(p.name.clone())),
-                                "Rename"
+                                tr::rename()
                             ),
                             icon_button(
                                 I_DELETE,
                                 Some(Message::SettingsDelete(p.name.clone())),
-                                "Delete (files are kept on disk)"
+                                tr::profile_delete_tooltip()
                             ),
                         ]
                         .spacing(6)
@@ -711,14 +729,31 @@ impl App {
                             .boxed(),
                     );
                 }
+                let languages = LanguagePref::all()
+                    .into_iter()
+                    .fold(row![].spacing(6), |r, p| {
+                        let name = match p {
+                            LanguagePref::System => tr::language_system(),
+                            LanguagePref::Fixed(l) => l.native_name().to_owned(),
+                        };
+                        r.push(
+                            button(text(name).size(13))
+                                .padding([5, 12])
+                                .style(style::choice(self.ui.language == p))
+                                .on_press(Message::SetLanguage(p))
+                                .boxed(),
+                        )
+                    });
                 let mut c = column![
-                    text("Profiles").size(18).font(style::BOLD),
-                    text("Each profile has its own Claude config dir and Codex home.")
-                        .size(12)
-                        .color(style::DIM),
+                    text(tr::settings()).size(18).font(style::BOLD),
+                    label(tr::language_label()),
+                    languages,
+                    space().height(4),
+                    label(tr::profiles_label()),
+                    text(tr::profiles_note()).size(12).color(style::DIM),
                     list,
                     row![
-                        text_input("new-profile-name", &f.new_name)
+                        text_input(tr::profile_name_placeholder(), &f.new_name)
                             .id(PROFILE_NAME_ID)
                             .on_input(Message::SettingsNewName)
                             .on_submit(Message::SettingsCreate)
@@ -726,7 +761,7 @@ impl App {
                             .padding([5, 8])
                             .style(style::input)
                             .width(Fill),
-                        button(text("Add").size(13))
+                        button(text(tr::add()).size(13))
                             .padding([5, 12])
                             .style(style::secondary)
                             .on_press(Message::SettingsCreate),
@@ -746,7 +781,7 @@ impl App {
                 c = c.push(
                     row![
                         space().width(Fill),
-                        button(text("Close").size(13))
+                        button(text(tr::close()).size(13))
                             .padding([6, 14])
                             .style(style::secondary)
                             .on_press(Message::CloseModal),

@@ -6,6 +6,9 @@
 //! - `IDE_APP_TEST_REPO`: throwaway repo folder (created with `git init` + one commit if missing)
 //! - `IDE_APP_EVIDENCE`: screenshot/log folder (default `<data dir>/evidence`)
 //! - `IDE_APP_SCRIPT_CLAUDE=1`: also open a Claude session (first-run screen only; never types)
+//!
+//! The script runs in English (it switches the language first; error checks match English
+//! text) and has one Korean pass that screenshots the main screen and the dialogs.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -16,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use iced::{Task, window};
 use ide_core::{AgentKind, Paths, SessionId};
+use ide_i18n::{Lang, LanguagePref, tr};
 
 use crate::app::{App, Message, Modal, RunState};
 
@@ -80,6 +84,12 @@ enum Step {
     TasklistDiff,
     Kill(usize),
     WaitExited(usize, u64),
+    /// Switch the UI language through the settings message.
+    SetLang(LanguagePref),
+    /// The current language is `Lang` and `tr::new_session()` reads the given text.
+    ExpectLang(Lang, &'static str),
+    /// `ui.json` on disk stores this language choice.
+    ExpectSavedLang(LanguagePref),
     Exit,
 }
 
@@ -199,6 +209,7 @@ fn steps(claude: bool) -> Vec<Step> {
     use Step::*;
     let mut s = vec![
         Log("--- startup"),
+        SetLang(LanguagePref::Fixed(Lang::En)),
         Wait(1500),
         EnsureRepo,
         Shot("01_empty"),
@@ -287,6 +298,41 @@ fn steps(claude: bool) -> Vec<Step> {
         SettingsDelete("job"),
         ExpectProfile("job", false),
         CloseModal,
+        Log("--- i18n: Korean UI, then back to English"),
+        SetLang(LanguagePref::Fixed(Lang::Ko)),
+        ExpectLang(Lang::Ko, "새 세션"),
+        ExpectSavedLang(LanguagePref::Fixed(Lang::Ko)),
+        Wait(500),
+        Shot("ko_01_main"),
+        Pause("ko_main"),
+        FillNew {
+            repo: Repo::Test,
+            agent: AgentKind::Shell,
+            title: "한국어 세션",
+        },
+        Wait(300),
+        Shot("ko_02_new_session_dialog"),
+        Pause("ko_new_session_dialog"),
+        CloseModal,
+        FillNew {
+            repo: Repo::NotARepo,
+            agent: AgentKind::Shell,
+            title: "",
+        },
+        Submit,
+        ExpectNewError("git 저장소가 아니에요", 15_000),
+        Wait(300),
+        Shot("ko_03_new_session_error"),
+        Pause("ko_new_session_error"),
+        CloseModal,
+        OpenSettings,
+        Wait(300),
+        Shot("ko_04_settings"),
+        Pause("ko_settings"),
+        CloseModal,
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        ExpectLang(Lang::En, "New session"),
+        ExpectSavedLang(LanguagePref::Fixed(Lang::En)),
         Log("--- restart: rebuild the app from the files on disk"),
         Reload,
         Wait(2000),
@@ -602,7 +648,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     if fresh {
                         log(&format!("PAUSE {name}"));
                     }
-                    next = el >= Duration::from_millis(7000);
+                    // `IDE_APP_SCRIPT_PAUSE_MS` lengthens the hold for slower external capture.
+                    let hold = std::env::var("IDE_APP_SCRIPT_PAUSE_MS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(7000);
+                    next = el >= Duration::from_millis(hold);
                 }
             }
             Step::Reload => {
@@ -798,6 +849,19 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 } else {
                     next = false;
                 }
+            }
+            Step::SetLang(pref) => tasks.push(app.update(Message::SetLanguage(pref))),
+            Step::ExpectLang(lang, new_session) => {
+                let now = ide_i18n::current();
+                let shown = tr::new_session();
+                sc.check(
+                    now == lang && shown == new_session,
+                    &format!("UI language {} shows {shown:?}", now.code()),
+                );
+            }
+            Step::ExpectSavedLang(pref) => {
+                let saved = crate::ui_state::UiState::load(app.paths.root()).language;
+                sc.check(saved == pref, &format!("ui.json language {saved:?}"));
             }
             Step::Exit => {
                 log(&format!("DONE: {} passed, {} failed", sc.pass, sc.fail));

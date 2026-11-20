@@ -1,6 +1,6 @@
 //! Slug rules for profile names and directory names.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, NameRule, Result};
 
 /// Maximum slug length.
 pub const MAX_SLUG_LEN: usize = 64;
@@ -17,19 +17,19 @@ pub fn validate_slug(name: &str) -> Result<()> {
         })
     };
     if name.is_empty() {
-        return invalid("must not be empty");
+        return invalid(NameRule::Empty);
     }
     if name.len() > MAX_SLUG_LEN {
-        return invalid("must be at most 64 characters");
+        return invalid(NameRule::TooLong);
     }
     if !name
         .bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
     {
-        return invalid("only lowercase letters, digits, '-' and '_' are allowed");
+        return invalid(NameRule::InvalidChars);
     }
     if !name.as_bytes()[0].is_ascii_alphanumeric() {
-        return invalid("must start with a letter or digit");
+        return invalid(NameRule::BadStart);
     }
     Ok(())
 }

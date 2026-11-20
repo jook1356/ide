@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/ide-core", "crates/ide-term", "crates/ide-web", "crates/ide-app"]
+members = [
+    "crates/ide-core",
+    "crates/ide-i18n",
+    "crates/ide-term",
+    "crates/ide-web",
+    "crates/ide-app",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
 
 ide-core = { path = "crates/ide-core" }
+ide-i18n = { path = "crates/ide-i18n" }
 ide-term = { path = "crates/ide-term" }
 ide-web = { path = "crates/ide-web" }
 

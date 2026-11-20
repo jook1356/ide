@@ -10,9 +10,11 @@ use ide_core::{
     AgentKind, LaunchSpec, NewSession, Paths, ProfileStore, Session, SessionId, SessionStore,
     worktree_exists,
 };
+use ide_i18n::LanguagePref;
 use ide_term::{TermConfig, TermEvent, TermEventKind, TermSession, TermSpec, ViewEvent};
 use ide_web::{WebEvent, WebRuntime, WebView, WebViewEvent};
 
+use crate::i18n::{self, tr};
 use crate::script::Script;
 use crate::ui_state::{SPLIT_RANGE, UiState};
 
@@ -154,6 +156,7 @@ pub enum Message {
     SettingsRenameInput(String),
     SettingsRenameCommit,
     SettingsDelete(String),
+    SetLanguage(LanguagePref),
 
     UrlInput(String),
     UrlSubmit,
@@ -207,17 +210,18 @@ impl App {
     /// Build the app state from the files in the data dir (no process is spawned).
     pub fn load(paths: Paths, runtime: WebRuntime) -> Self {
         let mut banner = None;
+        let mut ui = UiState::load(paths.root());
+        ide_i18n::apply(ui.language);
         let profiles = match ProfileStore::open(&paths) {
             Ok(p) => p,
             Err(e) => panic!("cannot open profiles in {}: {e}", paths.root().display()),
         };
         let store = SessionStore::open(&paths).unwrap_or_else(|e| {
-            banner = Some(format!("sessions.json could not be read: {e}"));
+            banner = Some(tr::err_sessions_unreadable(&i18n::error(&e)));
             // Do not overwrite the unreadable file: use a store rooted elsewhere.
             SessionStore::open(&Paths::new(paths.root().join("recovered")))
                 .expect("empty session store")
         });
-        let mut ui = UiState::load(paths.root());
         if ui
             .profile
             .as_deref()
@@ -350,7 +354,9 @@ impl App {
             spec.env
         ));
         let result = TermSession::spawn(&Self::term_spec(spec), &self.term_config);
-        let live = self.live_mut(id).ok_or("session not found")?;
+        let live = self
+            .live_mut(id)
+            .ok_or_else(|| tr::err_session_not_found(id.as_str()))?;
         if let Some(old) = live.term.take() {
             old.kill();
         }
@@ -364,7 +370,7 @@ impl App {
                 Ok(())
             }
             Err(e) => {
-                let msg = format!("could not start the process: {e:#}");
+                let msg = tr::err_start_process(&format!("{e:#}"));
                 live.state = RunState::Failed;
                 live.error = Some(msg.clone());
                 Err(msg)
@@ -374,19 +380,21 @@ impl App {
 
     /// (Re)start a stored session in its existing worktree.
     fn start(&mut self, id: &SessionId) -> Result<(), String> {
-        let session = self.session(id).cloned().ok_or("session not found")?;
+        let session = self
+            .session(id)
+            .cloned()
+            .ok_or_else(|| tr::err_session_not_found(id.as_str()))?;
         let result = (|| {
             if !worktree_exists(&session.worktree_path) {
-                return Err(format!(
-                    "worktree {} is missing; delete this session and create a new one",
-                    session.worktree_path.display()
+                return Err(tr::err_worktree_missing(
+                    &session.worktree_path.display().to_string(),
                 ));
             }
             let profile = self
                 .profiles
                 .get(&session.profile)
-                .ok_or_else(|| format!("profile {:?} no longer exists", session.profile))?;
-            LaunchSpec::for_session(&session, profile).map_err(|e| e.to_string())
+                .ok_or_else(|| tr::err_profile_gone(&session.profile))?;
+            LaunchSpec::for_session(&session, profile).map_err(|e| i18n::error(&e))
         })();
         match result {
             Ok(spec) => self.spawn_with(id, &spec),
@@ -432,7 +440,7 @@ impl App {
                 };
                 match WebView::new(&runtime, &url, Size::new(640.0, 600.0), 1.0) {
                     Ok(v) => live.web = Some(v),
-                    Err(e) => live.error = Some(format!("web view: {e:#}")),
+                    Err(e) => live.error = Some(tr::err_web_view(&format!("{e:#}"))),
                 }
             }
         }
@@ -508,7 +516,7 @@ impl App {
                     if !title.is_empty()
                         && let Err(e) = self.store.set_title(&id, title)
                     {
-                        self.banner = Some(format!("rename failed: {e}"));
+                        self.banner = Some(tr::err_rename_failed(&i18n::error(&e)));
                     }
                 }
                 self.after_select()
@@ -558,7 +566,7 @@ impl App {
                     }
                     let result = match (&session, remove) {
                         (Some(s), true) => {
-                            ide_core::remove_session_files(&paths, s).map_err(|e| e.to_string())
+                            ide_core::remove_session_files(&paths, s).map_err(|e| i18n::error(&e))
                         }
                         _ => Ok(()),
                     };
@@ -567,7 +575,7 @@ impl App {
                 Task::perform(rx, move |r| {
                     Message::DeleteReady(
                         id.clone(),
-                        r.unwrap_or_else(|_| Err("delete was cancelled".into())),
+                        r.unwrap_or_else(|_| Err(tr::err_delete_cancelled())),
                     )
                 })
             }
@@ -579,7 +587,7 @@ impl App {
                 // Files are gone (or kept); only the store entry is left to remove.
                 let result = removed.and_then(|()| {
                     ide_core::delete_session(&self.paths, &mut self.store, &id, false)
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| i18n::error(&e))
                 });
                 match result {
                     Ok(s) => {
@@ -638,9 +646,10 @@ impl App {
                     }
                     _ => None,
                 };
+                let title = tr::repo_dialog_title();
                 Task::perform(
                     async move {
-                        let mut dialog = rfd::AsyncFileDialog::new().set_title("Repository folder");
+                        let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
                         if let Some(dir) = start.filter(|d| d.is_dir()) {
                             dialog = dialog.set_directory(dir);
                         }
@@ -712,7 +721,7 @@ impl App {
                         f.new_name.clear();
                         f.error = None;
                     }
-                    Err(e) => f.error = Some(e.to_string()),
+                    Err(e) => f.error = Some(i18n::error(&e)),
                 }
                 Task::none()
             }
@@ -755,14 +764,12 @@ impl App {
             Message::SettingsDelete(name) => {
                 let (total, _) = self.sessions_in_profile(&name);
                 let result = if total > 0 {
-                    Err(format!(
-                        "{total} session(s) use profile {name:?}; delete them first"
-                    ))
+                    Err(tr::err_profile_in_use(i18n::count(total), &name))
                 } else {
                     self.profiles
                         .delete(&name, false)
                         .map(drop)
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| i18n::error(&e))
                 };
                 if result.is_ok() && self.ui.profile.as_deref() == Some(name.as_str()) {
                     self.ui.profile = self.profiles.list().first().map(|p| p.name.clone());
@@ -771,6 +778,15 @@ impl App {
                 if let Some(Modal::Settings(f)) = &mut self.modal {
                     f.error = result.err();
                 }
+                Task::none()
+            }
+
+            Message::SetLanguage(pref) => {
+                // Every `view` reads the current language, so the switch is instant.
+                self.ui.language = pref;
+                let lang = ide_i18n::apply(pref);
+                crate::script::log(&format!("language {pref:?} -> {}", lang.code()));
+                self.save_ui();
                 Task::none()
             }
 
@@ -867,14 +883,14 @@ impl App {
         }
         let running = self.running_in_profile(old);
         if running > 0 {
-            return Err(format!(
-                "{running} session(s) of profile {old:?} are running; stop them before renaming"
-            ));
+            return Err(tr::err_profile_running(i18n::count(running), old));
         }
-        self.profiles.rename(old, new).map_err(|e| e.to_string())?;
+        self.profiles
+            .rename(old, new)
+            .map_err(|e| i18n::error(&e))?;
         self.store
             .rename_profile(old, new)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| i18n::error(&e))?;
         if self.ui.profile.as_deref() == Some(old) {
             self.ui.profile = Some(new.to_owned());
             self.save_ui();
@@ -891,11 +907,11 @@ impl App {
         }
         let repo = f.repo.trim().trim_matches('"').to_owned();
         if repo.is_empty() {
-            f.error = Some("choose a repository folder".into());
+            f.error = Some(tr::err_choose_repo());
             return Task::none();
         }
         let Some(profile) = self.profiles.get(&f.profile).cloned() else {
-            f.error = Some(format!("profile {:?} not found", f.profile));
+            f.error = Some(tr::err_profile_not_found(&f.profile));
             return Task::none();
         };
         f.busy = true;
@@ -911,12 +927,12 @@ impl App {
         let (tx, rx) = oneshot::channel::<Created>();
         // git runs off the UI thread.
         std::thread::spawn(move || {
-            let r = ide_core::create_session(&paths, &profile, &req).map_err(|e| e.to_string());
+            let r = ide_core::create_session(&paths, &profile, &req).map_err(|e| i18n::error(&e));
             let _ = tx.send(r);
         });
         Task::perform(rx, |r| {
             Message::NewCreated(Box::new(
-                r.unwrap_or_else(|_| Err("session creation was cancelled".into())),
+                r.unwrap_or_else(|_| Err(tr::err_create_cancelled())),
             ))
         })
     }
@@ -936,7 +952,7 @@ impl App {
         if let Err(e) = self.store.upsert(session.clone()) {
             if let Some(Modal::NewSession(f)) = &mut self.modal {
                 f.busy = false;
-                f.error = Some(format!("saving the session failed: {e}"));
+                f.error = Some(tr::err_session_save(&i18n::error(&e)));
             }
             return Task::none();
         }

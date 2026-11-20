@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, IoAction, Result};
 use crate::launch::{LaunchEnv, LaunchSpec};
 use crate::paths::Paths;
 use crate::profile::Profile;
@@ -116,7 +116,7 @@ pub fn remove_session_files(paths: &Paths, s: &Session) -> Result<()> {
             // Repo deleted or moved: only clean up our own directory.
             if is_inside(&s.worktree_path, &paths.worktrees_dir()) && s.worktree_path.exists() {
                 std::fs::remove_dir_all(&s.worktree_path)
-                    .map_err(|e| Error::io("removing", &s.worktree_path, e))?;
+                    .map_err(|e| Error::io(IoAction::Removing, &s.worktree_path, e))?;
             }
             Ok(())
         }

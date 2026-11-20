@@ -41,7 +41,7 @@ pub mod session;
 pub mod slug;
 pub mod worktree;
 
-pub use error::{Error, Result};
+pub use error::{Error, ErrorMessage, IoAction, NameRule, Result};
 pub use launch::{LaunchEnv, LaunchSpec, is_batch_file, which, which_in};
 pub use ops::{
     NewSession, create_session, create_session_with, delete_session, remove_session_files,
