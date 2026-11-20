@@ -3,8 +3,12 @@
 //! `cargo run -p ide-term --example term --release` opens one window with `cmd.exe`
 //! (override with `IDE_TERM_SHELL`).
 //!
-//! Test scripts: `IDE_TERM_SCRIPT=shell|flood|select|ime` drives everything in-app (bytes written to
-//! the PTY, synthetic iced events injected into the widget through `TermSession::inject`, iced
+//! The terminal runs through `support/local_pty.rs`, a local stand-in for the server: it owns the
+//! PTY, answers terminal queries with its own hidden Term, and streams (offset, bytes) chunks into
+//! the `TermModel`; the widget's `on_input`/`on_resize` messages go back to it.
+//!
+//! Test scripts: `IDE_TERM_SCRIPT=shell|flood|flood-warm|select|ime` drives everything in-app (bytes
+//! written to the PTY, synthetic iced events injected into the widget through `TermModel::inject`, iced
 //! `window::screenshot` evidence). No OS input is used. Output goes to `IDE_TERM_EVIDENCE`
 //! (default `./evidence-term`): `<script>.log` and `<script>_<step>.png`. The flood script runs
 //! `python $IDE_TERM_FLOOD 50000` (default `flood.py`).
@@ -18,7 +22,11 @@ use iced::advanced::input_method;
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{column, container, text};
 use iced::{Event, Fill, Point, Size, Subscription, Task, Widget, mouse, window};
-use ide_term::{TermConfig, TermEvent, TermEventKind, TermSession, TermSpec, TerminalView, ViewEvent};
+use ide_term::{TermConfig, TermEvent, TermEventKind, TermModel, TerminalView, ViewEvent};
+
+#[path = "support/local_pty.rs"]
+mod local_pty;
+use local_pty::{LocalPty, TermSpec};
 
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 static T0: OnceLock<Instant> = OnceLock::new();
@@ -40,6 +48,8 @@ fn evidence_dir() -> String {
 enum Message {
     Term(TermEvent),
     View(ViewEvent),
+    Input(Vec<u8>),
+    Resize(u16, u16),
     Tick,
     WindowId(Option<window::Id>),
     Shot(String, window::Screenshot),
@@ -78,7 +88,7 @@ enum Step {
 
 struct App {
     config: TermConfig,
-    sessions: Vec<TermSession>,
+    sessions: Vec<LocalPty>,
     active: usize,
     mode: String,
     script: Vec<Step>,
@@ -302,9 +312,9 @@ impl App {
             spec = spec.cwd(dir);
         }
         let n = if mode == "shell" { 2 } else { 1 };
-        let sessions: Vec<_> = (0..n).map(|_| TermSession::spawn(&spec, &config).expect("spawn")).collect();
+        let sessions: Vec<_> = (0..n).map(|_| LocalPty::spawn(&spec, &config).expect("spawn")).collect();
         for s in &sessions {
-            log(&format!("mode={mode:?} shell={shell} session {} pid {:?}", s.id(), s.pid()));
+            log(&format!("mode={mode:?} shell={shell} model {} pid {:?}", s.model.id(), s.pid()));
         }
         let app = App {
             config,
@@ -324,8 +334,12 @@ impl App {
         (app, window::latest().map(Message::WindowId))
     }
 
-    fn s(&self) -> &TermSession {
+    fn pty(&self) -> &LocalPty {
         &self.sessions[self.active]
+    }
+
+    fn s(&self) -> &TermModel {
+        &self.pty().model
     }
 
     fn inject(&self, event: Event, pos: Option<Point>) {
@@ -341,20 +355,22 @@ impl App {
     fn update(&mut self, msg: Message) -> Task<Message> {
         match msg {
             Message::Term(ev) => {
-                if let Some(s) = self.sessions.iter().find(|s| s.id() == ev.id) {
-                    s.ack();
+                if let Some(s) = self.sessions.iter().find(|s| s.model.id() == ev.id) {
+                    s.model.ack();
                 }
                 match &ev.kind {
                     TermEventKind::Output => {}
-                    TermEventKind::Exited(code) => {
-                        log(&format!("session {} EXITED code {code:?}", ev.id));
-                        self.exited.push((ev.id, *code));
-                        if self.mode.is_empty() && self.exited.len() == self.sessions.len() {
-                            return iced::exit();
-                        }
-                    }
-                    other => log(&format!("session {} event {other:?}", ev.id)),
+                    other => log(&format!("model {} event {other:?}", ev.id)),
                 }
+                Task::none()
+            }
+            Message::Input(bytes) => {
+                self.pty().write(&bytes);
+                Task::none()
+            }
+            Message::Resize(cols, rows) => {
+                log(&format!("on_resize {cols}x{rows} -> pty of model {}", self.s().id()));
+                self.pty().resize(cols, rows);
                 Task::none()
             }
             Message::View(ev) => {
@@ -377,6 +393,18 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
+                for s in &self.sessions {
+                    let id = s.model.id();
+                    if let Some(code) = s.exit_status()
+                        && !self.exited.iter().any(|e| e.0 == id)
+                    {
+                        log(&format!("model {id} EXITED code {code:?}"));
+                        self.exited.push((id, code));
+                    }
+                }
+                if self.mode.is_empty() && self.exited.len() == self.sessions.len() {
+                    return iced::exit();
+                }
                 let g = self.s().grid_size();
                 self.status = format!(
                     "{} session {}/{}  grid {}x{}  in {:.1} MB  title {:?}",
@@ -413,7 +441,7 @@ impl App {
                 }
                 Step::Write(s) => {
                     log(&format!("pty write {s:?}"));
-                    self.s().write(s.as_bytes());
+                    self.pty().write(s.as_bytes());
                 }
                 Step::WriteTo(i, s) => {
                     log(&format!("pty write to session index {i}: {s:?}"));
@@ -492,7 +520,7 @@ impl App {
                     }
                     self.flood_armed = Some(Instant::now());
                     log(&format!("flood start: pty write {cmd:?}"));
-                    self.s().write(cmd.as_bytes());
+                    self.pty().write(cmd.as_bytes());
                 }
                 Step::WaitFlood(ms) => {
                     advance = self.s().diagnostics().probe_hit.is_some() || elapsed >= Duration::from_millis(ms);
@@ -522,6 +550,9 @@ impl App {
                     let c = self.s().counters();
                     let bytes = c.bytes_in.load(std::sync::atomic::Ordering::Relaxed);
                     let parse = c.parse_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+                    let replies = self.pty().replies.load(std::sync::atomic::Ordering::Relaxed);
+                    let dropped = c.dropped_replies.load(std::sync::atomic::Ordering::Relaxed);
+                    log(&format!("query replies: adapter answered {replies}, model dropped {dropped}"));
                     log(&format!(
                         "STATS[{what}] wall {wall:.2}s flood_done {flood:?} frames {} avg_fps {:.1} frame_interval p50 {:.1} p95 {:.1} max {:.1} ms | draw() p50 {:.2} p95 {:.2} max {:.2} ms | pty bytes {:.2} MB, parse {parse:.3}s",
                         frames.len(),
@@ -571,9 +602,9 @@ impl App {
                         log(&format!("COPY #{} (string passed to the clipboard write) = {c:?}", i + 1));
                     }
                 }
-                Step::StartWriteLog => self.s().diagnostics().write_log = Some(Vec::new()),
+                Step::StartWriteLog => *self.pty().write_log.lock().unwrap() = Some(Vec::new()),
                 Step::LogWrites(what) => {
-                    let w = self.s().diagnostics().write_log.take().unwrap_or_default();
+                    let w = self.pty().write_log.lock().unwrap().take().unwrap_or_default();
                     log(&format!(
                         "PTY WRITES ({what}): {:?}\n  hex: {}",
                         String::from_utf8_lossy(&w),
@@ -581,7 +612,7 @@ impl App {
                     ));
                 }
                 Step::Switch(i) => {
-                    log(&format!("switch view to session index {i} (id {})", self.sessions[i].id()));
+                    log(&format!("switch view to session index {i} (model id {})", self.sessions[i].model.id()));
                     self.active = i;
                 }
                 Step::WaitExit(ms) => {
@@ -589,13 +620,21 @@ impl App {
                     let done = self.exited.iter().any(|e| e.0 == id);
                     advance = done || elapsed >= Duration::from_millis(ms);
                     if advance {
-                        log(&format!("wait exit: exited={done} exit_status={:?}", self.s().exit_status()));
+                        log(&format!("wait exit: exited={done} exit_status={:?}", self.pty().exit_status()));
                     }
                 }
                 Step::Exit => {
                     let rects = self.s().diagnostics().ime_rects.clone();
                     if !rects.is_empty() {
                         log(&format!("IME cursor areas: {rects:?}"));
+                    }
+                    for s in &self.sessions {
+                        log(&format!(
+                            "model {} query replies: adapter answered {}, model dropped {}",
+                            s.model.id(),
+                            s.replies.load(std::sync::atomic::Ordering::Relaxed),
+                            s.model.counters().dropped_replies.load(std::sync::atomic::Ordering::Relaxed)
+                        ));
                     }
                     log("exit: killing children");
                     for s in &self.sessions {
@@ -616,7 +655,10 @@ impl App {
 
     fn view(&self) -> impl Widget<Message> + '_ {
         column![
-            TerminalView::new(self.s(), &self.config).on_event(Message::View),
+            TerminalView::new(self.s(), &self.config)
+                .on_input(Message::Input)
+                .on_resize(Message::Resize)
+                .on_event(Message::View),
             container(text(self.status.clone()).size(12).font(iced::Font::MONOSPACE))
                 .height(STATUS_H)
                 .padding([2, 6])
@@ -630,7 +672,7 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut subs: Vec<_> = self.sessions.iter().map(|s| s.subscription().map(Message::Term)).collect();
+        let mut subs: Vec<_> = self.sessions.iter().map(|s| s.model.subscription().map(Message::Term)).collect();
         let scripted = !self.mode.is_empty();
         if !scripted || self.pc < self.script.len() {
             subs.push(iced::time::every(Duration::from_millis(if scripted { 30 } else { 500 })).map(|_| Message::Tick));

@@ -7,11 +7,12 @@ publish.workspace = true
 [dependencies]
 iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
 alacritty_terminal.workspace = true
-portable-pty.workspace = true
 unicode-width.workspace = true
-anyhow.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 # examples/term.rs: in-app screenshots for the test scripts
 png = "0.18.1"
+# examples/term.rs: local PTY adapter standing in for the server (example/tests only)
+portable-pty.workspace = true
+anyhow.workspace = true

@@ -1,4 +1,8 @@
-//! `TerminalView`: iced (master, advanced `Widget` API) widget showing a [`TermSession`].
+//! `TerminalView`: iced (master, advanced `Widget` API) widget showing a [`TermModel`].
+//!
+//! The widget never writes to a PTY: input bytes (keys, committed IME text, paste, focus
+//! reports, alternate-scroll arrows) go out through [`TerminalView::on_input`] and grid size
+//! changes through [`TerminalView::on_resize`]; the app forwards both to the server.
 //!
 //! Rendering: per row, runs of ASCII cells with the same style are one `fill_text` (Basic shaping)
 //! at x = col * cell_width; every other char (Hangul, emoji, symbols) is drawn alone at its cell
@@ -31,7 +35,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::{Palette, TermConfig};
 use crate::glyphs::builtin_glyph;
 use crate::keys::key_bytes;
-use crate::session::{SessionId, TermSession};
+use crate::model::{ModelId, TermModel};
 
 type Renderer = iced::Renderer;
 type P = <Renderer as text::Renderer>::Paragraph;
@@ -63,7 +67,7 @@ struct MetricsKey {
 }
 
 struct State {
-    session: SessionId,
+    model: ModelId,
     focused: bool,
     window_focused: bool,
     preedit: String,
@@ -72,12 +76,15 @@ struct State {
     last_click: Option<Click>,
     metrics: Option<(MetricsKey, Metrics)>,
     last_ime: Option<Rectangle>,
+    /// Grid size from the last layout, and the size last reported through `on_resize`.
+    grid: Option<(u16, u16)>,
+    reported: Option<(u16, u16)>,
 }
 
 impl State {
-    fn new(session: SessionId, focused: bool) -> Self {
+    fn new(model: ModelId, focused: bool) -> Self {
         State {
-            session,
+            model,
             focused,
             window_focused: true,
             preedit: String::new(),
@@ -86,6 +93,8 @@ impl State {
             last_click: None,
             metrics: None,
             last_ime: None,
+            grid: None,
+            reported: None,
         }
     }
     fn m(&self) -> Option<Metrics> {
@@ -107,10 +116,12 @@ impl operation::Focusable for State {
 }
 
 /// The terminal widget. Create one per frame in `view`:
-/// `TerminalView::new(&session, &config).on_event(Message::Term)`.
+/// `TerminalView::new(&model, &config).on_input(Message::Input).on_resize(Message::Resize)`.
 pub struct TerminalView<'a, Message> {
-    session: TermSession,
+    model: TermModel,
     config: &'a TermConfig,
+    on_input: Option<Box<dyn Fn(Vec<u8>) -> Message + 'a>>,
+    on_resize: Option<Box<dyn Fn(u16, u16) -> Message + 'a>>,
     on_event: Option<Box<dyn Fn(ViewEvent) -> Message + 'a>>,
     autofocus: bool,
     id: Option<Id>,
@@ -119,16 +130,34 @@ pub struct TerminalView<'a, Message> {
 }
 
 impl<'a, Message> TerminalView<'a, Message> {
-    pub fn new(session: &TermSession, config: &'a TermConfig) -> Self {
+    pub fn new(model: &TermModel, config: &'a TermConfig) -> Self {
         TerminalView {
-            session: session.clone(),
+            model: model.clone(),
             config,
+            on_input: None,
+            on_resize: None,
             on_event: None,
             autofocus: true,
             id: None,
             width: Length::Fill,
             height: Length::Fill,
         }
+    }
+
+    /// Bytes for the terminal's input (keys, committed IME text, paste incl. bracketed-paste
+    /// markers when the program enabled them, focus reports, Ctrl+C = 0x03, ...). Without it the
+    /// widget is view-only.
+    pub fn on_input(mut self, f: impl Fn(Vec<u8>) -> Message + 'a) -> Self {
+        self.on_input = Some(Box::new(f));
+        self
+    }
+
+    /// The widget's grid size (cols, rows) changed (also emitted once for a new widget state, e.g.
+    /// on first layout or after switching models). The local model is already resized; forward
+    /// it to the PTY owner.
+    pub fn on_resize(mut self, f: impl Fn(u16, u16) -> Message + 'a) -> Self {
+        self.on_resize = Some(Box::new(f));
+        self
     }
 
     /// Receive [`ViewEvent`]s (copy, focus changes).
@@ -165,6 +194,12 @@ impl<'a, Message> TerminalView<'a, Message> {
         }
     }
 
+    fn input(&self, shell: &mut Shell<'_, Message>, bytes: Vec<u8>) {
+        if let Some(f) = &self.on_input {
+            shell.publish(f(bytes));
+        }
+    }
+
     fn font(&self, bold: bool, italic: bool) -> Font {
         Font {
             family: iced::font::Family::name(&self.config.font_family),
@@ -195,19 +230,19 @@ impl<'a, Message> TerminalView<'a, Message> {
 
     fn grid_point(&self, m: Metrics, bounds: Rectangle, p: Point) -> (GPoint, Side) {
         let pad = self.config.padding;
-        let g = self.session.grid_size();
+        let g = self.model.grid_size();
         let x = (p.x - bounds.x - pad).max(0.0);
         let y = (p.y - bounds.y - pad).max(0.0);
         let col = ((x / m.cw) as usize).min(g.cols as usize - 1);
         let row = ((y / m.ch) as usize).min(g.rows as usize - 1);
         let side = if x - col as f32 * m.cw < m.cw / 2.0 { Side::Left } else { Side::Right };
-        let offset = self.session.lock_term().grid().display_offset() as i32;
+        let offset = self.model.lock_term().grid().display_offset() as i32;
         (GPoint::new(Line(row as i32 - offset), Column(col)), side)
     }
 
     fn cursor_rect(&self, m: Metrics, bounds: Rectangle, preedit_cols: usize) -> Rectangle {
         let pad = self.config.padding;
-        let term = self.session.lock_term();
+        let term = self.model.lock_term();
         let c = term.grid().cursor.point;
         let offset = term.grid().display_offset() as i32;
         let row = (c.line.0 + offset).clamp(0, term.screen_lines() as i32 - 1);
@@ -219,13 +254,13 @@ impl<'a, Message> TerminalView<'a, Message> {
 
     fn copy_selection(&self, shell: &mut Shell<'_, Message>) {
         let text = {
-            let mut term = self.session.lock_term();
+            let mut term = self.model.lock_term();
             let t = term.selection_to_string();
             term.selection = None;
             t
         };
         if let Some(t) = text.filter(|t| !t.is_empty()) {
-            self.session.diagnostics().copies.push(t.clone());
+            self.model.diagnostics().copies.push(t.clone());
             shell.write_clipboard(clipboard::Content::Text(t.clone()));
             self.emit(shell, ViewEvent::Copied(t));
         }
@@ -239,8 +274,8 @@ impl<'a, Message> TerminalView<'a, Message> {
         if !focused {
             state.preedit.clear();
         }
-        if self.session.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
-            self.session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+        if self.model.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
+            self.input(shell, if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
         }
         self.emit(shell, if focused { ViewEvent::Focused } else { ViewEvent::Unfocused });
         shell.request_redraw();
@@ -255,7 +290,7 @@ impl<'a, Message> TerminalView<'a, Message> {
                     let rect = self.cursor_rect(m, bounds, w);
                     if state.last_ime != Some(rect) {
                         state.last_ime = Some(rect);
-                        self.session.diagnostics().ime_rects.push(rect);
+                        self.model.diagnostics().ime_rects.push(rect);
                     }
                     shell.request_input_method(&InputMethod::Enabled {
                         cursor: rect,
@@ -266,16 +301,16 @@ impl<'a, Message> TerminalView<'a, Message> {
             }
             Event::Window(window::Event::Focused) => {
                 state.window_focused = true;
-                if state.focused && self.session.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
-                    self.session.write(b"\x1b[I");
+                if state.focused && self.model.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
+                    self.input(shell, b"\x1b[I".to_vec());
                 }
             }
             Event::Window(window::Event::Unfocused) => {
                 // The preedit is not cleared here: the OS IME commits or cancels it and reports
                 // that through `input_method::Event`s.
                 state.window_focused = false;
-                if state.focused && self.session.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
-                    self.session.write(b"\x1b[O");
+                if state.focused && self.model.lock_term().mode().contains(TermMode::FOCUS_IN_OUT) {
+                    self.input(shell, b"\x1b[O".to_vec());
                 }
             }
             Event::InputMethod(ev) if state.focused => {
@@ -284,8 +319,8 @@ impl<'a, Message> TerminalView<'a, Message> {
                     input_method::Event::Preedit(s, _) => state.preedit = s.clone(),
                     input_method::Event::Commit(s) => {
                         state.preedit.clear();
-                        self.session.lock_term().scroll_display(Scroll::Bottom);
-                        self.session.write(s.as_bytes());
+                        self.model.lock_term().scroll_display(Scroll::Bottom);
+                        self.input(shell, s.as_bytes().to_vec());
                     }
                     input_method::Event::Closed => state.preedit.clear(),
                 }
@@ -297,8 +332,9 @@ impl<'a, Message> TerminalView<'a, Message> {
                 if let Ok(content) = result
                     && let clipboard::Content::Text(t) = content.as_ref()
                 {
-                    self.session.lock_term().scroll_display(Scroll::Bottom);
-                    self.session.paste(t);
+                    self.model.lock_term().scroll_display(Scroll::Bottom);
+                    let bytes = self.model.paste_bytes(t);
+                    self.input(shell, bytes);
                 }
                 shell.capture_event();
                 shell.request_redraw();
@@ -313,7 +349,7 @@ impl<'a, Message> TerminalView<'a, Message> {
                 let shift = modifiers.shift();
                 if let Key::Character(c) = key {
                     let c = c.to_lowercase();
-                    if ctrl && c == "c" && (shift || self.session.lock_term().selection.is_some()) {
+                    if ctrl && c == "c" && (shift || self.model.lock_term().selection.is_some()) {
                         self.copy_selection(shell);
                         shell.capture_event();
                         shell.request_redraw();
@@ -328,19 +364,19 @@ impl<'a, Message> TerminalView<'a, Message> {
                 }
                 if shift && matches!(key, Key::Named(Named::PageUp | Named::PageDown)) {
                     let up = matches!(key, Key::Named(Named::PageUp));
-                    self.session.lock_term().scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
+                    self.model.lock_term().scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
                     shell.capture_event();
                     shell.request_redraw();
                     return;
                 }
-                let app_cursor = self.session.lock_term().mode().contains(TermMode::APP_CURSOR);
+                let app_cursor = self.model.lock_term().mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = key_bytes(key, *modifiers, text.as_deref(), app_cursor) {
                     {
-                        let mut term = self.session.lock_term();
+                        let mut term = self.model.lock_term();
                         term.selection = None;
                         term.scroll_display(Scroll::Bottom);
                     }
-                    self.session.write(&bytes);
+                    self.input(shell, bytes);
                     shell.capture_event();
                     shell.request_redraw();
                 }
@@ -361,7 +397,7 @@ impl<'a, Message> TerminalView<'a, Message> {
                         // Semantic/line selections cover the clicked word/line right away.
                         sel.update(pt, side);
                     }
-                    self.session.lock_term().selection = Some(sel);
+                    self.model.lock_term().selection = Some(sel);
                     state.dragging = true;
                     shell.capture_event();
                     shell.request_redraw();
@@ -372,7 +408,7 @@ impl<'a, Message> TerminalView<'a, Message> {
             Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
                 if let Some(p) = cursor.position() {
                     let (pt, side) = self.grid_point(m, bounds, p);
-                    if let Some(sel) = self.session.lock_term().selection.as_mut() {
+                    if let Some(sel) = self.model.lock_term().selection.as_mut() {
                         sel.update(pt, side);
                     }
                     shell.request_redraw();
@@ -380,7 +416,7 @@ impl<'a, Message> TerminalView<'a, Message> {
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.dragging => {
                 state.dragging = false;
-                let mut term = self.session.lock_term();
+                let mut term = self.model.lock_term();
                 if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
                     term.selection = None;
                 }
@@ -393,7 +429,7 @@ impl<'a, Message> TerminalView<'a, Message> {
                 };
                 let n = lines.round() as i32;
                 if n != 0 {
-                    let mut term = self.session.lock_term();
+                    let mut term = self.model.lock_term();
                     let mode = *term.mode();
                     if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
                         drop(term);
@@ -403,9 +439,7 @@ impl<'a, Message> TerminalView<'a, Message> {
                             (false, true) => b"\x1bOB",
                             (false, false) => b"\x1b[B",
                         };
-                        for _ in 0..n.unsigned_abs() {
-                            self.session.write(seq);
-                        }
+                        self.input(shell, seq.repeat(n.unsigned_abs() as usize));
                     } else {
                         term.scroll_display(Scroll::Delta(n));
                     }
@@ -418,9 +452,9 @@ impl<'a, Message> TerminalView<'a, Message> {
     }
 }
 
-/// Convenience constructor: `terminal_view(&session, &config)`.
-pub fn terminal_view<'a, Message>(session: &TermSession, config: &'a TermConfig) -> TerminalView<'a, Message> {
-    TerminalView::new(session, config)
+/// Convenience constructor: `terminal_view(&model, &config)`.
+pub fn terminal_view<'a, Message>(model: &TermModel, config: &'a TermConfig) -> TerminalView<'a, Message> {
+    TerminalView::new(model, config)
 }
 
 fn dim(c: Color) -> Color {
@@ -468,16 +502,17 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::new(self.session.id(), self.autofocus))
+        tree::State::new(State::new(self.model.id(), self.autofocus))
     }
 
     fn diff(&mut self, tree: &mut Tree) {
         tree.children.clear();
-        // The same tree slot may show another session after a switch: start fresh.
+        // The same tree slot may show another model after a switch: start fresh (this also
+        // re-reports the grid size for the new model).
         let state = tree.state.downcast_mut::<State>();
-        if state.session != self.session.id() {
+        if state.model != self.model.id() {
             let focused = state.focused;
-            *state = State::new(self.session.id(), focused);
+            *state = State::new(self.model.id(), focused);
         }
     }
 
@@ -512,7 +547,8 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
         }
         let cols = ((size.width - 2.0 * pad) / m.cw).floor().max(2.0) as u16;
         let rows = ((size.height - 2.0 * pad) / m.ch).floor().max(1.0) as u16;
-        self.session.resize(cols, rows, m.cw, m.ch);
+        self.model.resize_cells(cols, rows, m.cw, m.ch);
+        state.grid = Some((cols, rows));
         tree.size = size;
     }
 
@@ -533,7 +569,16 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
     ) {
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
-        let injected: Vec<_> = self.session.0.inject.lock().unwrap().drain(..).collect();
+        // `layout` cannot publish messages: report a changed grid size on the next event (a
+        // relayout is always followed by a redraw).
+        if state.grid != state.reported
+            && let Some((cols, rows)) = state.grid
+            && let Some(f) = &self.on_resize
+        {
+            state.reported = state.grid;
+            shell.publish(f(cols, rows));
+        }
+        let injected: Vec<_> = self.model.0.inject.lock().unwrap().drain(..).collect();
         for inj in injected {
             let (ev, cur) = match inj.pos {
                 Some(p) => {
@@ -580,14 +625,14 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
         let fonts = [self.font(false, false), self.font(true, false), self.font(false, true), self.font(true, true)];
         let font_of = |bold: bool, italic: bool| fonts[bold as usize + 2 * italic as usize];
         let probe = {
-            let d = self.session.diagnostics();
+            let d = self.model.diagnostics();
             if d.probe_hit.is_none() { d.probe.clone() } else { None }
         };
         let mut probe_hit = false;
         let mut row_text = String::new();
 
-        self.session.mark_drawn();
-        let term = self.session.lock_term();
+        self.model.mark_drawn();
+        let term = self.model.lock_term();
         let content = term.renderable_content();
         let colors = content.colors;
         let offset = content.display_offset as i32;
@@ -805,7 +850,7 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
             });
         }
 
-        let mut diag = self.session.diagnostics();
+        let mut diag = self.model.diagnostics();
         if probe_hit && diag.probe_hit.is_none() {
             diag.probe_hit = Some(Instant::now());
         }
