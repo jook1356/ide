@@ -1,0 +1,20 @@
+[package]
+name = "ide-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# iced `Subscription` adapter (`ide_client::iced_support`).
+iced = ["dep:iced", "dep:futures"]
+
+[dependencies]
+ide-proto.workspace = true
+bytes.workspace = true
+futures = { workspace = true, optional = true }
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "process", "sync", "time"] }
+iced = { workspace = true, optional = true, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time"] }

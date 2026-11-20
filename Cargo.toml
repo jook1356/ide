@@ -6,6 +6,9 @@ members = [
     "crates/ide-term",
     "crates/ide-web",
     "crates/ide-app",
+    "crates/ide-proto",
+    "crates/ide-server",
+    "crates/ide-client",
 ]
 
 [workspace.package]
@@ -28,11 +31,18 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
+# Client/server protocol (ide-proto, ide-server, ide-client).
+tokio = { version = "1", default-features = false }
+rmp-serde = "1"
+bytes = "1"
+futures = "0.3"
 
 ide-core = { path = "crates/ide-core" }
 ide-i18n = { path = "crates/ide-i18n" }
 ide-term = { path = "crates/ide-term" }
 ide-web = { path = "crates/ide-web" }
+ide-proto = { path = "crates/ide-proto" }
+ide-client = { path = "crates/ide-client" }
 
 [profile.release]
 debug = 1

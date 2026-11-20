@@ -1,6 +1,7 @@
 # Client/server split and multi-user foundation
 
-Status: agreed design. Phase 1 in progress.
+Status: agreed design. Phase 1 (protocol, server, client; no UI wiring yet) implemented — see
+"Phase 1 implementation" at the end for what exists and where it deviates from this text.
 
 ## Goals
 - The app (`ide`) only draws: terminal rendering, IME, editor views, CEF display, layout, theme, language.
@@ -103,3 +104,62 @@ deploying to a company server.
    client-local proxy for CEF.
 4. **Remote UX**: connection profiles (local / SSH hosts), latency indicators, server install/upgrade over SSH.
 5. **Gateway** (optional): WebSocket + SSO for phone/browser, connecting to per-user servers.
+
+## Phase 1 implementation
+Implemented in `crates/ide-proto`, `crates/ide-server` (lib + bin `ide-server`) and
+`crates/ide-client`; the app does not use them yet.
+
+| Piece | State |
+|---|---|
+| Frame codec, 1 MiB max, kinds Rpc/Data/Window/Open/Close | done (`ide_proto::frame`) |
+| MessagePack RPC (`rmp-serde`, named fields), typed `Request`/`Response`/`Notify`, `PROTO_VERSION` | done (`ide_proto::rpc`) |
+| Errors as stable id + named args (`ProtoError`); `ide-core` errors keep their `ErrorMessage` ids | done |
+| Mux over `AsyncRead + AsyncWrite`, per-stream credit window (256 KiB), control frames before data | done (`ide_proto::Mux`) |
+| Hello/Welcome with resume token | done |
+| `ide-server --stdio` (relay to the daemon, starts it detached), `--daemon`, `--stdio --no-daemon` | done |
+| Profiles, sessions (create via `ide-core` incl. worktree, start/stop/restart/delete/rename) | done |
+| Server-side Term answering queries; 8 MiB ring with byte offsets; attach/resume; title/bell/state notifications | done |
+| `UserInfo` from the transport, authorization (`Server::authorize` + `UserCtx::resolve_session`), `Runner`/`SameUserRunner`, file audit, per-user data dir | done |
+| Path jail | module + tests (`ide_server::PathJail`), not used by any RPC yet (phase 2) |
+| Client transports: local child, SSH (`ssh <host> ide-server --stdio`), memory; reconnect + exact resume; iced `Subscription` (feature `iced`) | done; SSH not tested against a real host |
+
+Deviations and details fixed during implementation:
+- **Handshake** is ordinary RPC on stream 0: the first message must be `Request::Hello`, answered
+  by `Response::Welcome` (or an error: `proto-version`, `unauthorized`, `not-handshaken`).
+  `Welcome` also carries `resumed` and `server_instance` (random per server process): terminal
+  offsets are only valid within one instance, so after a server restart the client re-attaches
+  without an offset (full replay starting with a reset).
+- **RPC messages above one frame** are fragmented: `Rpc` frames with `stream_id` 1 = fragment,
+  more follows; 0 = last/complete. Max message 16 MiB.
+- **Stream lifecycle**: `Open` payload = `u32` initial window the opener grants; the accepter
+  answers with a `Window` frame. Client-opened ids are odd, server-opened ids even. `Close` is
+  queued behind the stream's data, so it never overtakes it.
+- **Terminal stream format**: a byte stream of records `u64 offset | u8 flags (bit0 reset) |
+  u32 len | bytes` (records may straddle frames). The session is implied by the stream.
+  A reset can be signalled by an empty chunk (`TermChunk { reset: true, bytes: [] }`), which the
+  client emits right after an attach that could not resume.
+- **Attach** is per connection and session: attaching again replaces the previous stream.
+  `term.attach` without an offset always replays from the ring start with `reset`.
+- **Local socket name**: `\\.\pipe\ide-server-<user>`; with `IDE_DATA_DIR` set, a hash of the data
+  dir is appended so separate data dirs get separate daemons; `IDE_SERVER_SOCKET` overrides it.
+  Unix: `<data>/ide-server.sock` (data dir chmod 700).
+- **Daemon lifetime**: runs until killed, or until idle (no connections, no running sessions) for
+  `--idle-exit SECS` / `IDE_SERVER_IDLE_EXIT_SECS`. Writes `<data>/ide-server.pid`; logs to
+  `<data>/logs/ide-server.log` (`IDE_SERVER_LOG` filter); audit to `<data>/audit.log` (JSON lines).
+- **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `ide-core`
+  structs, so a Unix server can serve a Windows client.
+- **PTY size**: the most recent `term.resize` wins (no separate activity tracking).
+- **Colour query replies** (OSC 4/10/11/12) use the client's default dark palette; there is no
+  RPC to set the palette yet.
+- **UserInfo**: name from `USERNAME`/`USER`, id `DOMAIN\name` on Windows (not a SID/uid).
+- **Windows query observation**: conhost (ConPTY) answers a program's own DSR itself; the query
+  that reaches the server is ConPTY's startup `ESC[6n` (`PSEUDOCONSOLE_INHERIT_CURSOR`), which the
+  server answers so sessions start with no client attached. DA/OSC/size replies are unit-tested
+  on the server Term directly.
+
+Known gaps (phase 1):
+- `ide-core` runs `git` itself, so git processes do not go through `Runner`.
+- The Windows pipe uses the default DACL (remote clients rejected); restricting it explicitly to
+  the owner is still to do. No `Authenticator` trait yet (gateway phase).
+- The resume token only reports `resumed`; there is no other per-client server state.
+- Stopping a session kills the PTY's direct child; descendants end when the pseudoconsole closes.
