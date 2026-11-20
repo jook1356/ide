@@ -87,7 +87,10 @@ pub(crate) struct State {
     modifiers: Modifiers,
     last_pos: Point,
     last_click: Option<(Instant, Point, mouse::Button, i32)>,
-    waker_set: bool,
+    /// The view this state belongs to. The app may show another view in the same tree slot
+    /// (e.g. one web view per session in one detail area): the state is then reset and the
+    /// new view gets the waker.
+    view: Option<crate::ViewId>,
     window_focused: bool,
 }
 
@@ -519,9 +522,13 @@ where
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        if !state.waker_set {
+        if state.view != Some(self.view.id) {
+            *state = State {
+                view: Some(self.view.id),
+                window_focused: state.window_focused,
+                ..State::default()
+            };
             *self.view.waker.lock().unwrap() = Some(shell.waker().clone());
-            state.waker_set = true;
         }
         self.handle(state, event, layout.bounds(), cursor, shell);
     }
