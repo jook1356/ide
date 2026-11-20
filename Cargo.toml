@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/ide-core", "crates/ide-term", "crates/ide-web", "crates/ide-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# iced master pinned (0.15-dev, wgpu 30). Move to the 0.15 release once it ships.
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "98bd48fe011efc0ec5819fee0fa7673a7169ff11", default-features = false }
+# CEF 156 / Chromium 156. Never enable the default "sandbox" feature (needs ATL; breaks the wrapper build).
+cef = { version = "=156.7.0", default-features = false }
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+unicode-width = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "6"
+
+ide-core = { path = "crates/ide-core" }
+ide-term = { path = "crates/ide-term" }
+ide-web = { path = "crates/ide-web" }
+
+[profile.release]
+debug = 1

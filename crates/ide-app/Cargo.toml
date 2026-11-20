@@ -1,0 +1,18 @@
+[package]
+name = "ide-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ide"
+path = "src/main.rs"
+
+[dependencies]
+iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
+ide-core.workspace = true
+ide-term.workspace = true
+ide-web.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

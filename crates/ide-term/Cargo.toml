@@ -1,0 +1,13 @@
+[package]
+name = "ide-term"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
+alacritty_terminal.workspace = true
+portable-pty.workspace = true
+unicode-width.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

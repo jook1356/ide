@@ -1,0 +1,11 @@
+[package]
+name = "ide-web"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
+cef = { workspace = true, features = ["accelerated_osr"] }
+anyhow.workspace = true
+tracing.workspace = true
