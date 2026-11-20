@@ -1,6 +1,7 @@
 //! App state, messages and update logic.
 //!
-//! The app is a client of `ide-server`: profiles, sessions, worktrees and terminals live on the
+//! The app is a client of `ide-server`: providers, accounts, configurations, sessions,
+//! worktrees and terminals live on the
 //! server and are reached through [`ide_client::Client`] (RPC + notifications + terminal
 //! streams). Only UI state (`ui.json`: selection, split, language, web URLs, ...) and the CEF web
 //! views are local.
@@ -9,12 +10,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::operation;
+use iced::widget::{operation, text_editor};
 use iced::{Event, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 use ide_client::{
-    Agent, BrowseConfig, BrowseListing, Client, ClientEvent, ClientOptions, DefTarget, FileMatch,
-    LocalChild, NewSession, Notify, ProfileInfo, ProtoError, SessionInfo, SessionState, Ssh,
-    Switchable, Transport, Welcome,
+    AccountInfo, AccountState, BrowseConfig, BrowseListing, Client, ClientEvent, ClientOptions,
+    ConfigurationInfo, DefTarget, FileMatch, LocalChild, McpServerInfo, NewSession, Notify,
+    ProtoError, ProviderInfo, SessionInfo, SessionKind, SessionState, Ssh, Switchable, Transport,
+    Welcome,
 };
 use ide_i18n::LanguagePref;
 use ide_term::{TermConfig, TermModel, ViewEvent};
@@ -32,10 +34,8 @@ pub const SIDEBAR_W: f32 = 264.0;
 pub const DIVIDER_W: f32 = 5.0;
 /// URL of a new session's web tab.
 pub const DEFAULT_URL: &str = "about:blank";
-/// Profile name the server always has (used before the profile list arrived).
-pub const DEFAULT_PROFILE: &str = "default";
-/// Agent kinds offered in the new-session dialog.
-pub const AGENTS: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Shell];
+/// Configuration slug a fresh server has (used before the configuration list arrived).
+pub const DEFAULT_CONFIGURATION: &str = "default";
 /// Grid of a terminal before its widget was laid out.
 const INITIAL_GRID: (u16, u16) = (120, 30);
 
@@ -43,7 +43,7 @@ pub const TERM_ID: &str = "ide-term";
 pub const RENAME_ID: &str = "ide-rename";
 pub const NEW_REPO_ID: &str = "ide-new-repo";
 pub const URL_ID: &str = "ide-url";
-pub const PROFILE_NAME_ID: &str = "ide-profile-name";
+pub const CONFIG_NAME_ID: &str = "ide-config-name";
 pub const SSH_HOST_ID: &str = "ide-ssh-host";
 pub const ROOT_INPUT_ID: &str = "ide-root-input";
 
@@ -145,8 +145,12 @@ impl Live {
 
 pub struct NewForm {
     pub repo: String,
-    pub profile: String,
-    pub agent: Agent,
+    /// Provider id.
+    pub provider: String,
+    /// Account slug (`None` = the CLI's default login).
+    pub account: Option<String>,
+    /// Configuration slug.
+    pub configuration: String,
     pub title: String,
     pub base_ref: String,
     pub error: Option<String>,
@@ -209,8 +213,16 @@ pub struct DeleteForm {
 
 #[derive(Default)]
 pub struct SettingsForm {
-    pub new_name: String,
-    pub renaming: Option<(String, String)>,
+    /// Provider of the account to add.
+    pub acct_provider: String,
+    pub acct_name: String,
+    /// Account being renamed: (provider, slug, new name).
+    pub acct_renaming: Option<(String, String, String)>,
+    /// Last status check per account (provider, slug).
+    pub acct_status: Vec<((String, String), Option<AccountState>)>,
+    pub cfg_name: String,
+    /// Configuration being edited.
+    pub cfg_edit: Option<Box<ConfigEdit>>,
     pub error: Option<String>,
     pub busy: bool,
     /// Server choice being edited (applied with a confirm).
@@ -284,15 +296,119 @@ pub enum Modal {
     CloseDirty(CloseDirtyForm),
 }
 
-/// A profile change requested from the settings dialog.
-#[derive(Debug, Clone)]
-pub enum ProfileOp {
-    Created,
-    Renamed { old: String, new: String },
-    Deleted(String),
+/// The configuration editor of the settings dialog (plain fields; the user will redesign it).
+pub struct ConfigEdit {
+    pub base: ConfigurationInfo,
+    pub name: String,
+    pub instructions: text_editor::Content,
+    /// Skill folders (server paths), one per row.
+    pub skills: Vec<String>,
+    pub mcp: Vec<McpRow>,
 }
 
-type Lists = (Vec<ProfileInfo>, Vec<SessionInfo>);
+impl ConfigEdit {
+    fn new(c: &ConfigurationInfo) -> Self {
+        ConfigEdit {
+            base: c.clone(),
+            name: c.name.clone(),
+            instructions: text_editor::Content::with_text(&c.instructions),
+            skills: c.skills.clone(),
+            mcp: c
+                .mcp_servers
+                .iter()
+                .map(|m| McpRow {
+                    name: m.name.clone(),
+                    command: m.command.clone(),
+                    args: m.args.join(" "),
+                    env: m
+                        .env
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                })
+                .collect(),
+        }
+    }
+
+    /// The edited configuration (`args` and `env` are split on whitespace; `env` items are
+    /// `KEY=VALUE`).
+    pub fn to_info(&self) -> ConfigurationInfo {
+        let text = self.instructions.text();
+        ConfigurationInfo {
+            name: self.name.trim().to_owned(),
+            instructions: text.trim_end_matches('\n').to_owned(),
+            skills: self.skills.clone(),
+            mcp_servers: self
+                .mcp
+                .iter()
+                .filter(|m| !(m.name.trim().is_empty() && m.command.trim().is_empty()))
+                .map(|m| McpServerInfo {
+                    name: m.name.trim().to_owned(),
+                    command: m.command.trim().to_owned(),
+                    args: m.args.split_whitespace().map(str::to_owned).collect(),
+                    env: m
+                        .env
+                        .split_whitespace()
+                        .map(|kv| match kv.split_once('=') {
+                            Some((k, v)) => (k.to_owned(), v.to_owned()),
+                            None => (kv.to_owned(), String::new()),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            ..self.base.clone()
+        }
+    }
+}
+
+/// One MCP server row of the configuration editor.
+#[derive(Debug, Clone, Default)]
+pub struct McpRow {
+    pub name: String,
+    pub command: String,
+    pub args: String,
+    pub env: String,
+}
+
+/// Which field of an MCP row changed.
+#[derive(Debug, Clone, Copy)]
+pub enum McpField {
+    Name,
+    Command,
+    Args,
+    Env,
+}
+
+/// An entry of a pick list: a key (slug / id) and its label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub key: String,
+    pub label: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// An account / configuration change requested from the settings dialog.
+#[derive(Debug, Clone)]
+pub enum SettingsOp {
+    AccountRenamed,
+    AccountDeleted,
+    ConfigCreated,
+    ConfigSaved,
+    ConfigDeleted(String),
+}
+
+type Lists = (
+    Vec<ProviderInfo>,
+    Vec<AccountInfo>,
+    Vec<ConfigurationInfo>,
+    Vec<SessionInfo>,
+);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -327,23 +443,47 @@ pub enum Message {
     /// List a folder in the browser (`""` = the first root).
     BrowseGo(String),
     BrowseListed(u64, Result<BrowseListing, ProtoError>),
-    NewProfile(String),
-    NewAgent(Agent),
+    NewProvider(String),
+    /// Account slug; `""` = the CLI's default login.
+    NewAccount(String),
+    NewConfiguration(String),
     NewTitle(String),
     NewBase(String),
     NewSubmit,
     NewCreated(Result<SessionInfo, ProtoError>),
     CloseModal,
 
-    ProfilePicked(String),
+    /// Sidebar: show the sessions of this configuration.
+    ConfigurationPicked(String),
     OpenSettings,
-    SettingsNewName(String),
-    SettingsCreate,
-    SettingsStartRename(String),
-    SettingsRenameInput(String),
-    SettingsRenameCommit,
-    SettingsDelete(String),
-    ProfileDone(ProfileOp, Result<(), ProtoError>),
+    AcctProvider(String),
+    AcctName(String),
+    /// Create the account and open its login command in a terminal.
+    AcctAdd,
+    AcctCreated(Result<AccountInfo, ProtoError>),
+    AcctLogin(String, String),
+    LoginOpened(Result<SessionInfo, ProtoError>),
+    AcctStatus(String, String),
+    AcctStatusDone(String, String, Result<AccountState, ProtoError>),
+    AcctStartRename(String, String),
+    AcctRenameInput(String),
+    AcctRenameCommit,
+    AcctDelete(String, String),
+    CfgName(String),
+    CfgAdd,
+    CfgEdit(String),
+    CfgEditName(String),
+    CfgInstructions(text_editor::Action),
+    CfgSkill(usize, String),
+    CfgSkillAdd,
+    CfgSkillRemove(usize),
+    CfgMcp(usize, McpField, String),
+    CfgMcpAdd,
+    CfgMcpRemove(usize),
+    CfgSave,
+    CfgCancel,
+    CfgDelete(String),
+    SettingsDone(SettingsOp, Result<(), ProtoError>),
     SetLanguage(LanguagePref),
 
     AskStopServer,
@@ -517,9 +657,11 @@ pub struct App {
     /// Incremented per new [`Link`]; results of older links are ignored.
     pub link_gen: u64,
     pub conn: Conn,
-    /// Profile and session lists arrived at least once.
+    /// Provider, account, configuration and session lists arrived at least once.
     pub loaded: bool,
-    pub profiles: Vec<ProfileInfo>,
+    pub providers: Vec<ProviderInfo>,
+    pub accounts: Vec<AccountInfo>,
+    pub configs: Vec<ConfigurationInfo>,
     pub sessions: Vec<Live>,
     pub selected: Option<String>,
     pub ui: UiState,
@@ -572,7 +714,9 @@ impl App {
             link_gen: 0,
             conn,
             loaded: false,
-            profiles: Vec::new(),
+            providers: Vec::new(),
+            accounts: Vec::new(),
+            configs: Vec::new(),
             sessions: Vec::new(),
             selected: None,
             ui,
@@ -685,29 +829,59 @@ impl App {
         self.selected.as_deref().and_then(|id| self.live(id))
     }
 
-    pub fn current_profile(&self) -> String {
+    /// Configuration whose sessions the sidebar shows.
+    pub fn current_configuration(&self) -> String {
         self.ui
-            .profile
+            .configuration
             .clone()
-            .filter(|p| self.profiles.is_empty() || self.profiles.iter().any(|x| &x.name == p))
-            .or_else(|| self.profiles.first().map(|p| p.name.clone()))
-            .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
+            .filter(|p| self.configs.is_empty() || self.configs.iter().any(|x| &x.slug == p))
+            .or_else(|| self.configs.first().map(|p| p.slug.clone()))
+            .unwrap_or_else(|| DEFAULT_CONFIGURATION.to_owned())
     }
 
-    fn running_in_profile(&self, profile: &str) -> usize {
-        self.sessions
-            .iter()
-            .filter(|l| l.info.profile == profile && l.state.is_alive())
-            .count()
+    /// Whether the sidebar lists a session: sessions of the current configuration, and login
+    /// terminals always.
+    pub fn in_filter(&self, info: &SessionInfo) -> bool {
+        info.kind == SessionKind::Login || info.configuration == self.current_configuration()
     }
 
-    pub fn sessions_in_profile(&self, profile: &str) -> (usize, usize) {
-        let total = self
-            .sessions
+    /// Sessions using a configuration: (total, running).
+    pub fn sessions_in_configuration(&self, slug: &str) -> (usize, usize) {
+        let of = || {
+            self.sessions
+                .iter()
+                .filter(move |l| l.info.kind == SessionKind::Agent && l.info.configuration == slug)
+        };
+        (of().count(), of().filter(|l| l.state.is_alive()).count())
+    }
+
+    /// A provider by id.
+    pub fn provider(&self, id: &str) -> Option<&ProviderInfo> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    /// Display name of a provider (the id until the list arrived).
+    pub fn provider_name(&self, id: &str) -> String {
+        self.provider(id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    /// Display name of an account.
+    pub fn account_name(&self, provider: &str, slug: &str) -> String {
+        self.accounts
             .iter()
-            .filter(|l| l.info.profile == profile)
-            .count();
-        (total, self.running_in_profile(profile))
+            .find(|a| a.provider == provider && a.slug == slug)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| slug.to_owned())
+    }
+
+    /// The default account for a new session of `provider`: its first account.
+    fn default_account(&self, provider: &str) -> Option<String> {
+        self.provider(provider)
+            .filter(|p| p.caps.accounts)
+            .and_then(|_| self.accounts.iter().find(|a| a.provider == provider))
+            .map(|a| a.slug.clone())
     }
 
     pub(crate) fn save_ui(&mut self) {
@@ -724,17 +898,22 @@ impl App {
         let generation = self.link_gen;
         Task::perform(
             async move {
-                let p = c.profiles().await?;
+                let p = c.providers(false).await?;
+                let a = c.accounts().await?;
+                let k = c.configurations().await?;
                 let s = c.sessions().await?;
-                Ok((p, s))
+                Ok((p, a, k, s))
             },
             move |r| Message::Lists(generation, r),
         )
     }
 
     /// Merge the server's session list: keep terminal models and web views of known sessions.
-    fn apply_lists(&mut self, profiles: Vec<ProfileInfo>, list: Vec<SessionInfo>) -> Task<Message> {
-        self.profiles = profiles;
+    fn apply_lists(&mut self, lists: Lists) -> Task<Message> {
+        let (providers, accounts, configs, list) = lists;
+        self.providers = providers;
+        self.accounts = accounts;
+        self.configs = configs;
         let mut next = Vec::with_capacity(list.len());
         let mut old: Vec<Live> = std::mem::take(&mut self.sessions);
         for info in list {
@@ -774,8 +953,10 @@ impl App {
                 .clone()
                 .filter(|id| self.live(id).is_some());
             crate::script::log(&format!(
-                "lists loaded: {} profile(s), {} session(s)",
-                self.profiles.len(),
+                "lists loaded: {} provider(s), {} account(s), {} configuration(s), {} session(s)",
+                self.providers.len(),
+                self.accounts.len(),
+                self.configs.len(),
                 self.sessions.len()
             ));
         }
@@ -784,11 +965,10 @@ impl App {
             .as_deref()
             .is_some_and(|id| self.live(id).is_none())
         {
-            let profile = self.current_profile();
             self.selected = self
                 .sessions
                 .iter()
-                .find(|l| l.info.profile == profile)
+                .find(|l| self.in_filter(&l.info))
                 .map(|l| l.info.id.clone());
         }
         self.after_select()
@@ -914,7 +1094,9 @@ impl App {
                 Task::none()
             }
             Notify::Bell { .. } => Task::none(),
-            Notify::SessionsChanged | Notify::ProfilesChanged => self.refresh(),
+            Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
+                self.refresh()
+            }
             Notify::FsChanged {
                 session,
                 paths,
@@ -992,7 +1174,7 @@ impl App {
                     return Task::none();
                 }
                 match r {
-                    Ok((p, s)) => self.apply_lists(p, s),
+                    Ok(lists) => self.apply_lists(lists),
                     Err(e) => {
                         if e.id != "disconnected" {
                             self.banner = Some(i18n::proto_error(&e));
@@ -1206,11 +1388,10 @@ impl App {
                         self.ui.web_urls.remove(&id);
                         self.ui.detail.remove(&id);
                         if self.selected.as_deref() == Some(id.as_str()) {
-                            let profile = self.current_profile();
                             self.selected = self
                                 .sessions
                                 .iter()
-                                .find(|l| l.info.profile == profile)
+                                .find(|l| self.in_filter(&l.info))
                                 .map(|l| l.info.id.clone());
                         }
                         if matches!(&self.modal, Some(Modal::Delete(f)) if f.id == id) {
@@ -1233,11 +1414,17 @@ impl App {
                 if !self.connected() {
                     return Task::none();
                 }
-                let profile = self.current_profile();
+                let provider = self
+                    .providers
+                    .iter()
+                    .find(|p| p.detection.usable)
+                    .map(|p| p.id.clone())
+                    .unwrap_or_default();
                 self.modal = Some(Modal::NewSession(NewForm {
                     repo: self.ui.last_repo.clone().unwrap_or_default(),
-                    profile,
-                    agent: Agent::Claude,
+                    account: self.default_account(&provider),
+                    provider,
+                    configuration: self.current_configuration(),
                     title: String::new(),
                     base_ref: String::new(),
                     error: None,
@@ -1321,8 +1508,15 @@ impl App {
                     }
                 }
             }
-            Message::NewProfile(v) => self.with_new(|f| f.profile = v),
-            Message::NewAgent(a) => self.with_new(|f| f.agent = a),
+            Message::NewProvider(p) => {
+                let account = self.default_account(&p);
+                self.with_new(|f| {
+                    f.provider = p;
+                    f.account = account;
+                })
+            }
+            Message::NewAccount(a) => self.with_new(|f| f.account = (!a.is_empty()).then_some(a)),
+            Message::NewConfiguration(v) => self.with_new(|f| f.configuration = v),
             Message::NewTitle(v) => self.with_new(|f| f.title = v),
             Message::NewBase(v) => self.with_new(|f| f.base_ref = v),
             Message::NewSubmit => self.submit_new(),
@@ -1346,15 +1540,17 @@ impl App {
                 self.after_select()
             }
 
-            Message::ProfilePicked(p) => {
-                if self.profiles.iter().any(|x| x.name == p) {
-                    self.ui.profile = Some(p.clone());
-                    let sel_profile = self.selected_live().map(|l| l.info.profile.clone());
-                    if sel_profile.as_deref() != Some(p.as_str()) {
+            Message::ConfigurationPicked(p) => {
+                if self.configs.iter().any(|x| x.slug == p) {
+                    self.ui.configuration = Some(p.clone());
+                    let shown = self
+                        .selected_live()
+                        .is_some_and(|l| self.in_filter(&l.info));
+                    if !shown {
                         self.selected = self
                             .sessions
                             .iter()
-                            .find(|l| l.info.profile == p)
+                            .find(|l| self.in_filter(&l.info))
                             .map(|l| l.info.id.clone());
                     }
                     self.save_ui();
@@ -1363,14 +1559,21 @@ impl App {
             }
             Message::OpenSettings => {
                 self.open_items = false;
-                self.modal = Some(Modal::Settings(SettingsForm::new(&self.ui.server)));
+                let mut form = SettingsForm::new(&self.ui.server);
+                form.acct_provider = self
+                    .providers
+                    .iter()
+                    .find(|p| p.caps.accounts)
+                    .map(|p| p.id.clone())
+                    .unwrap_or_default();
+                self.modal = Some(Modal::Settings(form));
                 let roots = match self.online() {
                     Some(c) => {
                         Task::perform(async move { c.browse_config().await }, Message::RootsLoaded)
                     }
                     None => Task::none(),
                 };
-                Task::batch([operation::focus(PROFILE_NAME_ID), roots])
+                Task::batch([operation::focus(CONFIG_NAME_ID), roots])
             }
             Message::RootsLoaded(r) => self.with_settings(|f| {
                 f.roots_busy = false;
@@ -1430,94 +1633,230 @@ impl App {
                     }
                 }
             }),
-            Message::SettingsNewName(v) => {
-                if let Some(Modal::Settings(f)) = &mut self.modal {
-                    f.new_name = v;
-                }
-                Task::none()
-            }
-            Message::SettingsCreate => {
+            Message::AcctProvider(p) => self.with_settings(|f| f.acct_provider = p),
+            Message::AcctName(v) => self.with_settings(|f| f.acct_name = v),
+            Message::AcctAdd => {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
                 let Some(Modal::Settings(f)) = &mut self.modal else {
                     return Task::none();
                 };
-                let name = f.new_name.trim().to_owned();
+                if f.busy || f.acct_provider.is_empty() {
+                    return Task::none();
+                }
+                f.busy = true;
+                f.error = None;
+                let (provider, name) = (f.acct_provider.clone(), f.acct_name.trim().to_owned());
+                Task::perform(
+                    async move { c.create_account(&provider, &name).await },
+                    Message::AcctCreated,
+                )
+            }
+            Message::AcctCreated(r) => {
+                crate::script::log(&format!("account created: {r:?}"));
+                match r {
+                    Ok(a) => {
+                        if let Some(Modal::Settings(f)) = &mut self.modal {
+                            f.acct_name.clear();
+                        }
+                        let login = self.provider(&a.provider).is_some_and(|p| p.caps.login);
+                        let refresh = self.refresh();
+                        if login {
+                            Task::batch([
+                                refresh,
+                                self.update(Message::AcctLogin(a.provider, a.slug)),
+                            ])
+                        } else {
+                            let _ = self.with_settings(|f| f.busy = false);
+                            refresh
+                        }
+                    }
+                    Err(e) => self.with_settings(|f| {
+                        f.busy = false;
+                        f.error = Some(i18n::proto_error(&e));
+                    }),
+                }
+            }
+            Message::AcctLogin(provider, slug) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let (cols, rows) = self
+                    .selected_live()
+                    .and_then(|l| l.size)
+                    .unwrap_or(INITIAL_GRID);
+                let _ = self.with_settings(|f| f.busy = true);
+                Task::perform(
+                    async move { c.login_account(&provider, &slug, cols, rows).await },
+                    Message::LoginOpened,
+                )
+            }
+            Message::LoginOpened(r) => match r {
+                Ok(info) => {
+                    crate::script::log(&format!(
+                        "login session {} {:?} for {}/{}",
+                        info.id,
+                        info.title,
+                        info.provider,
+                        info.account.as_deref().unwrap_or("-")
+                    ));
+                    // Shown like a new session: the settings dialog closes.
+                    self.on_created(Ok(info))
+                }
+                Err(e) => {
+                    crate::script::log(&format!("login error: {e}"));
+                    self.with_settings(|f| {
+                        f.busy = false;
+                        f.error = Some(i18n::proto_error(&e));
+                    })
+                }
+            },
+            Message::AcctStatus(provider, slug) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let key = (provider.clone(), slug.clone());
+                let _ = self.with_settings(|f| {
+                    f.acct_status.retain(|(k, _)| k != &key);
+                    f.acct_status.push((key, None));
+                });
+                Task::perform(
+                    {
+                        let (p, s) = (provider.clone(), slug.clone());
+                        async move { c.account_status(&p, &s).await }
+                    },
+                    move |r| Message::AcctStatusDone(provider.clone(), slug.clone(), r),
+                )
+            }
+            Message::AcctStatusDone(provider, slug, r) => {
+                crate::script::log(&format!("account status {provider}/{slug}: {r:?}"));
+                self.with_settings(|f| {
+                    let key = (provider, slug);
+                    f.acct_status.retain(|(k, _)| k != &key);
+                    f.acct_status
+                        .push((key, Some(r.unwrap_or(AccountState::Unknown))));
+                })
+            }
+            Message::AcctStartRename(provider, slug) => {
+                let name = self.account_name(&provider, &slug);
+                self.with_settings(|f| {
+                    f.acct_renaming = Some((provider, slug, name));
+                    f.error = None;
+                })
+            }
+            Message::AcctRenameInput(v) => self.with_settings(|f| {
+                if let Some((_, _, n)) = &mut f.acct_renaming {
+                    *n = v;
+                }
+            }),
+            Message::AcctRenameCommit => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(Modal::Settings(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                let Some((provider, slug, name)) = f.acct_renaming.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { c.rename_account(&provider, &slug, &name).await.map(drop) },
+                    |r| Message::SettingsDone(SettingsOp::AccountRenamed, r),
+                )
+            }
+            Message::AcctDelete(provider, slug) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { c.delete_account(&provider, &slug, true).await },
+                    |r| Message::SettingsDone(SettingsOp::AccountDeleted, r),
+                )
+            }
+            Message::CfgName(v) => self.with_settings(|f| f.cfg_name = v),
+            Message::CfgAdd => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(Modal::Settings(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                let name = f.cfg_name.trim().to_owned();
                 f.busy = true;
                 Task::perform(
-                    async move { c.create_profile(&name).await.map(drop) },
-                    |r| Message::ProfileDone(ProfileOp::Created, r),
+                    async move { c.create_configuration(&name).await.map(drop) },
+                    |r| Message::SettingsDone(SettingsOp::ConfigCreated, r),
                 )
             }
-            Message::SettingsStartRename(name) => {
-                if let Some(Modal::Settings(f)) = &mut self.modal {
-                    f.renaming = Some((name.clone(), name));
+            Message::CfgEdit(slug) => {
+                let Some(cfg) = self.configs.iter().find(|c| c.slug == slug).cloned() else {
+                    return Task::none();
+                };
+                self.with_settings(|f| {
+                    f.cfg_edit = Some(Box::new(ConfigEdit::new(&cfg)));
                     f.error = None;
-                }
-                Task::none()
+                })
             }
-            Message::SettingsRenameInput(v) => {
-                if let Some(Modal::Settings(f)) = &mut self.modal
-                    && let Some((_, new)) = &mut f.renaming
-                {
-                    *new = v;
+            Message::CfgEditName(v) => self.with_cfg(|e| e.name = v),
+            Message::CfgInstructions(a) => self.with_cfg(|e| e.instructions.perform(a)),
+            Message::CfgSkill(i, v) => self.with_cfg(|e| {
+                if let Some(s) = e.skills.get_mut(i) {
+                    *s = v;
                 }
-                Task::none()
-            }
-            Message::SettingsRenameCommit => {
-                let renaming = match &self.modal {
-                    Some(Modal::Settings(f)) => f.renaming.clone(),
-                    _ => None,
-                };
-                let Some((old, new)) = renaming else {
-                    return Task::none();
-                };
-                let new = new.trim().to_owned();
-                if old == new {
-                    if let Some(Modal::Settings(f)) = &mut self.modal {
-                        f.renaming = None;
+            }),
+            Message::CfgSkillAdd => self.with_cfg(|e| e.skills.push(String::new())),
+            Message::CfgSkillRemove(i) => self.with_cfg(|e| {
+                if i < e.skills.len() {
+                    e.skills.remove(i);
+                }
+            }),
+            Message::CfgMcp(i, field, v) => self.with_cfg(|e| {
+                if let Some(m) = e.mcp.get_mut(i) {
+                    match field {
+                        McpField::Name => m.name = v,
+                        McpField::Command => m.command = v,
+                        McpField::Args => m.args = v,
+                        McpField::Env => m.env = v,
                     }
-                    return Task::none();
                 }
-                let running = self.running_in_profile(&old);
-                if running > 0 {
-                    if let Some(Modal::Settings(f)) = &mut self.modal {
-                        f.error = Some(tr::err_profile_running(i18n::count(running), &old));
-                    }
-                    return Task::none();
+            }),
+            Message::CfgMcpAdd => self.with_cfg(|e| e.mcp.push(McpRow::default())),
+            Message::CfgMcpRemove(i) => self.with_cfg(|e| {
+                if i < e.mcp.len() {
+                    e.mcp.remove(i);
                 }
+            }),
+            Message::CfgCancel => self.with_settings(|f| f.cfg_edit = None),
+            Message::CfgSave => {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let op = ProfileOp::Renamed {
-                    old: old.clone(),
-                    new: new.clone(),
+                let Some(Modal::Settings(f)) = &mut self.modal else {
+                    return Task::none();
                 };
+                let Some(e) = &f.cfg_edit else {
+                    return Task::none();
+                };
+                let info = e.to_info();
+                f.busy = true;
                 Task::perform(
-                    async move { c.rename_profile(&old, &new).await.map(drop) },
-                    move |r| Message::ProfileDone(op.clone(), r),
+                    async move { c.update_configuration(info).await.map(drop) },
+                    |r| Message::SettingsDone(SettingsOp::ConfigSaved, r),
                 )
             }
-            Message::SettingsDelete(name) => {
-                let (total, _) = self.sessions_in_profile(&name);
-                if total > 0 {
-                    if let Some(Modal::Settings(f)) = &mut self.modal {
-                        f.error = Some(tr::err_profile_in_use(i18n::count(total), &name));
-                    }
-                    return Task::none();
-                }
+            Message::CfgDelete(slug) => {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let op = ProfileOp::Deleted(name.clone());
+                let op = SettingsOp::ConfigDeleted(slug.clone());
                 Task::perform(
-                    async move { c.delete_profile(&name, false).await },
-                    move |r| Message::ProfileDone(op.clone(), r),
+                    async move { c.delete_configuration(&slug).await },
+                    move |r| Message::SettingsDone(op.clone(), r),
                 )
             }
-            Message::ProfileDone(op, r) => {
-                crate::script::log(&format!("profile {op:?}: {r:?}"));
+            Message::SettingsDone(op, r) => {
+                crate::script::log(&format!("settings {op:?}: {r:?}"));
                 let ok = r.is_ok();
                 if let Some(Modal::Settings(f)) = &mut self.modal {
                     f.busy = false;
@@ -1525,30 +1864,21 @@ impl App {
                         Ok(()) => {
                             f.error = None;
                             match &op {
-                                ProfileOp::Created => f.new_name.clear(),
-                                ProfileOp::Renamed { .. } => f.renaming = None,
-                                ProfileOp::Deleted(_) => {}
+                                SettingsOp::ConfigCreated => f.cfg_name.clear(),
+                                SettingsOp::ConfigSaved => f.cfg_edit = None,
+                                SettingsOp::AccountRenamed => f.acct_renaming = None,
+                                _ => {}
                             }
                         }
                         Err(e) => f.error = Some(i18n::proto_error(&e)),
                     }
                 }
-                if ok {
-                    match &op {
-                        ProfileOp::Renamed { old, new }
-                            if self.ui.profile.as_deref() == Some(old.as_str()) =>
-                        {
-                            self.ui.profile = Some(new.clone());
-                            self.save_ui();
-                        }
-                        ProfileOp::Deleted(name)
-                            if self.ui.profile.as_deref() == Some(name.as_str()) =>
-                        {
-                            self.ui.profile = None;
-                            self.save_ui();
-                        }
-                        _ => {}
-                    }
+                if ok
+                    && let SettingsOp::ConfigDeleted(slug) = &op
+                    && self.ui.configuration.as_deref() == Some(slug.as_str())
+                {
+                    self.ui.configuration = None;
+                    self.save_ui();
                 }
                 // The server also notifies; refresh now so the dialog updates without a race.
                 self.refresh()
@@ -1865,6 +2195,16 @@ impl App {
         }
     }
 
+    fn with_cfg(&mut self, f: impl FnOnce(&mut ConfigEdit)) -> Task<Message> {
+        if let Some(Modal::Settings(SettingsForm {
+            cfg_edit: Some(e), ..
+        })) = &mut self.modal
+        {
+            f(e);
+        }
+        Task::none()
+    }
+
     fn with_settings(&mut self, f: impl FnOnce(&mut SettingsForm)) -> Task<Message> {
         if let Some(Modal::Settings(form)) = &mut self.modal {
             f(form);
@@ -1966,9 +2306,10 @@ impl App {
         f.busy = true;
         f.error = None;
         let req = NewSession {
-            profile: f.profile.clone(),
+            provider: f.provider.clone(),
+            account: f.account.clone(),
+            configuration: f.configuration.clone(),
             repo_path: repo.clone(),
-            agent: f.agent,
             title: f.title.clone(),
             base_ref: f.base_ref.clone(),
             start: true,
@@ -2000,7 +2341,7 @@ impl App {
             info.id, info.title, info.worktree_path, info.branch, info.state
         ));
         let id = info.id.clone();
-        let profile = info.profile.clone();
+        let configuration = (info.kind == SessionKind::Agent).then(|| info.configuration.clone());
         match self.live_mut(&id) {
             Some(l) => {
                 l.state = info.state.into();
@@ -2011,7 +2352,9 @@ impl App {
                 self.sessions.push(live);
             }
         }
-        self.ui.profile = Some(profile);
+        if let Some(c) = configuration {
+            self.ui.configuration = Some(c);
+        }
         self.selected = Some(id);
         self.modal = None;
         self.save_ui();

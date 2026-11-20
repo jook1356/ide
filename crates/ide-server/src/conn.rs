@@ -212,7 +212,16 @@ where
             server_version: VERSION.to_owned(),
             user: user.clone(),
             capabilities: [
-                "profiles", "sessions", "term", "files", "browse", "search", "git", "def",
+                "providers",
+                "accounts",
+                "configurations",
+                "sessions",
+                "term",
+                "files",
+                "browse",
+                "search",
+                "git",
+                "def",
             ]
             .map(String::from)
             .to_vec(),

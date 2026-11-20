@@ -1,0 +1,32 @@
+# Sample declarative agent provider. Copy to `<data dir>/providers/<id>.toml` and restart the
+# server (`ide-server` reads `providers/*.toml` when it opens a user's data). Format reference:
+# crates/ide-agents/src/declarative.rs. Unknown keys are rejected.
+#
+# This example describes a hypothetical CLI "mycli" that reads its login/config home from
+# MYCLI_HOME, logs in with `mycli auth login` and accepts a system prompt file via a flag.
+
+id = "mycli"                       # slug ([a-z0-9_-]), must not clash with claude/codex/shell
+name = "My CLI"                    # display name
+program = "mycli"                  # searched on PATH (PATHEXT on Windows)
+args = []                          # always passed; placeholders allowed
+version_args = ["--version"]       # [] = do not probe the version
+min_version = "1.0.0"              # optional: older versions are shown as not usable
+glyph = "✦"                        # optional one-character icon
+
+account_env = "MYCLI_HOME"         # optional: accounts; the account dir goes into this variable
+login_args = ["auth", "login"]     # optional: login command run in a terminal tab
+
+[env]                              # optional extra variables; placeholders allowed
+MYCLI_SESSION = "{session_id}"
+
+[instructions]
+mechanism = "flag"                 # "flag" | "env" | "file" | "none"
+flag = "--system-prompt-file"      # the generated instructions file path follows this flag
+# mechanism = "env"; env = "MYCLI_SYSTEM_PROMPT_FILE"
+# mechanism = "file"; file = "RULES.md"  (then pass "{instructions_file}" in args/env)
+# Skills of a configuration are appended to the instructions as a list (fallback).
+
+[mcp]
+mechanism = "unsupported"          # MCP servers are not passed on (a note is logged at launch)
+
+# Placeholders: {account_dir} {scratch_dir} {session_id} {title} {instructions_file}

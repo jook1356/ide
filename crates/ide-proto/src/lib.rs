@@ -4,6 +4,7 @@
 //!
 //! See `docs/server-architecture.md`.
 
+pub mod agents;
 #[doc(hidden)]
 pub mod bin;
 pub mod error;
@@ -13,6 +14,10 @@ pub mod mux;
 pub mod rpc;
 pub mod term;
 
+pub use agents::{
+    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ProviderCaps, ProviderDetection,
+    ProviderInfo, SessionKind, Support,
+};
 pub use error::ProtoError;
 pub use files::{
     AheadBehind, BrowseConfig, BrowseEntry, BrowseListing, ByteRange, ChangeKind, DefResult,
@@ -26,8 +31,8 @@ pub use mux::{
     StreamSender,
 };
 pub use rpc::{
-    Agent, Attached, Hello, NewSession, Notify, PROTO_VERSION, ProfileInfo, Request, Response,
-    ResumeToken, RpcMessage, SessionInfo, SessionState, UserInfo, Welcome,
+    Attached, Hello, NewSession, Notify, PROTO_VERSION, Request, Response, ResumeToken, RpcMessage,
+    SessionInfo, SessionState, UserInfo, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};
 

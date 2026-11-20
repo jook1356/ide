@@ -1,4 +1,5 @@
-//! Sessions: one agent run = (profile, repo, worktree, agent kind). Persisted without scrollback.
+//! Sessions: one agent run = (provider, account, configuration, repo, worktree). Persisted
+//! without scrollback.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -97,30 +98,27 @@ impl From<SessionId> for String {
     }
 }
 
-/// Which program a session runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// What a session runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentKind {
-    /// Claude Code (`claude`).
-    Claude,
-    /// OpenAI Codex CLI (`codex`).
-    Codex,
-    /// A plain shell (`cmd.exe` / `$SHELL`).
-    Shell,
+pub enum SessionKind {
+    /// The provider's agent in a git worktree.
+    #[default]
+    Agent,
+    /// The provider's login command for an account (no repository; the "worktree" is an empty
+    /// scratch dir).
+    Login,
 }
 
-impl AgentKind {
-    /// All kinds, for pickers.
-    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Shell];
-
-    /// Human-readable label.
-    pub fn label(self) -> &'static str {
-        match self {
-            AgentKind::Claude => "Claude",
-            AgentKind::Codex => "Codex",
-            AgentKind::Shell => "Shell",
-        }
-    }
+/// Which provider, account and configuration a session uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionTarget {
+    /// Provider id.
+    pub provider: String,
+    /// Account slug of that provider (`None` = the CLI's default config / no account).
+    pub account: Option<String>,
+    /// Configuration slug.
+    pub configuration: String,
 }
 
 /// A persisted session.
@@ -130,20 +128,35 @@ pub struct Session {
     pub id: SessionId,
     /// Display title.
     pub title: String,
-    /// Profile name.
-    pub profile: String,
+    /// Agent session or login terminal.
+    #[serde(default)]
+    pub kind: SessionKind,
+    /// Provider id (`"claude"`, `"codex"`, `"shell"`, declarative ids). Empty only in files
+    /// written before providers existed, until [`SessionStore::migrate_legacy`] ran.
+    #[serde(default)]
+    pub provider: String,
+    /// Account slug (of `provider`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Configuration slug.
+    #[serde(default)]
+    pub configuration: String,
     /// Main checkout of the repository the worktree belongs to.
     pub repo_path: PathBuf,
     /// The session's own worktree (agent cwd).
     pub worktree_path: PathBuf,
     /// The worktree's branch (`ide/<id>`).
     pub branch: String,
-    /// Program to run.
-    pub agent: AgentKind,
     /// Creation time, Unix seconds.
     pub created_at: u64,
     /// Last activity, Unix seconds.
     pub last_active: u64,
+    /// Legacy `profile` field (read only, for migration).
+    #[serde(default, rename = "profile", skip_serializing)]
+    pub legacy_profile: Option<String>,
+    /// Legacy `agent` field (`"claude"`/`"codex"`/`"shell"`; read only, for migration).
+    #[serde(default, rename = "agent", skip_serializing)]
+    pub legacy_agent: Option<String>,
 }
 
 impl Session {
@@ -151,22 +164,34 @@ impl Session {
     pub fn new(
         id: SessionId,
         title: impl Into<String>,
-        profile: impl Into<String>,
+        target: SessionTarget,
         repo: &crate::repo::Repo,
         worktree: crate::worktree::Worktree,
-        agent: AgentKind,
     ) -> Self {
         let now = now_unix();
         Session {
             id,
             title: title.into(),
-            profile: profile.into(),
+            kind: SessionKind::Agent,
+            provider: target.provider,
+            account: target.account,
+            configuration: target.configuration,
             repo_path: repo.root().to_path_buf(),
             worktree_path: worktree.path,
             branch: worktree.branch,
-            agent,
             created_at: now,
             last_active: now,
+            legacy_profile: None,
+            legacy_agent: None,
+        }
+    }
+
+    /// The provider, account and configuration of this session.
+    pub fn target(&self) -> SessionTarget {
+        SessionTarget {
+            provider: self.provider.clone(),
+            account: self.account.clone(),
+            configuration: self.configuration.clone(),
         }
     }
 }
@@ -247,14 +272,40 @@ impl SessionStore {
         self.modify(id, |s| s.title = title)
     }
 
-    /// Point every session using profile `old` at `new` (after [`crate::ProfileStore::rename`]).
-    pub fn rename_profile(&mut self, old: &str, new: &str) -> Result<()> {
-        let mut changed = false;
-        for s in self.sessions.iter_mut().filter(|s| s.profile == old) {
-            s.profile = new.to_owned();
-            changed = true;
+    /// Sessions using an account.
+    pub fn count_using_account(&self, provider: &str, slug: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.provider == provider && s.account.as_deref() == Some(slug))
+            .count()
+    }
+
+    /// Agent sessions using a configuration.
+    pub fn count_using_configuration(&self, slug: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.kind == SessionKind::Agent && s.configuration == slug)
+            .count()
+    }
+
+    /// Give every session written before providers existed (empty `provider`) a target:
+    /// `map(profile, agent)` with the legacy `profile` and `agent` fields. Saves if anything
+    /// changed; returns the number of migrated sessions.
+    pub fn migrate_legacy(&mut self, map: impl Fn(&str, &str) -> SessionTarget) -> Result<usize> {
+        let mut n = 0;
+        for s in self.sessions.iter_mut().filter(|s| s.provider.is_empty()) {
+            let profile = s.legacy_profile.take().unwrap_or_default();
+            let agent = s.legacy_agent.take().unwrap_or_else(|| "shell".into());
+            let t = map(&profile, &agent);
+            s.provider = t.provider;
+            s.account = t.account;
+            s.configuration = t.configuration;
+            n += 1;
         }
-        if changed { self.save() } else { Ok(()) }
+        if n > 0 {
+            self.save()?;
+        }
+        Ok(n)
     }
 
     fn modify(&mut self, id: &SessionId, f: impl FnOnce(&mut Session)) -> Result<()> {
@@ -282,18 +333,22 @@ impl SessionStore {
 }
 
 #[cfg(test)]
-pub(crate) fn sample_session(agent: AgentKind, worktree: PathBuf) -> Session {
+pub(crate) fn sample_session(provider: &str, worktree: PathBuf) -> Session {
     let id = SessionId::new();
     Session {
         branch: id.branch(),
         id,
         title: "t".into(),
-        profile: "default".into(),
+        kind: SessionKind::Agent,
+        provider: provider.into(),
+        account: Some("default".into()),
+        configuration: "default".into(),
         repo_path: PathBuf::from("repo"),
         worktree_path: worktree,
-        agent,
         created_at: 1,
         last_active: 1,
+        legacy_profile: None,
+        legacy_agent: None,
     }
 }
 
@@ -326,20 +381,23 @@ mod tests {
         let mut store = SessionStore::open(&paths).unwrap();
         assert!(store.list().is_empty());
 
-        let a = sample_session(AgentKind::Claude, t.0.join("wa"));
-        let b = sample_session(AgentKind::Shell, t.0.join("wb"));
+        let a = sample_session("claude", t.0.join("wa"));
+        let mut b = sample_session("shell", t.0.join("wb"));
+        b.account = None;
         store.upsert(a.clone()).unwrap();
         store.upsert(b.clone()).unwrap();
         store.set_title(&a.id, "renamed").unwrap();
         store.touch(&b.id).unwrap();
-        store.rename_profile("default", "work").unwrap();
         assert!(store.get(&b.id).unwrap().last_active > 1);
+        assert_eq!(store.count_using_account("claude", "default"), 1);
+        assert_eq!(store.count_using_account("codex", "default"), 0);
+        assert_eq!(store.count_using_configuration("default"), 2);
 
         let reopened = SessionStore::open(&paths).unwrap();
         assert_eq!(reopened.list(), store.list());
         assert_eq!(reopened.get(&a.id).unwrap().title, "renamed");
-        assert_eq!(reopened.get(&a.id).unwrap().profile, "work");
-        assert_eq!(reopened.get(&b.id).unwrap().agent, AgentKind::Shell);
+        assert_eq!(reopened.get(&b.id).unwrap().provider, "shell");
+        assert_eq!(reopened.get(&b.id).unwrap().account, None);
 
         let mut store = reopened;
         store.remove(&a.id).unwrap();
@@ -350,7 +408,8 @@ mod tests {
         assert_eq!(SessionStore::open(&paths).unwrap().list().len(), 1);
 
         let json = std::fs::read_to_string(paths.sessions_file()).unwrap();
-        assert!(json.contains("\"agent\": \"shell\""), "{json}");
+        assert!(json.contains("\"provider\": \"shell\""), "{json}");
+        assert!(!json.contains("\"profile\""), "{json}");
     }
 
     #[test]

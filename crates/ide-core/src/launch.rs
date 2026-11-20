@@ -1,11 +1,10 @@
-//! Turning a (session, profile) pair into a concrete process to spawn in a PTY.
+//! A concrete process to spawn in a PTY, and program resolution helpers. Building the spec of
+//! a session is the job of the agent providers (`ide-agents`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::profile::Profile;
-use crate::session::{AgentKind, Session};
 
 /// Everything needed to spawn an agent. Nothing is launched by `ide-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,46 +45,6 @@ impl LaunchEnv {
     }
 }
 
-impl LaunchSpec {
-    /// Build the spec for `session` using `profile`, resolving the program on the real `PATH`.
-    pub fn for_session(session: &Session, profile: &Profile) -> Result<Self> {
-        Self::for_session_with(session, profile, &LaunchEnv::from_process())
-    }
-
-    /// Like [`LaunchSpec::for_session`] with an explicit environment.
-    ///
-    /// - Claude: `claude`, `CLAUDE_CONFIG_DIR=<profile claude dir>`
-    /// - Codex: `codex`, `CODEX_HOME=<profile codex dir>`
-    /// - Shell: `COMSPEC`/`cmd.exe` on Windows, `$SHELL`/`/bin/sh` elsewhere; gets both
-    ///   variables so agents started from the shell use the profile too.
-    ///
-    /// `TERM=xterm-256color` and `COLORTERM=truecolor` are always set.
-    pub fn for_session_with(session: &Session, profile: &Profile, env: &LaunchEnv) -> Result<Self> {
-        let claude = (
-            "CLAUDE_CONFIG_DIR".to_owned(),
-            profile.claude_config_dir.display().to_string(),
-        );
-        let codex = (
-            "CODEX_HOME".to_owned(),
-            profile.codex_home.display().to_string(),
-        );
-        let (program, mut vars) = match session.agent {
-            AgentKind::Claude => (resolve("claude", env)?, vec![claude]),
-            AgentKind::Codex => (resolve("codex", env)?, vec![codex]),
-            AgentKind::Shell => (shell_program(env)?, vec![claude, codex]),
-        };
-        vars.push(("TERM".into(), "xterm-256color".into()));
-        vars.push(("COLORTERM".into(), "truecolor".into()));
-        let (program, args) = wrap_batch_file(program, Vec::new(), env)?;
-        Ok(LaunchSpec {
-            program,
-            args,
-            cwd: session.worktree_path.clone(),
-            env: vars,
-        })
-    }
-}
-
 /// Whether `program` is a Windows batch file (`.cmd` / `.bat`, case-insensitive), which
 /// `CreateProcess` cannot start directly.
 pub fn is_batch_file(program: &Path) -> bool {
@@ -98,7 +57,7 @@ pub fn is_batch_file(program: &Path) -> bool {
 /// On Windows, run batch files (npm shims such as `claude.cmd`) through the command
 /// interpreter: `cmd.exe /d /s /c <program> <args>`. Other programs, and every program on
 /// other platforms, are returned unchanged.
-fn wrap_batch_file(
+pub fn wrap_batch_file(
     program: PathBuf,
     args: Vec<String>,
     env: &LaunchEnv,
@@ -113,7 +72,8 @@ fn wrap_batch_file(
     Ok((cmd, wrapped))
 }
 
-fn resolve(program: &str, env: &LaunchEnv) -> Result<PathBuf> {
+/// Find `program` on `env`'s `PATH` or fail with [`Error::ProgramNotFound`].
+pub fn resolve_program(program: &str, env: &LaunchEnv) -> Result<PathBuf> {
     which_in(program, env.path.as_deref(), env.pathext.as_deref()).ok_or_else(|| {
         Error::ProgramNotFound {
             program: program.to_owned(),
@@ -121,7 +81,8 @@ fn resolve(program: &str, env: &LaunchEnv) -> Result<PathBuf> {
     })
 }
 
-fn shell_program(env: &LaunchEnv) -> Result<PathBuf> {
+/// The user's shell: `COMSPEC` (else `cmd.exe`) on Windows, `$SHELL` (else `/bin/sh`) elsewhere.
+pub fn shell_program(env: &LaunchEnv) -> Result<PathBuf> {
     let configured = if cfg!(windows) {
         env.comspec.as_ref()
     } else {
@@ -136,7 +97,7 @@ fn shell_program(env: &LaunchEnv) -> Result<PathBuf> {
     {
         return Ok(found);
     }
-    resolve(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }, env)
+    resolve_program(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }, env)
 }
 
 /// `cmd.exe` for running batch files: `COMSPEC` when it names `cmd.exe`, else `cmd.exe` on `PATH`.
@@ -153,7 +114,7 @@ fn cmd_exe(env: &LaunchEnv) -> Result<PathBuf> {
     {
         return Ok(found);
     }
-    resolve("cmd.exe", env)
+    resolve_program("cmd.exe", env)
 }
 
 /// Find `program` on the current `PATH` (honouring `PATHEXT` on Windows).
@@ -229,7 +190,6 @@ fn is_executable(p: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::paths::test_util::TempDir;
-    use crate::session::sample_session;
 
     fn fake_exe(dir: &Path, name: &str) -> PathBuf {
         let p = dir.join(name);
@@ -248,95 +208,6 @@ mod tests {
         } else {
             name.to_owned()
         }
-    }
-
-    fn profile(root: &Path) -> Profile {
-        Profile {
-            name: "work".into(),
-            claude_config_dir: root.join("p").join("claude"),
-            codex_home: root.join("p").join("codex"),
-            created_at: 0,
-        }
-    }
-
-    fn get<'a>(spec: &'a LaunchSpec, key: &str) -> Option<&'a str> {
-        spec.env
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-
-    #[test]
-    fn env_per_agent_kind() {
-        let t = TempDir::new("launch");
-        let bin = t.0.join("bin dir");
-        std::fs::create_dir_all(&bin).unwrap();
-        let claude = fake_exe(&bin, &exe("claude"));
-        let codex = fake_exe(&bin, &exe("codex"));
-        let shell = fake_exe(&bin, if cfg!(windows) { "cmd.exe" } else { "fish" });
-        let env = LaunchEnv {
-            path: Some(std::env::join_paths([t.0.join("empty"), bin.clone()]).unwrap()),
-            pathext: Some(".COM;.EXE;.BAT;.CMD".into()),
-            comspec: Some(shell.clone().into()),
-            shell: Some(shell.clone().into()),
-        };
-        let prof = profile(&t.0);
-        let wt = t.0.join("wt");
-
-        let s = LaunchSpec::for_session_with(
-            &sample_session(AgentKind::Claude, wt.clone()),
-            &prof,
-            &env,
-        )
-        .unwrap();
-        if cfg!(windows) {
-            // claude.cmd is a batch file: run through cmd.exe /d /s /c.
-            assert_eq!(s.program, shell);
-            assert_eq!(
-                s.args,
-                ["/d", "/s", "/c", &claude.display().to_string()].map(String::from)
-            );
-        } else {
-            assert_eq!(s.program, claude);
-            assert!(s.args.is_empty());
-        }
-        assert_eq!(s.cwd, wt);
-        assert_eq!(
-            get(&s, "CLAUDE_CONFIG_DIR"),
-            Some(prof.claude_config_dir.display().to_string().as_str())
-        );
-        assert_eq!(get(&s, "CODEX_HOME"), None);
-        assert_eq!(get(&s, "TERM"), Some("xterm-256color"));
-        assert_eq!(get(&s, "COLORTERM"), Some("truecolor"));
-
-        let s = LaunchSpec::for_session_with(
-            &sample_session(AgentKind::Codex, wt.clone()),
-            &prof,
-            &env,
-        )
-        .unwrap();
-        if cfg!(windows) {
-            assert_eq!(s.program, shell);
-            assert_eq!(s.args.last(), Some(&codex.display().to_string()));
-        } else {
-            assert_eq!(s.program, codex);
-        }
-        assert_eq!(
-            get(&s, "CODEX_HOME"),
-            Some(prof.codex_home.display().to_string().as_str())
-        );
-        assert_eq!(get(&s, "CLAUDE_CONFIG_DIR"), None);
-        assert_eq!(get(&s, "TERM"), Some("xterm-256color"));
-
-        let s = LaunchSpec::for_session_with(
-            &sample_session(AgentKind::Shell, wt.clone()),
-            &prof,
-            &env,
-        )
-        .unwrap();
-        assert_eq!(s.program, shell);
-        assert!(get(&s, "CODEX_HOME").is_some() && get(&s, "CLAUDE_CONFIG_DIR").is_some());
-        assert_eq!(get(&s, "COLORTERM"), Some("truecolor"));
     }
 
     #[test]
@@ -358,33 +229,29 @@ mod tests {
             comspec: Some(pwsh.clone().into()),
             shell: None,
         };
-        let prof = profile(&t.0);
-        let wt = t.0.join("wt");
-
-        // Only a .bat on PATH: wrapped in cmd.exe.
         let bat = fake_exe(&bin, "codex.bat");
-        let s = LaunchSpec::for_session_with(
-            &sample_session(AgentKind::Codex, wt.clone()),
-            &prof,
-            &env,
-        )
-        .unwrap();
+        let found = resolve_program("codex", &env).unwrap();
+        assert_eq!(found, bat);
+        let (p, args) = wrap_batch_file(found, vec!["--x".into()], &env).unwrap();
         if cfg!(windows) {
-            assert_eq!(s.program, cmd);
+            assert_eq!(p, cmd);
             assert_eq!(
-                s.args,
-                ["/d", "/s", "/c", &bat.display().to_string()].map(String::from)
+                args,
+                ["/d", "/s", "/c", &bat.display().to_string(), "--x"].map(String::from)
             );
         } else {
-            assert!(s.args.is_empty());
+            assert_eq!(args, ["--x"]);
         }
         // With an .exe next to it, the .exe wins (PATHEXT order) and runs directly.
         let exe_file = fake_exe(&bin, "codex.exe");
-        let s = LaunchSpec::for_session_with(&sample_session(AgentKind::Codex, wt), &prof, &env)
-            .unwrap();
         if cfg!(windows) {
-            assert_eq!(s.program, exe_file);
-            assert!(s.args.is_empty());
+            let found = resolve_program("codex", &env).unwrap();
+            assert_eq!(found, exe_file);
+            let (p, args) = wrap_batch_file(found, Vec::new(), &env).unwrap();
+            assert_eq!(p, exe_file);
+            assert!(args.is_empty());
+            // The shell is COMSPEC when it can be found.
+            assert_eq!(shell_program(&env).unwrap(), pwsh);
         }
     }
 
@@ -395,12 +262,7 @@ mod tests {
             path: Some(t.0.clone().into_os_string()),
             ..Default::default()
         };
-        let err = LaunchSpec::for_session_with(
-            &sample_session(AgentKind::Codex, t.0.clone()),
-            &profile(&t.0),
-            &env,
-        )
-        .unwrap_err();
+        let err = resolve_program("codex", &env).unwrap_err();
         assert!(matches!(&err, Error::ProgramNotFound { program } if program == "codex"));
         assert!(err.to_string().contains("not found on PATH"));
     }

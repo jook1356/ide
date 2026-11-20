@@ -17,8 +17,6 @@ pub const ACCENT: Color = color!(0x4c8dff);
 pub const GREEN: Color = color!(0x3fb950);
 pub const AMBER: Color = color!(0xd29922);
 pub const RED: Color = color!(0xf85149);
-pub const CLAUDE: Color = color!(0xd97757);
-pub const CODEX: Color = color!(0x7aa2f7);
 
 pub const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,

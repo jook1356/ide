@@ -10,9 +10,9 @@
 //! use ide_i18n::{Lang, set_language, tr};
 //! set_language(Lang::Ko);
 //! assert_eq!(tr::new_session(), "새 세션");
-//! assert_eq!(tr::profile_sessions(3, 1), "세션 3개, 실행 중 1개");
+//! assert_eq!(tr::configuration_sessions(3, 1), "세션 3개, 실행 중 1개");
 //! set_language(Lang::En);
-//! assert_eq!(tr::profile_sessions(1, 0), "1 session, 0 running");
+//! assert_eq!(tr::configuration_sessions(1, 0), "1 session, 0 running");
 //! ```
 //!
 //! Parameter types: a variable is `i64` when the English message uses it as a plural selector

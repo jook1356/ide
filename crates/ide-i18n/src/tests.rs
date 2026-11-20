@@ -54,18 +54,18 @@ fn switching_language() {
     set_language(Lang::Ko);
     assert_eq!(current(), Lang::Ko);
     assert_eq!(tr::new_session(), "새 세션");
-    assert_eq!(tr::profile_sessions(3, 1), "세션 3개, 실행 중 1개");
+    assert_eq!(tr::configuration_sessions(3, 1), "세션 3개, 실행 중 1개");
     assert_eq!(
         tr::delete_session_title("shell A"),
         "“shell A” 세션을 삭제할까요?"
     );
     set_language(Lang::En);
     assert_eq!(tr::new_session(), "New session");
-    assert_eq!(tr::profile_sessions(1, 0), "1 session, 0 running");
-    assert_eq!(tr::profile_sessions(2, 1), "2 sessions, 1 running");
+    assert_eq!(tr::configuration_sessions(1, 0), "1 session, 0 running");
+    assert_eq!(tr::configuration_sessions(2, 1), "2 sessions, 1 running");
     assert_eq!(
-        tr::err_profile_running(1, "default"),
-        "1 session of profile “default” is running; stop them before renaming."
+        tr::err_account_in_use(1, "default"),
+        "1 session uses account “default”; delete them first."
     );
     assert_eq!(
         tr::err_not_a_git_repo("C:/x", "fatal"),

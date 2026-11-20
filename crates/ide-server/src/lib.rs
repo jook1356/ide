@@ -1,6 +1,6 @@
 //! `ide-server`: the per-user backend daemon (see `docs/server-architecture.md`).
 //!
-//! - [`Server`] holds the services (profiles, sessions, terminals) and serves connections
+//! - [`Server`] holds the services (providers, accounts, configurations, sessions, terminals) and serves connections
 //!   over any `AsyncRead + AsyncWrite` ([`Server::serve`]).
 //! - [`daemon`]: local socket listener, `--stdio` relay, detached daemon start.
 //! - Multi-user foundation: [`UserInfo`](ide_proto::UserInfo) from the transport,

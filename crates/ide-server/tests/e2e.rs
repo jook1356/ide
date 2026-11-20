@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use ide_client::{
-    Agent, Client, ClientOptions, LocalChild, NewSession, SessionInfo, SessionState, Switchable,
-    Transport,
+    Client, ClientOptions, LocalChild, NewSession, SessionInfo, SessionState, Switchable, Transport,
 };
 use ide_proto::{
     Hello, Mux, MuxConfig, PROTO_VERSION, Request, Response, Role, RpcMessage, UserInfo,
@@ -62,32 +61,61 @@ where
     let col1 = collect(&c1, delay());
     assert!(!c1.welcome().unwrap().user.name.is_empty());
 
-    // Profiles.
-    let names = |p: Vec<ide_client::ProfileInfo>| p.into_iter().map(|p| p.name).collect::<Vec<_>>();
-    assert_eq!(names(c1.profiles().await.unwrap()), ["default"]);
-    c1.create_profile("work").await.unwrap();
-    assert_eq!(
-        c1.create_profile("work").await.unwrap_err().id,
-        "profile-exists"
-    );
-    let e = c1.create_profile("Bad Name").await.unwrap_err();
+    // Providers, accounts, configurations.
+    let providers = c1.providers(false).await.unwrap();
+    let ids: Vec<_> = providers.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(&ids[..3], ["claude", "codex", "shell"]);
+    let shell = providers.iter().find(|p| p.id == "shell").unwrap();
+    assert!(shell.detection.usable, "{:?}", shell.detection);
+    assert!(!shell.caps.accounts);
+    let slugs =
+        |c: Vec<ide_client::ConfigurationInfo>| c.into_iter().map(|c| c.slug).collect::<Vec<_>>();
+    assert_eq!(slugs(c1.configurations().await.unwrap()), ["default"]);
+    let work = c1.create_configuration("Work stuff").await.unwrap();
+    assert_eq!(work.slug, "work-stuff");
+    let e = c1.create_configuration("  ").await.unwrap_err();
+    assert_eq!(e.id, "invalid-name");
+    let mut edit = work.clone();
+    edit.instructions = "Be brief.".into();
+    edit.skills = vec!["C:/skills/lint".into(), "  ".into()];
+    edit.mcp_servers = vec![ide_client::McpServerInfo {
+        name: "bad name".into(),
+        command: "node".into(),
+        ..Default::default()
+    }];
+    let e = c1.update_configuration(edit.clone()).await.unwrap_err();
     assert_eq!(
         (e.id.as_str(), e.get("name")),
-        ("invalid-name", Some("Bad Name"))
+        ("invalid-mcp-name", Some("bad name"))
     );
-    c1.rename_profile("work", "work2").await.unwrap();
-    assert_eq!(names(c1.profiles().await.unwrap()), ["default", "work2"]);
-    c1.delete_profile("work2", true).await.unwrap();
+    edit.mcp_servers[0].name = "docs".into();
+    let saved = c1.update_configuration(edit).await.unwrap();
+    assert_eq!(saved.skills, ["C:/skills/lint"], "blank skill rows dropped");
+    assert_eq!(saved.instructions, "Be brief.");
+    let acct = c1.create_account("claude", "Work").await.unwrap();
     assert_eq!(
-        c1.delete_profile("default", false).await.unwrap_err().id,
-        "last-profile"
+        (acct.provider.as_str(), acct.slug.as_str()),
+        ("claude", "work")
     );
+    assert_eq!(
+        c1.create_account("shell", "x").await.unwrap_err().id,
+        "provider-no-login"
+    );
+    assert_eq!(
+        c1.create_account("nope", "x").await.unwrap_err().id,
+        "provider-not-found"
+    );
+    let renamed = c1.rename_account("claude", "work", "Job").await.unwrap();
+    assert_eq!(renamed.name, "Job");
+    assert_eq!(c1.accounts().await.unwrap().len(), 1);
 
     // Session: created and started with no client attached.
+    // Session: created and started with no client attached.
     let req = NewSession {
-        profile: "default".into(),
+        provider: "shell".into(),
+        account: None,
+        configuration: "default".into(),
         repo_path: repo.display().to_string(),
-        agent: Agent::Shell,
         title: String::new(),
         base_ref: String::new(),
         start: true,
@@ -101,9 +129,53 @@ where
         })
         .await
         .unwrap_err();
+    for (bad_req, id) in [
+        (
+            NewSession {
+                configuration: "nope".into(),
+                ..req.clone()
+            },
+            "configuration-not-found",
+        ),
+        (
+            NewSession {
+                provider: "nope".into(),
+                ..req.clone()
+            },
+            "provider-not-found",
+        ),
+        (
+            NewSession {
+                account: Some("work".into()),
+                ..req.clone()
+            },
+            "account-not-found",
+        ),
+    ] {
+        assert_eq!(c1.create_session(bad_req).await.unwrap_err().id, id);
+    }
     assert!(bad.id == "not-a-git-repo" || bad.id == "io", "{bad}");
-    let s = c1.create_session(req).await.expect("create session");
+    let s = c1
+        .create_session(NewSession {
+            configuration: "work-stuff".into(),
+            ..req
+        })
+        .await
+        .expect("create session");
     assert_eq!(s.state, SessionState::Running);
+    assert_eq!(
+        (
+            s.provider.as_str(),
+            s.account.as_deref(),
+            s.configuration.as_str()
+        ),
+        ("shell", None, "work-stuff")
+    );
+    assert_eq!(
+        c1.delete_configuration("work-stuff").await.unwrap_err().id,
+        "configuration-in-use"
+    );
+    c1.delete_account("claude", "work", true).await.unwrap();
     assert!(Path::new(&s.worktree_path).is_dir());
     assert!(s.branch.starts_with("ide/"));
     let renamed = c1.rename_session(&s.id, "renamed").await.unwrap();
@@ -404,9 +476,10 @@ async fn local_child_daemon_end_to_end() {
     let extra = sc
         .c1
         .create_session(NewSession {
-            profile: "default".into(),
+            provider: "shell".into(),
+            account: None,
+            configuration: "default".into(),
             repo_path: repo.display().to_string(),
-            agent: Agent::Shell,
             title: "shutdown".into(),
             base_ref: String::new(),
             start: true,
@@ -446,7 +519,7 @@ async fn stdio_no_daemon() {
     .await
     .unwrap();
     c.ping().await.unwrap();
-    assert_eq!(c.profiles().await.unwrap()[0].name, "default");
+    assert_eq!(c.configurations().await.unwrap()[0].slug, "default");
     assert!(!data.join("ide-server.pid").exists(), "no daemon started");
     drop(c);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -511,7 +584,16 @@ async fn handshake_errors() {
             assert_eq!(
                 w.capabilities,
                 [
-                    "profiles", "sessions", "term", "files", "browse", "search", "git", "def"
+                    "providers",
+                    "accounts",
+                    "configurations",
+                    "sessions",
+                    "term",
+                    "files",
+                    "browse",
+                    "search",
+                    "git",
+                    "def"
                 ]
             );
         }

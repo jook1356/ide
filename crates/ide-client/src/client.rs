@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    Attached, BrowseConfig, BrowseListing, ChunkDecoder, DefResult, DiffAgainst, DiffFile,
-    FileContent, FileMatch, FsEntry, FsStat, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError,
-    NewSession, Notify, PROTO_VERSION, ProfileInfo, ProtoError, Request, Response, ResumeToken,
-    Role, RpcMessage, RpcReceiver, SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk,
-    TextEncoding, TextSearch, Welcome,
+    AccountInfo, AccountState, Attached, BrowseConfig, BrowseListing, ChunkDecoder,
+    ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
+    GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
+    ProtoError, ProviderInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
+    SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -316,41 +316,145 @@ impl Client {
         })
     }
 
-    /// `profile.list`.
-    pub async fn profiles(&self) -> Result<Vec<ProfileInfo>, ProtoError> {
-        expect(self.call(Request::ProfileList).await, |r| match r {
-            Response::Profiles(p) => Some(p),
+    /// `provider.list` (`refresh` re-runs detection on the server).
+    pub async fn providers(&self, refresh: bool) -> Result<Vec<ProviderInfo>, ProtoError> {
+        expect(
+            self.call(Request::ProviderList { refresh }).await,
+            |r| match r {
+                Response::Providers(p) => Some(p),
+                _ => None,
+            },
+        )
+    }
+
+    /// `account.list`.
+    pub async fn accounts(&self) -> Result<Vec<AccountInfo>, ProtoError> {
+        expect(self.call(Request::AccountList).await, |r| match r {
+            Response::Accounts(a) => Some(a),
             _ => None,
         })
     }
 
-    /// `profile.create`.
-    pub async fn create_profile(&self, name: &str) -> Result<ProfileInfo, ProtoError> {
-        expect_profile(
-            self.call(Request::ProfileCreate { name: name.into() })
+    /// `account.create`.
+    pub async fn create_account(
+        &self,
+        provider: &str,
+        name: &str,
+    ) -> Result<AccountInfo, ProtoError> {
+        expect_account(
+            self.call(Request::AccountCreate {
+                provider: provider.into(),
+                name: name.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `account.rename` (display name).
+    pub async fn rename_account(
+        &self,
+        provider: &str,
+        slug: &str,
+        name: &str,
+    ) -> Result<AccountInfo, ProtoError> {
+        expect_account(
+            self.call(Request::AccountRename {
+                provider: provider.into(),
+                slug: slug.into(),
+                name: name.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `account.delete`.
+    pub async fn delete_account(
+        &self,
+        provider: &str,
+        slug: &str,
+        remove_files: bool,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::AccountDelete {
+                provider: provider.into(),
+                slug: slug.into(),
+                remove_files,
+            })
+            .await,
+        )
+    }
+
+    /// `account.status` (runs the CLI on the server; slow).
+    pub async fn account_status(
+        &self,
+        provider: &str,
+        slug: &str,
+    ) -> Result<AccountState, ProtoError> {
+        expect(
+            self.call(Request::AccountStatus {
+                provider: provider.into(),
+                slug: slug.into(),
+            })
+            .await,
+            |r| match r {
+                Response::AccountState(s) => Some(s),
+                _ => None,
+            },
+        )
+    }
+
+    /// `account.login`: a started login session (terminal) for the account.
+    pub async fn login_account(
+        &self,
+        provider: &str,
+        slug: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SessionInfo, ProtoError> {
+        expect(
+            self.call(Request::AccountLogin {
+                provider: provider.into(),
+                slug: slug.into(),
+                cols,
+                rows,
+            })
+            .await,
+            |r| match r {
+                Response::Session(s) => Some(s),
+                _ => None,
+            },
+        )
+    }
+
+    /// `configuration.list`.
+    pub async fn configurations(&self) -> Result<Vec<ConfigurationInfo>, ProtoError> {
+        expect(self.call(Request::ConfigurationList).await, |r| match r {
+            Response::Configurations(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// `configuration.create`.
+    pub async fn create_configuration(&self, name: &str) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::ConfigurationCreate { name: name.into() })
                 .await,
         )
     }
 
-    /// `profile.rename` (sessions follow).
-    pub async fn rename_profile(&self, old: &str, new: &str) -> Result<ProfileInfo, ProtoError> {
-        expect_profile(
-            self.call(Request::ProfileRename {
-                old: old.into(),
-                new: new.into(),
-            })
-            .await,
-        )
+    /// `configuration.update`.
+    pub async fn update_configuration(
+        &self,
+        c: ConfigurationInfo,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(self.call(Request::ConfigurationUpdate(c)).await)
     }
 
-    /// `profile.delete`.
-    pub async fn delete_profile(&self, name: &str, remove_files: bool) -> Result<(), ProtoError> {
+    /// `configuration.delete`.
+    pub async fn delete_configuration(&self, slug: &str) -> Result<(), ProtoError> {
         expect_unit(
-            self.call(Request::ProfileDelete {
-                name: name.into(),
-                remove_files,
-            })
-            .await,
+            self.call(Request::ConfigurationDelete { slug: slug.into() })
+                .await,
         )
     }
 
@@ -951,9 +1055,16 @@ fn expect_written(r: Result<Response, ProtoError>) -> Result<String, ProtoError>
     })
 }
 
-fn expect_profile(r: Result<Response, ProtoError>) -> Result<ProfileInfo, ProtoError> {
+fn expect_account(r: Result<Response, ProtoError>) -> Result<AccountInfo, ProtoError> {
     expect(r, |r| match r {
-        Response::Profile(p) => Some(p),
+        Response::Account(a) => Some(a),
+        _ => None,
+    })
+}
+
+fn expect_configuration(r: Result<Response, ProtoError>) -> Result<ConfigurationInfo, ProtoError> {
+    expect(r, |r| match r {
+        Response::Configuration(c) => Some(c),
         _ => None,
     })
 }

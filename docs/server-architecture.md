@@ -29,8 +29,9 @@ phone/browser ─WebSocket+SSO─► gateway ──► ide-server   (later; gate
 | Crate | Side | Role |
 |---|---|---|
 | `ide-proto` | shared | Frame codec, message types (serde), RPC enum, stream mux + per-stream flow control, resume state, error ids for i18n. Transport-agnostic (`AsyncRead + AsyncWrite`). |
-| `ide-core` | server | Profiles, sessions, worktrees, launch specs, session ops (exists). |
-| `ide-server` | server | Daemon: local socket listener, `--stdio` relay mode, services (sessions, profiles, PTY host), `Runner`, path jail, audit hook. |
+| `ide-core` | server | Accounts, configurations (+ profile migration), sessions, worktrees, session ops. |
+| `ide-agents` | server | Agent providers (Claude, Codex, shell, declarative TOML): detection, account env, login, configuration -> launch spec. See `docs/agent-providers.md`. |
+| `ide-server` | server | Daemon: local socket listener, `--stdio` relay mode, services (providers, accounts, configurations, sessions, PTY host), `Runner`, path jail, audit hook. |
 | `ide-client` | client | Starts/attaches a server through a `Transport` (local child, `ssh` command, later WebSocket), RPC calls, stream subscriptions as iced `Subscription`s, automatic reconnect + resume. |
 | `ide-term` | client | Terminal widget + client-side VT model fed by bytes (no PTY code). |
 | `ide-web` | client | CEF. Preview/mod HTTP arrives over protocol streams and is served to CEF by a client-local proxy (phase 3). |
@@ -83,22 +84,22 @@ A major-version mismatch is a clear error shown to the user.
 | Piece | Rule |
 |---|---|
 | Identity | `UserInfo` comes from the transport/auth step, never from request fields. Local and SSH: the OS user running the server. `Authenticator` trait reserved for the gateway. |
-| Data layout | Per-user data dir (the server's account): `profiles/`, `sessions.json`, `worktrees/`, `ui/`. The model keeps `user_id` so a gateway can address users. |
-| Authorization | One layer resolves every resource id (session, profile, stream) for the connection's user before handlers run. |
+| Data layout | Per-user data dir (the server's account): `accounts.json` + `accounts/`, `configurations.json`, `providers/`, `sessions.json` + `sessions/<id>/agent/`, `worktrees/`, `ui/`. The model keeps `user_id` so a gateway can address users. |
+| Authorization | One layer resolves every resource id (session, account, configuration, stream) for the connection's user before handlers run. |
 | Path jail | Client paths resolve inside the user's allowed roots (their worktrees, registered repos); canonicalize; reject `..` and symlink escapes. All file/git/search RPCs go through it (phase 2). |
 | Runner | All process spawning goes through `trait Runner`. Now: `SameUserRunner`. Containers/limits are optional later. |
-| Secrets | Claude/Codex logins stay in the server-side profile dirs; never sent to clients. |
+| Secrets | Claude/Codex logins stay in the server-side account dirs; never sent to clients (accounts are listed without paths). |
 | Audit | `audit(user, action, target)` hook on session start/stop, process spawn, file writes. Now: a log file. |
 
 Deferred: gateway + SSO, admin UI, quotas/limits, containers, sharing sessions between users.
 
 ## Compliance note
-Agent CLIs run under each user's own login (per-user profiles on a per-user server). One subscription
+Agent CLIs run under each user's own login (per-user accounts on a per-user server). One subscription
 account must not be shared by several people; check the Claude/Codex terms for server-side use before
 deploying to a company server.
 
 ## Phases
-1. **Local split**: `ide-proto`, `ide-server`, `ide-client`; sessions/profiles/worktrees and PTYs behind
+1. **Local split**: `ide-proto`, `ide-server`, `ide-client`; sessions/accounts/worktrees and PTYs behind
    RPC; app starts a local server over stdio; detach/re-attach with replay; in-memory transport tests.
    SSH transport = running `ssh <host> ide-server --stdio` with the system OpenSSH client.
 2. **Files**: tree, read/write, watch, search, git status/diff, go-to-definition (port Hermes Desk logic).
@@ -119,7 +120,7 @@ Implemented in `crates/ide-proto`, `crates/ide-server` (lib + bin `ide-server`) 
 | Mux over `AsyncRead + AsyncWrite`, per-stream credit window (256 KiB), control frames before data | done (`ide_proto::Mux`) |
 | Hello/Welcome with resume token | done |
 | `ide-server --stdio` (relay to the daemon, starts it detached), `--daemon`, `--stdio --no-daemon` | done |
-| Profiles, sessions (create via `ide-core` incl. worktree, start/stop/restart/delete/rename) | done |
+| Providers, accounts (incl. login sessions), configurations; sessions (create via `ide-core` incl. worktree, start/stop/restart/delete/rename) | done |
 | Server-side Term answering queries; 8 MiB ring with byte offsets; attach/resume; title/bell/state notifications | done |
 | `UserInfo` from the transport, authorization (`Server::authorize` + `UserCtx::resolve_session`), `Runner`/`SameUserRunner`, file audit, per-user data dir | done |
 | Path jail | module + tests (`ide_server::PathJail`); used by every phase 2 RPC and `session.create` |

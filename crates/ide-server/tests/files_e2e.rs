@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::*;
 use ide_client::{
-    Agent, ChangeKind, Client, ClientOptions, DefResult, DiffAgainst, EntryKind, GitRev, LineKind,
+    ChangeKind, Client, ClientOptions, DefResult, DiffAgainst, EntryKind, GitRev, LineKind,
     LocalChild, NewSession, Notify, SearchEvent, SessionInfo, TextSearch,
 };
 use ide_core::Paths;
@@ -78,9 +78,10 @@ fn text_query(session: &str, q: &str) -> TextSearch {
 
 async fn new_session(c: &Client, repo: &Path) -> SessionInfo {
     c.create_session(NewSession {
-        profile: "default".into(),
+        provider: "shell".into(),
+        account: None,
+        configuration: "default".into(),
         repo_path: repo.display().to_string(),
-        agent: Agent::Shell,
         title: "files".into(),
         base_ref: String::new(),
         start: false,
@@ -124,9 +125,10 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     assert_eq!(c.browse_list(&outside).await.unwrap_err().id, "path-denied");
     let bad = c
         .create_session(NewSession {
-            profile: "default".into(),
+            provider: "shell".into(),
+            account: None,
+            configuration: "default".into(),
             repo_path: outside.clone(),
-            agent: Agent::Shell,
             title: String::new(),
             base_ref: String::new(),
             start: false,

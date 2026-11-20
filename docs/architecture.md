@@ -9,7 +9,7 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 ## Crates
 | Crate | Role | Depends on UI? |
 |---|---|---|
-| `ide-core` | Profiles, sessions, git worktrees, agent launch specs, persistence. Pure logic, unit-tested. Used by the server only. | no |
+| `ide-core` | Accounts, configurations, sessions, git worktrees, launch helpers, persistence. Pure logic, unit-tested. Used by the server only. | no |
 | `ide-proto` / `ide-server` / `ide-client` | Client/server split (see `docs/server-architecture.md`): wire protocol, the per-user daemon owning PTYs/sessions/git, the client library. | no (client: optional iced adapter) |
 | `ide-i18n` | UI translations: Fluent files embedded at build time, generated type-safe `tr::` API, current language. | no |
 | `ide-term` | Client-side terminal model fed by server bytes (`TermModel`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. No PTY. | iced |
@@ -18,10 +18,11 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 | `ide-app` | The binary (client only): window layout, sidebar, connection status, `ide-client` calls, one `TermModel` per session, the per-session detail area (web page, files, diffs, tree, changes, search), `ui.json`. | iced |
 
 ## Core concepts
-- **Profile**: a named set of agent config. Holds its own Claude config dir and Codex home so skills
-  and MCP servers stay per profile. Launching an agent sets `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to the
-  profile's dirs. Stored under the app data dir: `profiles/<name>/{claude,codex}/`.
-- **Session**: one agent run = (profile, repo, worktree, agent kind, terminal). Each session gets its
+- **Provider / Account / Configuration**: see `docs/agent-providers.md`. A provider is an agent
+  CLI (crate `ide-agents`), an account one login of it (its own config dir under
+  `accounts/<provider>/<slug>/`), a configuration a provider-agnostic bundle of skills, MCP servers
+  and instructions layered on top per session. (They replace the old profiles, which are migrated.)
+- **Session**: one agent run = (provider, account, configuration, repo, worktree, terminal). Each session gets its
   own git worktree on its own branch (`ide/<session-id>`) under the app data dir
   (`worktrees/<repo-slug>/<session-id>`), so sessions never share a checkout.
 - **Agent kind**: `Claude` (`claude`), `Codex` (`codex`), `Shell` (cmd / pwsh / $SHELL).
@@ -35,7 +36,7 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 - All UI text lives in `crates/ide-i18n/locales/<code>/ide.ftl` ([Project Fluent](https://projectfluent.org)).
   English (`en`) is the reference and fallback; Korean (`ko`) is complete.
 - `ide-i18n/build.rs` reads the English file and generates one function per message
-  (`new-session` -> `tr::new_session()`, `profile-sessions` -> `tr::profile_sessions(total: i64,
+  (`new-session` -> `tr::new_session()`, `configuration-sessions` -> `tr::configuration_sessions(total: i64,
   running: i64)`), plus the `Lang` enum (one variant per locale directory, `Lang::native_name()` from
   the reserved `language-name` message). Variables used as a plural selector or in `NUMBER()` are
   `i64`, all others `&str`. A wrong key or missing argument is a compile error.
@@ -54,15 +55,15 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   cosmic-text's system fallback (Malgun Gothic on Windows); terminal output is never translated.
 
 ## MVP (milestone 1)
-1. Window layout: left sidebar (profiles + sessions), centre terminal of the selected session,
+1. Window layout: left sidebar (configuration filter + sessions), centre terminal of the selected session,
    right detail area with tabs; resizable split.
-2. New-session flow: pick repo folder, profile, agent kind -> create worktree -> spawn the agent in a PTY.
+2. New-session flow: pick repo folder, provider, account, configuration -> create worktree -> spawn the agent in a PTY.
 3. Terminal widget ported from the spike: colours, wide chars, box/block drawn as quads, selection +
    Ctrl+C / Ctrl+V (bracketed paste), wheel scrollback, resize, Korean IME preedit at the cursor.
 4. Session switching keeps every PTY alive (background sessions keep running, in the server; they
    also survive closing the app and are replayed on reopen).
 5. Detail area: one CEF tab per session showing a URL (preview placeholder).
-6. Persistence: profiles and session list (not scrollback) survive restart; worktrees are reused.
+6. Persistence: accounts, configurations and session list (not scrollback) survive restart; worktrees are reused.
 
 Later: file viewer/editor (iced `text_editor` + highlighter), diff viewer, previews (bundled
 tsx/vue/svelte), mods, structured agent output, settings UI, packaging (bundle CEF).

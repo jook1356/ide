@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agents::{AccountInfo, AccountState, ConfigurationInfo, ProviderInfo, SessionKind};
 use crate::error::ProtoError;
 use crate::files::{
     BrowseConfig, BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
@@ -9,7 +10,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -45,7 +46,7 @@ pub struct Welcome {
     pub server_version: String,
     /// The user this connection acts as.
     pub user: UserInfo,
-    /// Optional features (`"term"`, `"profiles"`, `"sessions"`).
+    /// Optional features (`"term"`, `"providers"`, `"sessions"`, ...).
     pub capabilities: Vec<String>,
     /// Token to send in the next `Hello` after a reconnect.
     pub resume_token: ResumeToken,
@@ -54,27 +55,6 @@ pub struct Welcome {
     /// Random id of the server process. Terminal offsets are only meaningful within one
     /// instance: after a change, clients re-attach without `from_offset` (full replay).
     pub server_instance: String,
-}
-
-/// Agent kind of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Agent {
-    /// `claude`.
-    Claude,
-    /// `codex`.
-    Codex,
-    /// cmd / pwsh / $SHELL.
-    Shell,
-}
-
-/// A profile (secrets and config dirs stay on the server).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileInfo {
-    /// Slug name.
-    pub name: String,
-    /// Unix seconds.
-    pub created_at: u64,
 }
 
 /// Process state of a session.
@@ -95,16 +75,20 @@ pub struct SessionInfo {
     pub id: String,
     /// Display title.
     pub title: String,
-    /// Profile name.
-    pub profile: String,
+    /// Agent session or login terminal.
+    pub kind: SessionKind,
+    /// Provider id.
+    pub provider: String,
+    /// Account slug (of `provider`), if any.
+    pub account: Option<String>,
+    /// Configuration slug (empty for login sessions).
+    pub configuration: String,
     /// Repository root.
     pub repo_path: String,
     /// Session worktree.
     pub worktree_path: String,
     /// Branch (`ide/<id>`).
     pub branch: String,
-    /// Agent kind.
-    pub agent: Agent,
     /// Unix seconds.
     pub created_at: u64,
     /// Unix seconds.
@@ -120,12 +104,14 @@ pub struct SessionInfo {
 /// `session.create` arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSession {
-    /// Profile to run under.
-    pub profile: String,
+    /// Provider id (see `provider.list`).
+    pub provider: String,
+    /// Account slug of that provider (`None` = the CLI's default login / no account).
+    pub account: Option<String>,
+    /// Configuration slug.
+    pub configuration: String,
     /// Any folder inside the repository (server path).
     pub repo_path: String,
-    /// Agent to run.
-    pub agent: Agent,
     /// Title; empty = derived.
     pub title: String,
     /// Revision to branch from; empty = HEAD.
@@ -157,17 +143,52 @@ pub struct Attached {
 pub enum Request {
     Hello(Hello),
     Ping,
-    ProfileList,
-    ProfileCreate {
+    /// Agent providers with detection and capabilities (`refresh` = re-run detection).
+    ProviderList {
+        refresh: bool,
+    },
+    AccountList,
+    /// Create an account (slug derived from `name`) with an empty config dir.
+    AccountCreate {
+        provider: String,
         name: String,
     },
-    ProfileRename {
-        old: String,
-        new: String,
-    },
-    ProfileDelete {
+    /// Change an account's display name.
+    AccountRename {
+        provider: String,
+        slug: String,
         name: String,
+    },
+    /// Remove an account (`account-in-use` if sessions use it). `remove_files` deletes its
+    /// config dir (credentials) when it lies inside the data dir.
+    AccountDelete {
+        provider: String,
+        slug: String,
         remove_files: bool,
+    },
+    /// Ask the CLI whether the account is logged in (slow: runs the CLI).
+    AccountStatus {
+        provider: String,
+        slug: String,
+    },
+    /// Start the provider's login command for the account in a new login session (a
+    /// terminal without repository; delete it when done). Returns the session.
+    AccountLogin {
+        provider: String,
+        slug: String,
+        cols: u16,
+        rows: u16,
+    },
+    ConfigurationList,
+    /// Create an empty configuration (slug derived from `name`).
+    ConfigurationCreate {
+        name: String,
+    },
+    /// Replace name, skills, MCP servers and instructions of the configuration `slug`.
+    ConfigurationUpdate(ConfigurationInfo),
+    /// Delete a configuration (`configuration-in-use`, `last-configuration`).
+    ConfigurationDelete {
+        slug: String,
     },
     SessionList,
     SessionCreate(NewSession),
@@ -332,10 +353,17 @@ impl Request {
         match self {
             Request::Hello(_) => "hello",
             Request::Ping => "ping",
-            Request::ProfileList => "profile.list",
-            Request::ProfileCreate { .. } => "profile.create",
-            Request::ProfileRename { .. } => "profile.rename",
-            Request::ProfileDelete { .. } => "profile.delete",
+            Request::ProviderList { .. } => "provider.list",
+            Request::AccountList => "account.list",
+            Request::AccountCreate { .. } => "account.create",
+            Request::AccountRename { .. } => "account.rename",
+            Request::AccountDelete { .. } => "account.delete",
+            Request::AccountStatus { .. } => "account.status",
+            Request::AccountLogin { .. } => "account.login",
+            Request::ConfigurationList => "configuration.list",
+            Request::ConfigurationCreate { .. } => "configuration.create",
+            Request::ConfigurationUpdate(_) => "configuration.update",
+            Request::ConfigurationDelete { .. } => "configuration.delete",
             Request::SessionList => "session.list",
             Request::SessionCreate(_) => "session.create",
             Request::SessionStart { .. } => "session.start",
@@ -380,8 +408,12 @@ pub enum Response {
     Welcome(Welcome),
     Pong,
     Unit,
-    Profiles(Vec<ProfileInfo>),
-    Profile(ProfileInfo),
+    Providers(Vec<ProviderInfo>),
+    Accounts(Vec<AccountInfo>),
+    Account(AccountInfo),
+    AccountState(AccountState),
+    Configurations(Vec<ConfigurationInfo>),
+    Configuration(ConfigurationInfo),
     Sessions(Vec<SessionInfo>),
     Session(SessionInfo),
     Attached(Attached),
@@ -421,8 +453,10 @@ pub enum Notify {
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
-    /// The profile list changed.
-    ProfilesChanged,
+    /// The account list changed.
+    AccountsChanged,
+    /// The configuration list (or a configuration) changed.
+    ConfigurationsChanged,
     /// Files changed under a watched session (debounced; root-relative paths, deduplicated).
     /// `rescan` = too many changes to list: re-read everything shown.
     FsChanged {
@@ -514,6 +548,53 @@ mod tests {
                 state: SessionState::Exited(Some(3)),
             }),
             RpcMessage::Notify(Notify::SessionsChanged),
+            RpcMessage::Request {
+                id: 4,
+                req: Request::ConfigurationUpdate(ConfigurationInfo {
+                    slug: "web".into(),
+                    name: "Web".into(),
+                    skills: vec!["C:/skills/lint".into()],
+                    mcp_servers: vec![crate::McpServerInfo {
+                        name: "docs".into(),
+                        command: "node".into(),
+                        args: vec!["s.js".into()],
+                        env: vec![("K".into(), "v".into())],
+                    }],
+                    instructions: "Use pnpm.".into(),
+                    created_at: 1,
+                }),
+            },
+            RpcMessage::Response {
+                id: 5,
+                result: Ok(Response::Providers(vec![ProviderInfo {
+                    id: "claude".into(),
+                    name: "Claude Code".into(),
+                    glyph: "✻".into(),
+                    color: Some(0xd97757),
+                    detection: crate::ProviderDetection {
+                        path: Some("C:/bin/claude.exe".into()),
+                        version: Some("2.1.329".into()),
+                        min_version: Some("2.1.318".into()),
+                        usable: true,
+                        error: None,
+                    },
+                    caps: crate::ProviderCaps {
+                        accounts: true,
+                        login: true,
+                        skills: crate::Support::Native,
+                        mcp: crate::Support::Native,
+                        instructions: crate::Support::Native,
+                        hooks: crate::Support::Unsupported,
+                        resume: false,
+                        session_name: true,
+                    },
+                }])),
+            },
+            RpcMessage::Response {
+                id: 6,
+                result: Ok(Response::AccountState(AccountState::LoggedOut)),
+            },
+            RpcMessage::Notify(Notify::AccountsChanged),
         ];
         for m in msgs {
             let b = m.encode();

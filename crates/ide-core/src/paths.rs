@@ -2,10 +2,14 @@
 //!
 //! Layout (relative to the data root):
 //! ```text
-//! profiles.json
+//! accounts.json
+//! configurations.json
 //! sessions.json
-//! profiles/<slug>/{claude,codex}/
+//! accounts/<provider>/<slug>/          (a CLI's own config home for one login)
+//! providers/*.toml                     (declarative agent providers)
+//! sessions/<session-id>/agent/         (generated per-session files: MCP JSON, plugin, ...)
 //! worktrees/<repo-slug>/<session-id>/
+//! profiles.json, profiles/<slug>/{claude,codex}/   (legacy; migrated to accounts)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -52,9 +56,39 @@ impl Paths {
         self.root.join("sessions.json")
     }
 
-    /// `profiles/<slug>`.
+    /// `profiles/<slug>` (legacy profiles; their dirs become accounts).
     pub fn profile_dir(&self, slug: &str) -> PathBuf {
         self.root.join("profiles").join(slug)
+    }
+
+    /// `accounts.json`.
+    pub fn accounts_file(&self) -> PathBuf {
+        self.root.join("accounts.json")
+    }
+
+    /// `configurations.json`.
+    pub fn configurations_file(&self) -> PathBuf {
+        self.root.join("configurations.json")
+    }
+
+    /// `accounts/<provider>/<slug>`: the config home of a new account.
+    pub fn account_dir(&self, provider: &str, slug: &str) -> PathBuf {
+        self.root.join("accounts").join(provider).join(slug)
+    }
+
+    /// `providers/`: declarative provider files (`*.toml`).
+    pub fn providers_dir(&self) -> PathBuf {
+        self.root.join("providers")
+    }
+
+    /// `sessions/<id>`: per-session server files (outside the worktree).
+    pub fn session_dir(&self, id: &str) -> PathBuf {
+        self.root.join("sessions").join(id)
+    }
+
+    /// `sessions/<id>/agent`: files generated for a session's agent (scratch dir).
+    pub fn session_agent_dir(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("agent")
     }
 
     /// `worktrees/`.
@@ -69,12 +103,12 @@ impl Paths {
 }
 
 /// `create_dir_all` with a contextual error.
-pub(crate) fn ensure_dir(path: &Path) -> Result<()> {
+pub fn ensure_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|e| Error::io(IoAction::CreatingDirectory, path, e))
 }
 
 /// Read a JSON file; `Ok(None)` if it does not exist.
-pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -89,7 +123,7 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<O
 }
 
 /// Write JSON atomically (temp file in the same dir, then rename over the target).
-pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
@@ -105,7 +139,7 @@ pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<
 }
 
 /// Current time as Unix seconds.
-pub(crate) fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -114,11 +148,19 @@ pub(crate) fn now_unix() -> u64 {
 
 #[cfg(test)]
 pub(crate) mod test_util {
+    pub use super::TempDir;
+}
+
+/// A fresh, empty directory for one test (also used by other crates' tests). Base dir:
+/// `IDE_TEST_TMP` if set, else the system temp dir. Removed on drop.
+#[doc(hidden)]
+pub use tmp::TempDir;
+
+mod tmp {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A fresh, empty directory for one test. Base dir: `IDE_TEST_TMP` if set, else the
-    /// system temp dir. Removed on drop.
+    /// See [`super::TempDir`].
     pub struct TempDir(pub PathBuf);
 
     impl TempDir {

@@ -13,7 +13,6 @@ language-name = English
 ## Sidebar
 
 settings = Settings
-profile-label = PROFILE
 sessions-label = SESSIONS
 new-session = New session
 no-sessions = No sessions yet. Click + to start one.
@@ -35,9 +34,6 @@ status-failed = failed
 
 ## Agent kinds
 
-agent-claude = Claude
-agent-codex = Codex
-agent-shell = Shell
 
 ## Centre
 
@@ -85,15 +81,6 @@ deleting = Deleting…
 
 language-label = LANGUAGE
 language-system = System
-profiles-label = PROFILES
-profiles-note = Each profile has its own Claude config dir and Codex home.
-profile-sessions = { $total ->
-    [one] 1 session
-   *[other] { $total } sessions
-}, { NUMBER($running) } running
-profile-name-placeholder = new-profile-name
-profile-rename-placeholder = new-name
-profile-delete-tooltip = Delete (files are kept on disk)
 save = Save
 add = Add
 close = Close
@@ -146,14 +133,6 @@ err-web-view = Web view: { $detail }
 err-rename-failed = Rename failed: { $detail }
 err-choose-repo = Choose a repository folder.
 err-server-missing = The server program was not found: { $detail }
-err-profile-in-use = { $count ->
-    [one] 1 session uses
-   *[other] { $count } sessions use
-} profile “{ $name }”; delete them first.
-err-profile-running = { $count ->
-    [one] 1 session of profile “{ $name }” is running
-   *[other] { $count } sessions of profile “{ $name }” are running
-}; stop them before renaming.
 
 ## Errors from the server and the connection (ide_proto::ProtoError ids)
 
@@ -185,13 +164,24 @@ io-removing = Removing
 err-json = Invalid JSON in { $path }: { $detail }
 err-no-data-dir = Cannot determine the app data directory (set IDE_DATA_DIR).
 err-invalid-name = Invalid name “{ $name }”: { $reason }
+err-account-not-found = Account “{ $name }” of { $provider } not found.
+err-account-in-use = { $count ->
+    [one] 1 session uses
+   *[other] { $count } sessions use
+} account “{ $name }”; delete them first.
+err-configuration-not-found = Configuration “{ $name }” not found.
+err-configuration-in-use = { $count ->
+    [one] 1 session uses
+   *[other] { $count } sessions use
+} configuration “{ $name }”; delete them first.
+err-last-configuration = Cannot delete the last configuration “{ $name }”.
+err-provider-not-found = The agent “{ $provider }” is not available on the server.
+err-provider-no-login = The agent “{ $provider }” has no accounts or login command.
+err-invalid-mcp-name = MCP server “{ $name }”: use a unique name of letters, digits, - and _, and a command.
 name-rule-empty = must not be empty
 name-rule-too-long = must be at most 64 characters
 name-rule-invalid-chars = only lowercase letters, digits, '-' and '_' are allowed
 name-rule-bad-start = must start with a letter or digit
-err-profile-exists = Profile “{ $name }” already exists.
-err-profile-not-found = Profile “{ $name }” not found.
-err-last-profile = Cannot delete the last profile “{ $name }”.
 err-session-not-found = Session { $id } not found.
 err-invalid-session-id = Invalid session id “{ $id }”.
 err-not-a-git-repo = { $path } is not a git repository: { $detail }
@@ -315,3 +305,39 @@ err-def-external-module = { $spec } is an external module.
 err-def-module-not-found = Module not found: { $spec }
 err-def-external-name = Defined in the external module { $spec }.
 err-def-not-found = No definition found for “{ $name }”.
+
+## Accounts and configurations (settings, new-session dialog)
+
+configuration-label = CONFIGURATION
+account-label = ACCOUNT
+account-default = Default login (the CLI's own settings)
+accounts-label = ACCOUNTS
+accounts-note = An account is one login of an agent CLI with its own config folder. Adding one opens its login in a terminal.
+account-name-placeholder = Account name
+account-add = Add and log in
+account-check = Status
+account-login = Log in
+account-status-checking = checking…
+account-logged-in = logged in
+account-logged-out = not logged in
+account-status-unknown = unknown
+account-delete-tooltip = Delete the account and its login files
+configurations-label = CONFIGURATIONS
+configurations-note = Skills, MCP servers and instructions, added to any agent and account.
+configuration-name-placeholder = Configuration name
+configuration-name-label = Name
+configuration-edit = Edit
+configuration-delete-tooltip = Delete the configuration
+configuration-instructions = Instructions
+configuration-skills = Skills (folders with a SKILL.md)
+configuration-skill-placeholder = Skill folder on the server
+configuration-mcp = MCP servers (stdio)
+configuration-sessions = { $total ->
+    [one] 1 session
+   *[other] { $total } sessions
+}, { NUMBER($running) } running
+mcp-name-placeholder = name
+mcp-command-placeholder = command
+mcp-args-placeholder = arguments
+mcp-env-placeholder = KEY=value
+provider-support = { $provider }: skills { $skills } · MCP { $mcp } · instructions { $instructions }

@@ -1,5 +1,5 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
-//! detail collapsed, active profile, per-session web URL, last repo folder, UI language,
+//! detail collapsed, active configuration, per-session web URL, last repo folder, UI language,
 //! which server to use (local / SSH), what closing the window does and each session's open
 //! detail items.
 
@@ -71,8 +71,10 @@ where
 pub struct UiState {
     /// Selected session id.
     pub selected: Option<String>,
-    /// Profile whose sessions the sidebar shows.
-    pub profile: Option<String>,
+    /// Configuration whose sessions the sidebar shows (`profile` in older files: profiles
+    /// were migrated to configurations with the same slug).
+    #[serde(alias = "profile")]
+    pub configuration: Option<String>,
     /// Centre share of the centre+detail width (0..1).
     pub split_ratio: f32,
     /// Detail area collapsed to a thin strip.
@@ -98,7 +100,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             selected: None,
-            profile: None,
+            configuration: None,
             split_ratio: DEFAULT_SPLIT,
             detail_collapsed: false,
             web_urls: BTreeMap::new(),

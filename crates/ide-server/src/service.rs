@@ -1,4 +1,5 @@
-//! Services: profiles, sessions and terminals of one user, behind the authorization layer.
+//! Services: providers, accounts, configurations, sessions and terminals of one user, behind
+//! the authorization layer.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -6,13 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ide_agents::{AgentProvider, Detection, Providers, SessionInput};
 use ide_core::{
-    AgentKind, ErrorMessage, LaunchEnv, LaunchSpec, Paths, ProfileStore, Session, SessionId,
-    SessionStore,
+    AccountStore, ConfigurationStore, ErrorMessage, LaunchEnv, LaunchSpec, Paths, Session,
+    SessionId, SessionKind, SessionStore, SessionTarget,
 };
 use ide_proto::{
-    Agent, BrowseConfig, NewSession, Notify, ProfileInfo, ProtoError, Request, Response,
-    SessionInfo, SessionState, TextSearch, UserInfo,
+    AccountInfo, AccountState, BrowseConfig, ConfigurationInfo, McpServerInfo, NewSession, Notify,
+    ProtoError, ProviderCaps, ProviderDetection, ProviderInfo, Request, Response, SessionInfo,
+    SessionState, Support, TextSearch, UserInfo,
 };
 use tokio::sync::broadcast;
 
@@ -225,7 +228,10 @@ fn random_token() -> String {
 pub struct UserCtx {
     user: UserInfo,
     paths: Paths,
-    profiles: Mutex<ProfileStore>,
+    providers: Providers,
+    detections: Mutex<HashMap<String, Detection>>,
+    accounts: Mutex<AccountStore>,
+    configs: Mutex<ConfigurationStore>,
     sessions: Mutex<SessionStore>,
     hosts: Mutex<HashMap<String, Arc<TermHost>>>,
     events: broadcast::Sender<Notify>,
@@ -246,12 +252,30 @@ impl UserCtx {
         launch_env: LaunchEnv,
         browse_roots: Option<Vec<PathBuf>>,
     ) -> Result<Self, ProtoError> {
-        let profiles = ProfileStore::open(&paths).map_err(|e| core_error(&e))?;
+        let report = ide_core::migrate_profiles(&paths).map_err(|e| core_error(&e))?;
+        if report != Default::default() {
+            tracing::info!(
+                "migrated {} profile(s) to accounts/configurations, {} session(s)",
+                report.profiles,
+                report.sessions
+            );
+            audit.record(
+                &user,
+                "migrate.profiles",
+                &format!("profiles={} sessions={}", report.profiles, report.sessions),
+            );
+        }
+        let accounts = AccountStore::open(&paths).map_err(|e| core_error(&e))?;
+        let configs = ConfigurationStore::open(&paths).map_err(|e| core_error(&e))?;
         let sessions = SessionStore::open(&paths).map_err(|e| core_error(&e))?;
+        let providers = Providers::load(&paths.providers_dir());
         Ok(UserCtx {
             user,
             paths,
-            profiles: Mutex::new(profiles),
+            providers,
+            detections: Mutex::new(HashMap::new()),
+            accounts: Mutex::new(accounts),
+            configs: Mutex::new(configs),
             sessions: Mutex::new(sessions),
             hosts: Mutex::new(HashMap::new()),
             events: broadcast::channel(4096).0,
@@ -471,11 +495,16 @@ impl UserCtx {
         SessionInfo {
             id: s.id.to_string(),
             title: s.title.clone(),
-            profile: s.profile.clone(),
+            kind: match s.kind {
+                SessionKind::Agent => ide_proto::SessionKind::Agent,
+                SessionKind::Login => ide_proto::SessionKind::Login,
+            },
+            provider: s.provider.clone(),
+            account: s.account.clone(),
+            configuration: s.configuration.clone(),
             repo_path: s.repo_path.display().to_string(),
             worktree_path: s.worktree_path.display().to_string(),
             branch: s.branch.clone(),
-            agent: agent_to_proto(s.agent),
             created_at: s.created_at,
             last_active: s.last_active,
             state: host.as_ref().map_or(SessionState::Stopped, |h| h.state()),
@@ -484,11 +513,250 @@ impl UserCtx {
         }
     }
 
-    fn profile_info(p: &ide_core::Profile) -> ProfileInfo {
-        ProfileInfo {
-            name: p.name.clone(),
-            created_at: p.created_at,
+    /// Detection of a provider (cached; `refresh` re-runs `--version`).
+    fn detection(&self, p: &dyn AgentProvider, refresh: bool) -> Detection {
+        if !refresh && let Some(d) = self.detections.lock().unwrap().get(p.id()) {
+            return d.clone();
         }
+        let d = p.detect(&self.launch_env);
+        self.detections
+            .lock()
+            .unwrap()
+            .insert(p.id().to_owned(), d.clone());
+        d
+    }
+
+    fn provider_infos(&self, refresh: bool) -> Vec<ProviderInfo> {
+        self.providers
+            .list()
+            .iter()
+            .map(|p| {
+                let d = self.detection(p.as_ref(), refresh);
+                let c = p.capabilities();
+                ProviderInfo {
+                    id: p.id().to_owned(),
+                    name: p.display_name().to_owned(),
+                    glyph: p.glyph().to_owned(),
+                    color: p.color(),
+                    detection: ProviderDetection {
+                        path: d.path.as_ref().map(|p| p.display().to_string()),
+                        version: d.version.clone(),
+                        min_version: d.min_version.clone(),
+                        usable: d.usable(),
+                        error: d.error.clone(),
+                    },
+                    caps: ProviderCaps {
+                        accounts: c.accounts,
+                        login: c.login,
+                        skills: support(c.skills),
+                        mcp: support(c.mcp),
+                        instructions: support(c.instructions),
+                        hooks: support(c.hooks),
+                        resume: c.resume,
+                        session_name: c.session_name,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn account_info(a: &ide_core::Account) -> AccountInfo {
+        AccountInfo {
+            provider: a.provider.clone(),
+            slug: a.slug.clone(),
+            name: a.name.clone(),
+            created_at: a.created_at,
+        }
+    }
+
+    fn provider(&self, id: &str) -> Result<&dyn AgentProvider, ProtoError> {
+        self.providers.require(id).map_err(|e| core_error(&e))
+    }
+
+    /// Account-related requests.
+    fn handle_accounts(&self, req: Request) -> Result<Response, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        match req {
+            Request::ProviderList { refresh } => {
+                Ok(Response::Providers(self.provider_infos(refresh)))
+            }
+            Request::AccountList => Ok(Response::Accounts(
+                self.accounts
+                    .lock()
+                    .unwrap()
+                    .list()
+                    .iter()
+                    .map(Self::account_info)
+                    .collect(),
+            )),
+            Request::AccountCreate { provider, name } => {
+                let p = self.provider(&provider)?;
+                if !p.capabilities().accounts {
+                    return Err(core(ide_core::Error::ProviderNoLogin(provider)));
+                }
+                let a = Self::account_info(
+                    self.accounts
+                        .lock()
+                        .unwrap()
+                        .create(&provider, &name)
+                        .map_err(core)?,
+                );
+                self.audit("account.create", &format!("{}/{}", a.provider, a.slug));
+                self.notify(Notify::AccountsChanged);
+                Ok(Response::Account(a))
+            }
+            Request::AccountRename {
+                provider,
+                slug,
+                name,
+            } => {
+                let a = Self::account_info(
+                    self.accounts
+                        .lock()
+                        .unwrap()
+                        .rename(&provider, &slug, &name)
+                        .map_err(core)?,
+                );
+                self.audit("account.rename", &format!("{provider}/{slug}"));
+                self.notify(Notify::AccountsChanged);
+                Ok(Response::Account(a))
+            }
+            Request::AccountDelete {
+                provider,
+                slug,
+                remove_files,
+            } => {
+                let sessions = self.sessions.lock().unwrap();
+                let mut accounts = self.accounts.lock().unwrap();
+                let name = accounts
+                    .require(&provider, &slug)
+                    .map_err(core)?
+                    .name
+                    .clone();
+                let count = sessions.count_using_account(&provider, &slug);
+                if count > 0 {
+                    return Err(core(ide_core::Error::AccountInUse { name, count }));
+                }
+                accounts
+                    .delete(&provider, &slug, remove_files)
+                    .map_err(core)?;
+                drop((accounts, sessions));
+                self.audit(
+                    "account.delete",
+                    &format!("{provider}/{slug} remove_files={remove_files}"),
+                );
+                self.notify(Notify::AccountsChanged);
+                Ok(Response::Unit)
+            }
+            Request::AccountStatus { provider, slug } => {
+                let p = self.provider(&provider)?;
+                let acct = self
+                    .accounts
+                    .lock()
+                    .unwrap()
+                    .require(&provider, &slug)
+                    .map_err(core)?
+                    .clone();
+                let st = match p.account_status(&acct, &self.launch_env) {
+                    ide_agents::AccountStatus::LoggedIn => AccountState::LoggedIn,
+                    ide_agents::AccountStatus::LoggedOut => AccountState::LoggedOut,
+                    ide_agents::AccountStatus::Unknown => AccountState::Unknown,
+                };
+                Ok(Response::AccountState(st))
+            }
+            Request::AccountLogin {
+                provider,
+                slug,
+                cols,
+                rows,
+            } => self
+                .account_login(&provider, &slug, cols, rows)
+                .map(Response::Session),
+            Request::ConfigurationList => Ok(Response::Configurations(
+                self.configs
+                    .lock()
+                    .unwrap()
+                    .list()
+                    .iter()
+                    .map(configuration_info)
+                    .collect(),
+            )),
+            Request::ConfigurationCreate { name } => {
+                let c =
+                    configuration_info(self.configs.lock().unwrap().create(&name).map_err(core)?);
+                self.audit("configuration.create", &c.slug);
+                self.notify(Notify::ConfigurationsChanged);
+                Ok(Response::Configuration(c))
+            }
+            Request::ConfigurationUpdate(info) => {
+                let c = configuration_info(
+                    self.configs
+                        .lock()
+                        .unwrap()
+                        .update(configuration_from_info(info))
+                        .map_err(core)?,
+                );
+                self.audit("configuration.update", &c.slug);
+                self.notify(Notify::ConfigurationsChanged);
+                Ok(Response::Configuration(c))
+            }
+            Request::ConfigurationDelete { slug } => {
+                let sessions = self.sessions.lock().unwrap();
+                let mut configs = self.configs.lock().unwrap();
+                let name = configs.require(&slug).map_err(core)?.name.clone();
+                let count = sessions.count_using_configuration(&slug);
+                if count > 0 {
+                    return Err(core(ide_core::Error::ConfigurationInUse { name, count }));
+                }
+                configs.delete(&slug).map_err(core)?;
+                drop((configs, sessions));
+                self.audit("configuration.delete", &slug);
+                self.notify(Notify::ConfigurationsChanged);
+                Ok(Response::Unit)
+            }
+            other => self.handle_files(other),
+        }
+    }
+
+    fn account_login(
+        &self,
+        provider: &str,
+        slug: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SessionInfo, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        let p = self.provider(provider)?;
+        let acct = self
+            .accounts
+            .lock()
+            .unwrap()
+            .require(provider, slug)
+            .map_err(core)?
+            .clone();
+        // Fail before creating anything if there is no login command / program.
+        let probe_cwd = self.paths.root().to_path_buf();
+        ide_agents::login_spec(p, &acct, &probe_cwd, &self.launch_env).map_err(core)?;
+        let title = format!("{} · {}", p.display_name(), acct.name);
+        let session =
+            ide_core::create_login_session(&self.paths, provider, slug, &title).map_err(core)?;
+        self.sessions
+            .lock()
+            .unwrap()
+            .upsert(session.clone())
+            .map_err(core)?;
+        self.host_sized(
+            session.id.as_str(),
+            if cols == 0 { DEFAULT_COLS } else { cols },
+            if rows == 0 { DEFAULT_ROWS } else { rows },
+        );
+        self.audit(
+            "account.login",
+            &format!("{provider}/{slug} {}", session.id),
+        );
+        self.notify(Notify::SessionsChanged);
+        self.start(&session)?;
+        Ok(self.info(&session))
     }
 
     /// Terminal input (fast; called inline so writes stay ordered).
@@ -510,48 +778,6 @@ impl UserCtx {
     pub fn handle_blocking(&self, req: Request) -> Result<Response, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         match req {
-            Request::ProfileList => Ok(Response::Profiles(
-                self.profiles
-                    .lock()
-                    .unwrap()
-                    .list()
-                    .iter()
-                    .map(Self::profile_info)
-                    .collect(),
-            )),
-            Request::ProfileCreate { name } => {
-                let p =
-                    Self::profile_info(self.profiles.lock().unwrap().create(&name).map_err(core)?);
-                self.audit("profile.create", &name);
-                self.notify(Notify::ProfilesChanged);
-                Ok(Response::Profile(p))
-            }
-            Request::ProfileRename { old, new } => {
-                let p = {
-                    let mut profiles = self.profiles.lock().unwrap();
-                    let p = Self::profile_info(profiles.rename(&old, &new).map_err(core)?);
-                    self.sessions
-                        .lock()
-                        .unwrap()
-                        .rename_profile(&old, &new)
-                        .map_err(core)?;
-                    p
-                };
-                self.audit("profile.rename", &format!("{old} -> {new}"));
-                self.notify(Notify::ProfilesChanged);
-                self.notify(Notify::SessionsChanged);
-                Ok(Response::Profile(p))
-            }
-            Request::ProfileDelete { name, remove_files } => {
-                self.profiles
-                    .lock()
-                    .unwrap()
-                    .delete(&name, remove_files)
-                    .map_err(core)?;
-                self.audit("profile.delete", &name);
-                self.notify(Notify::ProfilesChanged);
-                Ok(Response::Unit)
-            }
             Request::SessionList => {
                 let list: Vec<Session> = self.sessions.lock().unwrap().list().to_vec();
                 Ok(Response::Sessions(
@@ -609,7 +835,7 @@ impl UserCtx {
                 let s = self.resolve_session(&id)?;
                 Ok(Response::Session(self.info(&s)))
             }
-            other => self.handle_files(other),
+            other => self.handle_accounts(other),
         }
     }
 
@@ -787,29 +1013,49 @@ impl UserCtx {
     }
 
     fn session_create(&self, req: NewSession) -> Result<SessionInfo, ProtoError> {
-        let profile = self
-            .profiles
+        let core = |e: ide_core::Error| core_error(&e);
+        let p = self.provider(&req.provider)?;
+        if let Some(slug) = &req.account {
+            if !p.capabilities().accounts {
+                return Err(core(ide_core::Error::AccountNotFound {
+                    provider: req.provider.clone(),
+                    slug: slug.clone(),
+                }));
+            }
+            self.accounts
+                .lock()
+                .unwrap()
+                .require(&req.provider, slug)
+                .map_err(core)?;
+        }
+        self.configs
             .lock()
             .unwrap()
-            .get(&req.profile)
-            .cloned()
-            .ok_or_else(|| ProtoError::new("profile-not-found").arg("name", &req.profile))?;
+            .require(&req.configuration)
+            .map_err(core)?;
         // The repository must lie inside the browse roots (path jail).
         let repo_path = self.browse_jail().resolve(&req.repo_path)?;
         let core_req = ide_core::NewSession {
             repo_path,
-            agent: agent_from_proto(req.agent),
+            target: SessionTarget {
+                provider: req.provider.clone(),
+                account: req.account.clone(),
+                configuration: req.configuration.clone(),
+            },
             title: req.title.clone(),
+            provider_name: p.display_name().to_owned(),
             base_ref: req.base_ref.clone(),
         };
-        let (session, _) =
-            ide_core::create_session_with(&self.paths, &profile, &core_req, &self.launch_env)
-                .map_err(|e| core_error(&e))?;
+        // The program must resolve before the worktree is created.
+        let session = ide_core::create_session(&self.paths, &core_req, |_| {
+            p.program_path(&self.launch_env).map(drop)
+        })
+        .map_err(core)?;
         self.sessions
             .lock()
             .unwrap()
             .upsert(session.clone())
-            .map_err(|e| core_error(&e))?;
+            .map_err(core)?;
         self.host_sized(
             session.id.as_str(),
             if req.cols == 0 {
@@ -825,7 +1071,14 @@ impl UserCtx {
         );
         self.audit(
             "session.create",
-            &format!("{} {}", session.id, session.worktree_path.display()),
+            &format!(
+                "{} {} provider={} account={} configuration={}",
+                session.id,
+                session.worktree_path.display(),
+                session.provider,
+                session.account.as_deref().unwrap_or("-"),
+                session.configuration
+            ),
         );
         self.notify(Notify::SessionsChanged);
         if req.start {
@@ -834,16 +1087,45 @@ impl UserCtx {
         Ok(self.info(&session))
     }
 
-    fn start(&self, s: &Session) -> Result<(), ProtoError> {
-        let profile = self
-            .profiles
+    /// The launch spec of a session (generates its scratch files).
+    pub fn launch_spec(&self, s: &Session) -> Result<LaunchSpec, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        let p = self.provider(&s.provider)?;
+        let account = match &s.account {
+            Some(slug) => Some(
+                self.accounts
+                    .lock()
+                    .unwrap()
+                    .require(&s.provider, slug)
+                    .map_err(core)?
+                    .clone(),
+            ),
+            None => None,
+        };
+        if s.kind == SessionKind::Login {
+            let acct = account
+                .ok_or_else(|| core(ide_core::Error::ProviderNoLogin(s.provider.clone())))?;
+            return ide_agents::login_spec(p, &acct, &s.worktree_path, &self.launch_env)
+                .map_err(core);
+        }
+        let configuration = self
+            .configs
             .lock()
             .unwrap()
-            .get(&s.profile)
-            .cloned()
-            .ok_or_else(|| ProtoError::new("profile-not-found").arg("name", &s.profile))?;
-        let spec = LaunchSpec::for_session_with(s, &profile, &self.launch_env)
-            .map_err(|e| core_error(&e))?;
+            .require(&s.configuration)
+            .map_err(core)?
+            .clone();
+        let input = SessionInput::for_session(&self.paths, s, account.as_ref(), &configuration);
+        let built = ide_agents::assemble(p, &input, &self.launch_env).map_err(core)?;
+        for n in &built.notes {
+            tracing::warn!("session {}: {n}", s.id);
+            self.audit("session.note", &format!("{} {n}", s.id));
+        }
+        Ok(built.spec)
+    }
+
+    fn start(&self, s: &Session) -> Result<(), ProtoError> {
+        let spec = self.launch_spec(s)?;
         let host = self.host(s);
         host.start(|cols, rows| {
             self.runner
@@ -931,9 +1213,18 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
         ErrorMessage::InvalidName { name, reason } => {
             p.arg("name", name).arg("reason", reason.id())
         }
-        ErrorMessage::ProfileExists { name }
-        | ErrorMessage::ProfileNotFound { name }
-        | ErrorMessage::LastProfile { name } => p.arg("name", name),
+        ErrorMessage::AccountNotFound { provider, slug } => {
+            p.arg("provider", provider).arg("name", slug)
+        }
+        ErrorMessage::AccountInUse { name, count }
+        | ErrorMessage::ConfigurationInUse { name, count } => {
+            p.arg("name", name).arg("count", count.to_string())
+        }
+        ErrorMessage::ConfigurationNotFound { name }
+        | ErrorMessage::LastConfiguration { name }
+        | ErrorMessage::InvalidMcpName { name } => p.arg("name", name),
+        ErrorMessage::ProviderNotFound { provider }
+        | ErrorMessage::ProviderNoLogin { provider } => p.arg("provider", provider),
         ErrorMessage::SessionNotFound { id } | ErrorMessage::InvalidSessionId { id } => {
             p.arg("id", id)
         }
@@ -954,18 +1245,62 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
     }
 }
 
-fn agent_to_proto(a: AgentKind) -> Agent {
-    match a {
-        AgentKind::Claude => Agent::Claude,
-        AgentKind::Codex => Agent::Codex,
-        AgentKind::Shell => Agent::Shell,
+fn support(s: ide_agents::Support) -> Support {
+    match s {
+        ide_agents::Support::Native => Support::Native,
+        ide_agents::Support::Fallback => Support::Fallback,
+        ide_agents::Support::Unsupported => Support::Unsupported,
     }
 }
 
-fn agent_from_proto(a: Agent) -> AgentKind {
-    match a {
-        Agent::Claude => AgentKind::Claude,
-        Agent::Codex => AgentKind::Codex,
-        Agent::Shell => AgentKind::Shell,
+fn configuration_info(c: &ide_core::Configuration) -> ConfigurationInfo {
+    ConfigurationInfo {
+        slug: c.slug.clone(),
+        name: c.name.clone(),
+        skills: c
+            .skills
+            .iter()
+            .map(|s| s.path.display().to_string())
+            .collect(),
+        mcp_servers: c
+            .mcp_servers
+            .iter()
+            .map(|m| McpServerInfo {
+                name: m.name.clone(),
+                command: m.command.clone(),
+                args: m.args.clone(),
+                env: m.env.clone(),
+            })
+            .collect(),
+        instructions: c.instructions.clone(),
+        created_at: c.created_at,
+    }
+}
+
+fn configuration_from_info(i: ConfigurationInfo) -> ide_core::Configuration {
+    ide_core::Configuration {
+        slug: i.slug,
+        name: i.name,
+        skills: i
+            .skills
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(|s| ide_core::SkillRef {
+                path: PathBuf::from(s),
+            })
+            .collect(),
+        mcp_servers: i
+            .mcp_servers
+            .into_iter()
+            .map(|m| ide_core::McpServer {
+                name: m.name.trim().to_owned(),
+                command: m.command.trim().to_owned(),
+                args: m.args,
+                env: m.env,
+            })
+            .collect(),
+        instructions: i.instructions,
+        created_at: i.created_at,
     }
 }

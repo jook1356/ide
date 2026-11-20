@@ -1,22 +1,13 @@
 //! UI language glue: translated labels for protocol types and server errors.
 //!
 //! Every user-visible string goes through `ide_i18n::tr` (see AGENTS.md); this module maps the
-//! language-agnostic wire values (agent kinds, run states, [`ProtoError`] ids + args) to it.
+//! language-agnostic wire values (run states, [`ProtoError`] ids + args) to it.
 //! The server never sends localized text.
 
-use ide_client::{Agent, ProtoError};
+use ide_client::ProtoError;
 pub use ide_i18n::tr;
 
 use crate::app::RunState;
-
-/// Display name of an agent kind.
-pub fn agent_label(agent: Agent) -> String {
-    match agent {
-        Agent::Claude => tr::agent_claude(),
-        Agent::Codex => tr::agent_codex(),
-        Agent::Shell => tr::agent_shell(),
-    }
-}
 
 /// Short status of a session process (sidebar subtitle).
 pub fn status_label(state: RunState) -> String {
@@ -59,15 +50,21 @@ fn name_rule(id: &str) -> String {
 /// shows the id and its arguments.
 pub fn proto_error(e: &ProtoError) -> String {
     let a = |name: &str| e.get(name).unwrap_or("").to_owned();
+    let n = |name: &str| e.get(name).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
     match e.id.as_str() {
         // ide-core (ide_core::ErrorMessage ids)
         "io" => tr::err_io(&io_action(&a("action")), &a("path"), &a("detail")),
         "json" => tr::err_json(&a("path"), &a("detail")),
         "no-data-dir" => tr::err_no_data_dir(),
         "invalid-name" => tr::err_invalid_name(&a("name"), &name_rule(&a("reason"))),
-        "profile-exists" => tr::err_profile_exists(&a("name")),
-        "profile-not-found" => tr::err_profile_not_found(&a("name")),
-        "last-profile" => tr::err_last_profile(&a("name")),
+        "account-not-found" => tr::err_account_not_found(&a("name"), &a("provider")),
+        "account-in-use" => tr::err_account_in_use(n("count"), &a("name")),
+        "configuration-not-found" => tr::err_configuration_not_found(&a("name")),
+        "configuration-in-use" => tr::err_configuration_in_use(n("count"), &a("name")),
+        "last-configuration" => tr::err_last_configuration(&a("name")),
+        "provider-not-found" => tr::err_provider_not_found(&a("provider")),
+        "provider-no-login" => tr::err_provider_no_login(&a("provider")),
+        "invalid-mcp-name" => tr::err_invalid_mcp_name(&a("name")),
         "session-not-found" => tr::err_session_not_found(&a("id")),
         "invalid-session-id" => tr::err_invalid_session_id(&a("id")),
         "not-a-git-repo" => tr::err_not_a_git_repo(&a("path"), &a("detail")),
@@ -173,7 +170,14 @@ mod tests {
             proto_error(&ProtoError::new("def-not-found").arg("name", "foo")),
             "정의를 찾지 못했어요: foo"
         );
-        assert_eq!(agent_label(Agent::Shell), "셸");
+        assert_eq!(
+            proto_error(
+                &ProtoError::new("account-in-use")
+                    .arg("name", "Work")
+                    .arg("count", "2")
+            ),
+            "“Work” 계정을 쓰는 세션이 2개 있어요. 세션을 먼저 삭제하세요."
+        );
         set_language(Lang::En);
         assert!(proto_error(&e).contains("is not a git repository"));
         assert_eq!(
@@ -215,6 +219,14 @@ mod tests {
             "def-module-not-found",
             "def-external-name",
             "def-not-found",
+            "account-not-found",
+            "account-in-use",
+            "configuration-not-found",
+            "configuration-in-use",
+            "last-configuration",
+            "provider-not-found",
+            "provider-no-login",
+            "invalid-mcp-name",
         ] {
             let e = ProtoError::new(id);
             assert!(
@@ -222,6 +234,13 @@ mod tests {
                 "{id} has no message"
             );
         }
-        assert_eq!(agent_label(Agent::Claude), "Claude");
+        assert_eq!(
+            proto_error(
+                &ProtoError::new("configuration-in-use")
+                    .arg("name", "Web")
+                    .arg("count", "1")
+            ),
+            "1 session uses configuration “Web”; delete them first."
+        );
     }
 }

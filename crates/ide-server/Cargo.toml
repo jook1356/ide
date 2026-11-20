@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 ide-core.workspace = true
+ide-agents.workspace = true
 ide-proto.workspace = true
 alacritty_terminal.workspace = true
 portable-pty.workspace = true

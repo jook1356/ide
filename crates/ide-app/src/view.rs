@@ -2,17 +2,17 @@
 
 use iced::widget::{
     Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, row,
-    scrollable, space, stack, text, text_input, tooltip,
+    scrollable, space, stack, text, text_editor, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
-use ide_client::Agent;
+use ide_client::{AccountState, Support};
 use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 
 use crate::app::{
-    AGENTS, App, Conn, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, NewForm, PROFILE_NAME_ID,
-    QuickForm, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID, TERM_ID, path_name,
-    same_path,
+    App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_REPO_ID,
+    NewForm, QuickForm, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SettingsForm,
+    TERM_ID, path_name, same_path,
 };
 use crate::i18n::{self, tr};
 use crate::style;
@@ -32,11 +32,16 @@ const I_DELETE: &str = "✕";
 const I_DOT: &str = "●";
 const I_RING: &str = "○";
 
-pub fn agent_glyph(agent: Agent) -> (&'static str, Color) {
-    match agent {
-        Agent::Claude => ("✻", style::CLAUDE),
-        Agent::Codex => ("◆", style::CODEX),
-        Agent::Shell => ("❯", style::DIM),
+/// Icon and colour of a provider (from the server's provider list).
+pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
+    match app.provider(id) {
+        Some(p) => (
+            p.glyph.clone(),
+            p.color.map_or(style::DIM, |c| {
+                Color::from_rgb8((c >> 16) as u8, (c >> 8) as u8, c as u8)
+            }),
+        ),
+        None => ("●".into(), style::DIM),
     }
 }
 
@@ -121,7 +126,9 @@ impl App {
     // ------------------------------------------------------------------ sidebar
 
     fn sidebar(&self) -> El<'_> {
-        let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+        let configs = self.config_choices();
+        let current = self.current_configuration();
+        let selected = configs.iter().find(|c| c.key == current).cloned();
         let header = row![
             text("ide").size(15).font(style::BOLD),
             space().width(Fill),
@@ -129,10 +136,10 @@ impl App {
         ]
         .align_y(Alignment::Center);
         let profile = row![
-            label(tr::profile_label()),
+            label(tr::configuration_label()),
             space().width(8),
-            pick_list(Some(self.current_profile()), names, |s: &String| s.clone())
-                .on_select(Message::ProfilePicked)
+            pick_list(selected, configs, |c: &Choice| c.label.clone())
+                .on_select(|c: Choice| Message::ConfigurationPicked(c.key))
                 .text_size(13)
                 .padding([4, 8])
                 .width(Fill),
@@ -150,11 +157,10 @@ impl App {
         .align_y(Alignment::Center);
 
         let mut list: Column<El<'_>> = Column::new().spacing(2);
-        let profile_name = self.current_profile();
         let mine: Vec<&Live> = self
             .sessions
             .iter()
-            .filter(|l| l.info.profile == profile_name)
+            .filter(|l| self.in_filter(&l.info))
             .collect();
         // Group by repository, in order of first appearance.
         let mut groups: Vec<(&Live, Vec<&Live>)> = Vec::new();
@@ -276,7 +282,7 @@ impl App {
     fn session_row<'a>(&'a self, live: &'a Live) -> El<'a> {
         let s = &live.info;
         let selected = self.selected.as_deref() == Some(s.id.as_str());
-        let (glyph, gcolor) = agent_glyph(s.agent);
+        let (glyph, gcolor) = provider_glyph(self, &s.provider);
         let (dot, dcolor) = status_glyph(live.state);
 
         if let Some((id, value)) = &self.rename
@@ -387,7 +393,7 @@ impl App {
         };
         let s = &live.info;
 
-        let (glyph, gcolor) = agent_glyph(s.agent);
+        let (glyph, gcolor) = provider_glyph(self, &s.provider);
         let header = container(
             row![
                 text(glyph).size(13).color(gcolor),
@@ -479,7 +485,7 @@ impl App {
                 button(
                     text(format!(
                         "{I_PLAY}  {}",
-                        tr::start_agent(&i18n::agent_label(s.agent))
+                        tr::start_agent(&self.provider_name(&s.provider))
                     ))
                     .size(13),
                 )
@@ -707,26 +713,369 @@ impl App {
 
     // ------------------------------------------------------------------ modals
 
+    /// Configurations as pick-list entries.
+    fn config_choices(&self) -> Vec<Choice> {
+        self.configs
+            .iter()
+            .map(|c| Choice {
+                key: c.slug.clone(),
+                label: c.name.clone(),
+            })
+            .collect()
+    }
+
+    /// Settings: accounts per provider (add = create + open the login command).
+    fn accounts_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let mut list: Column<El<'_>> = Column::new().spacing(4);
+        for a in &self.accounts {
+            let (g, gc) = provider_glyph(self, &a.provider);
+            let can_login = self.provider(&a.provider).is_some_and(|p| p.caps.login);
+            let key = (a.provider.clone(), a.slug.clone());
+            let status = f
+                .acct_status
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, s)| match s {
+                    None => tr::account_status_checking(),
+                    Some(AccountState::LoggedIn) => tr::account_logged_in(),
+                    Some(AccountState::LoggedOut) => tr::account_logged_out(),
+                    Some(AccountState::Unknown) => tr::account_status_unknown(),
+                })
+                .unwrap_or_default();
+            let row_el: El<'_> = match &f.acct_renaming {
+                Some((p, sl, new)) if *p == a.provider && *sl == a.slug => row![
+                    text_input(tr::account_name_placeholder(), new)
+                        .on_input(Message::AcctRenameInput)
+                        .on_submit(Message::AcctRenameCommit)
+                        .size(13)
+                        .padding([4, 8])
+                        .style(style::input)
+                        .width(Fill),
+                    button(text(tr::save()).size(12))
+                        .padding([4, 10])
+                        .style(style::primary)
+                        .on_press_maybe(online.then_some(Message::AcctRenameCommit)),
+                ]
+                .spacing(6)
+                .boxed(),
+                _ => row![
+                    text(g).size(13).color(gc),
+                    text(a.name.as_str()).size(13),
+                    text(self.provider_name(&a.provider))
+                        .size(11)
+                        .color(style::DIM),
+                    space().width(Fill),
+                    text(status).size(11).color(style::DIM),
+                    button(text(tr::account_check()).size(11))
+                        .padding([3, 8])
+                        .style(style::secondary)
+                        .on_press_maybe(
+                            online.then(|| Message::AcctStatus(a.provider.clone(), a.slug.clone()))
+                        ),
+                    button(text(tr::account_login()).size(11))
+                        .padding([3, 8])
+                        .style(style::secondary)
+                        .on_press_maybe(
+                            (online && can_login).then(|| {
+                                Message::AcctLogin(a.provider.clone(), a.slug.clone())
+                            })
+                        ),
+                    icon_button(
+                        I_EDIT,
+                        online
+                            .then(|| Message::AcctStartRename(a.provider.clone(), a.slug.clone())),
+                        tr::rename()
+                    ),
+                    icon_button(
+                        I_DELETE,
+                        online.then(|| Message::AcctDelete(a.provider.clone(), a.slug.clone())),
+                        tr::account_delete_tooltip()
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .boxed(),
+            };
+            list = list.push(
+                container(row_el)
+                    .padding([4, 8])
+                    .style(style::bg(style::HEADER))
+                    .boxed(),
+            );
+        }
+        let providers: Vec<Choice> = self
+            .providers
+            .iter()
+            .filter(|p| p.caps.accounts)
+            .map(|p| Choice {
+                key: p.id.clone(),
+                label: p.name.clone(),
+            })
+            .collect();
+        let sel = providers.iter().find(|c| c.key == f.acct_provider).cloned();
+        column![
+            label(tr::accounts_label()),
+            text(tr::accounts_note()).size(12).color(style::DIM),
+            list,
+            row![
+                pick_list(sel, providers, |c: &Choice| c.label.clone())
+                    .on_select(|c: Choice| Message::AcctProvider(c.key))
+                    .text_size(13)
+                    .padding([5, 8])
+                    .width(150),
+                text_input(tr::account_name_placeholder(), &f.acct_name)
+                    .on_input(Message::AcctName)
+                    .on_submit(Message::AcctAdd)
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input)
+                    .width(Fill),
+                button(text(tr::account_add()).size(13))
+                    .padding([5, 12])
+                    .style(style::secondary)
+                    .on_press_maybe((online && !f.busy).then_some(Message::AcctAdd)),
+            ]
+            .spacing(6),
+        ]
+        .spacing(8)
+        .boxed()
+    }
+
+    /// Settings: configurations (list, add, delete) and a plain editor for one of them.
+    fn configurations_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let mut list: Column<El<'_>> = Column::new().spacing(4);
+        for c in &self.configs {
+            let (total, running) = self.sessions_in_configuration(&c.slug);
+            let editing = f.cfg_edit.as_ref().is_some_and(|e| e.base.slug == c.slug);
+            let row_el = row![
+                text(c.name.as_str()).size(13).width(Fill),
+                text(tr::configuration_sessions(
+                    i18n::count(total),
+                    i18n::count(running)
+                ))
+                .size(11)
+                .color(style::DIM),
+                icon_button(
+                    I_EDIT,
+                    (online && !editing).then(|| Message::CfgEdit(c.slug.clone())),
+                    tr::configuration_edit()
+                ),
+                icon_button(
+                    I_DELETE,
+                    online.then(|| Message::CfgDelete(c.slug.clone())),
+                    tr::configuration_delete_tooltip()
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+            list = list.push(
+                container(row_el)
+                    .padding([4, 8])
+                    .style(style::bg(style::HEADER))
+                    .boxed(),
+            );
+            if editing && let Some(e) = &f.cfg_edit {
+                list = list.push(self.config_editor(e, f.busy, online));
+            }
+        }
+        column![
+            label(tr::configurations_label()),
+            text(tr::configurations_note()).size(12).color(style::DIM),
+            list,
+            row![
+                text_input(tr::configuration_name_placeholder(), &f.cfg_name)
+                    .id(CONFIG_NAME_ID)
+                    .on_input(Message::CfgName)
+                    .on_submit(Message::CfgAdd)
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input)
+                    .width(Fill),
+                button(text(tr::add()).size(13))
+                    .padding([5, 12])
+                    .style(style::secondary)
+                    .on_press_maybe((online && !f.busy).then_some(Message::CfgAdd)),
+            ]
+            .spacing(6),
+        ]
+        .spacing(8)
+        .boxed()
+    }
+
+    fn config_editor<'a>(
+        &'a self,
+        e: &'a crate::app::ConfigEdit,
+        busy: bool,
+        online: bool,
+    ) -> El<'a> {
+        let small = |s: String| text(s).size(11).color(style::DIM);
+        let input = |ph: String, v: &'a str| {
+            text_input(ph, v)
+                .size(12)
+                .padding([4, 6])
+                .style(style::input)
+        };
+        // Which features the providers pass on (native / fallback / not supported).
+        let support = self
+            .providers
+            .iter()
+            .filter(|p| p.caps.accounts)
+            .map(|p| {
+                let s = |x: Support| match x {
+                    Support::Native => "✓",
+                    Support::Fallback => "~",
+                    Support::Unsupported => "✕",
+                };
+                tr::provider_support(
+                    &p.name,
+                    s(p.caps.skills),
+                    s(p.caps.mcp),
+                    s(p.caps.instructions),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("   ");
+        let mut skills: Column<El<'_>> = Column::new().spacing(4);
+        for (i, sk) in e.skills.iter().enumerate() {
+            skills = skills.push(
+                row![
+                    input(tr::configuration_skill_placeholder(), sk)
+                        .on_input(move |v| Message::CfgSkill(i, v))
+                        .width(Fill),
+                    icon_button(I_DELETE, Some(Message::CfgSkillRemove(i)), tr::remove()),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .boxed(),
+            );
+        }
+        let mut mcp: Column<El<'_>> = Column::new().spacing(4);
+        for (i, m) in e.mcp.iter().enumerate() {
+            mcp = mcp.push(
+                row![
+                    input(tr::mcp_name_placeholder(), &m.name)
+                        .on_input(move |v| Message::CfgMcp(i, McpField::Name, v))
+                        .width(90),
+                    input(tr::mcp_command_placeholder(), &m.command)
+                        .on_input(move |v| Message::CfgMcp(i, McpField::Command, v))
+                        .width(90),
+                    input(tr::mcp_args_placeholder(), &m.args)
+                        .on_input(move |v| Message::CfgMcp(i, McpField::Args, v))
+                        .width(Fill),
+                    input(tr::mcp_env_placeholder(), &m.env)
+                        .on_input(move |v| Message::CfgMcp(i, McpField::Env, v))
+                        .width(110),
+                    icon_button(I_DELETE, Some(Message::CfgMcpRemove(i)), tr::remove()),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .boxed(),
+            );
+        }
+        container(
+            column![
+                small(tr::configuration_name_label()),
+                input(tr::configuration_name_placeholder(), &e.name).on_input(Message::CfgEditName),
+                small(tr::configuration_instructions()),
+                text_editor(&e.instructions)
+                    .on_action(Message::CfgInstructions)
+                    .size(12)
+                    .height(90),
+                row![
+                    small(tr::configuration_skills()),
+                    space().width(Fill),
+                    button(text(tr::add()).size(11))
+                        .padding([2, 8])
+                        .style(style::secondary)
+                        .on_press(Message::CfgSkillAdd),
+                ]
+                .align_y(Alignment::Center),
+                skills,
+                row![
+                    small(tr::configuration_mcp()),
+                    space().width(Fill),
+                    button(text(tr::add()).size(11))
+                        .padding([2, 8])
+                        .style(style::secondary)
+                        .on_press(Message::CfgMcpAdd),
+                ]
+                .align_y(Alignment::Center),
+                mcp,
+                text(support).size(10).color(style::FAINT),
+                row![
+                    space().width(Fill),
+                    button(text(tr::cancel()).size(12))
+                        .padding([4, 12])
+                        .style(style::secondary)
+                        .on_press(Message::CfgCancel),
+                    button(text(tr::save()).size(12))
+                        .padding([4, 12])
+                        .style(style::primary)
+                        .on_press_maybe((online && !busy).then_some(Message::CfgSave)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .style(style::bg(style::BG))
+        .boxed()
+    }
+
     fn modal_view<'a>(&'a self, modal: &'a Modal) -> El<'a> {
         let card = match modal {
             Modal::NewSession(f) => {
-                let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
-                let agents = AGENTS.iter().fold(row![].spacing(6), |r, a| {
-                    let (g, c) = agent_glyph(*a);
-                    r.push(
-                        button(
-                            row![
-                                text(g).color(c).size(13),
-                                text(i18n::agent_label(*a)).size(13)
-                            ]
-                            .spacing(6),
+                let providers = self.providers.iter().filter(|p| p.detection.usable).fold(
+                    row![].spacing(6),
+                    |r, p| {
+                        let (g, c) = provider_glyph(self, &p.id);
+                        r.push(
+                            button(
+                                row![text(g).color(c).size(13), text(p.name.as_str()).size(13)]
+                                    .spacing(6),
+                            )
+                            .padding([5, 12])
+                            .style(style::choice(f.provider == p.id))
+                            .on_press(Message::NewProvider(p.id.clone()))
+                            .boxed(),
                         )
-                        .padding([5, 12])
-                        .style(style::choice(f.agent == *a))
-                        .on_press(Message::NewAgent(*a))
-                        .boxed(),
-                    )
-                });
+                    },
+                );
+                let configs = self.config_choices();
+                let config_sel = configs.iter().find(|c| c.key == f.configuration).cloned();
+                let with_accounts = self.provider(&f.provider).is_some_and(|p| p.caps.accounts);
+                let accounts: Vec<Choice> = std::iter::once(Choice {
+                    key: String::new(),
+                    label: tr::account_default(),
+                })
+                .chain(
+                    self.accounts
+                        .iter()
+                        .filter(|a| a.provider == f.provider)
+                        .map(|a| Choice {
+                            key: a.slug.clone(),
+                            label: a.name.clone(),
+                        }),
+                )
+                .collect();
+                let account_sel = accounts
+                    .iter()
+                    .find(|c| c.key == f.account.clone().unwrap_or_default())
+                    .cloned();
+                let account_row: El<'_> = if with_accounts {
+                    column![
+                        label(tr::account_label()),
+                        pick_list(account_sel, accounts, |c: &Choice| c.label.clone())
+                            .on_select(|c: Choice| Message::NewAccount(c.key))
+                            .text_size(13)
+                            .padding([5, 8])
+                            .width(Fill),
+                    ]
+                    .spacing(8)
+                    .boxed()
+                } else {
+                    space().height(0).boxed()
+                };
                 let mut c = column![
                     text(tr::new_session()).size(18).font(style::BOLD),
                     label(tr::repo_folder_label()),
@@ -753,14 +1102,15 @@ impl App {
                     ]
                     .spacing(6),
                     self.folder_browser(f),
-                    label(tr::profile_label()),
-                    pick_list(Some(f.profile.clone()), names, |s: &String| s.clone())
-                        .on_select(Message::NewProfile)
+                    label(tr::agent_label()),
+                    providers,
+                    account_row,
+                    label(tr::configuration_label()),
+                    pick_list(config_sel, configs, |c: &Choice| c.label.clone())
+                        .on_select(|c: Choice| Message::NewConfiguration(c.key))
                         .text_size(13)
                         .padding([5, 8])
                         .width(Fill),
-                    label(tr::agent_label()),
-                    agents,
                     label(tr::title_label()),
                     text_input(tr::title_placeholder(), &f.title)
                         .on_input(Message::NewTitle)
@@ -1066,55 +1416,6 @@ impl App {
             .boxed(),
             Modal::Settings(f) => {
                 let online = self.connected();
-                let mut list: Column<El<'_>> = Column::new().spacing(4);
-                for p in &self.profiles {
-                    let (total, running) = self.sessions_in_profile(&p.name);
-                    let row_el: El<'_> = match &f.renaming {
-                        Some((old, new)) if old == &p.name => row![
-                            text_input(tr::profile_rename_placeholder(), new)
-                                .on_input(Message::SettingsRenameInput)
-                                .on_submit(Message::SettingsRenameCommit)
-                                .size(13)
-                                .padding([4, 8])
-                                .style(style::input)
-                                .width(Fill),
-                            button(text(tr::save()).size(12))
-                                .padding([4, 10])
-                                .style(style::primary)
-                                .on_press_maybe(online.then_some(Message::SettingsRenameCommit)),
-                        ]
-                        .spacing(6)
-                        .boxed(),
-                        _ => row![
-                            text(p.name.as_str()).size(13).width(Fill),
-                            text(tr::profile_sessions(
-                                i18n::count(total),
-                                i18n::count(running)
-                            ))
-                            .size(11)
-                            .color(style::DIM),
-                            icon_button(
-                                I_EDIT,
-                                online.then(|| Message::SettingsStartRename(p.name.clone())),
-                                tr::rename()
-                            ),
-                            icon_button(
-                                I_DELETE,
-                                online.then(|| Message::SettingsDelete(p.name.clone())),
-                                tr::profile_delete_tooltip()
-                            ),
-                        ]
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .boxed(),
-                    };
-                    list = list.push(
-                        container(row_el)
-                            .padding([4, 8])
-                            .style(style::bg(style::HEADER))
-                            .boxed(),
-                    );
-                }
                 let languages = LanguagePref::all()
                     .into_iter()
                     .fold(row![].spacing(6), |r, p| {
@@ -1135,24 +1436,9 @@ impl App {
                     label(tr::language_label()),
                     languages,
                     space().height(4),
-                    label(tr::profiles_label()),
-                    text(tr::profiles_note()).size(12).color(style::DIM),
-                    list,
-                    row![
-                        text_input(tr::profile_name_placeholder(), &f.new_name)
-                            .id(PROFILE_NAME_ID)
-                            .on_input(Message::SettingsNewName)
-                            .on_submit(Message::SettingsCreate)
-                            .size(13)
-                            .padding([5, 8])
-                            .style(style::input)
-                            .width(Fill),
-                        button(text(tr::add()).size(13))
-                            .padding([5, 12])
-                            .style(style::secondary)
-                            .on_press_maybe((online && !f.busy).then_some(Message::SettingsCreate)),
-                    ]
-                    .spacing(6),
+                    self.accounts_section(f, online),
+                    space().height(4),
+                    self.configurations_section(f, online),
                 ]
                 .spacing(10);
                 if let Some(e) = &f.error {
@@ -1326,7 +1612,13 @@ impl App {
                 );
                 // The settings grew taller than small windows: scroll inside the card.
                 // Shrink = the content's height, capped by the window (scrolls when taller).
-                scrollable(c.width(480)).height(Length::Shrink).boxed()
+                // Right padding keeps the scrollbar off the rows' buttons.
+                scrollable(container(c.width(520)).padding(iced::Padding {
+                    right: 14.0,
+                    ..iced::Padding::ZERO
+                }))
+                .height(Length::Shrink)
+                .boxed()
             }
         };
         opaque(

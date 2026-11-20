@@ -119,7 +119,7 @@ pub enum Error {
     #[error("cannot determine the app data directory (set IDE_DATA_DIR)")]
     NoDataDir,
 
-    /// A profile name is not a valid slug.
+    /// A name (account, configuration, provider id) is not a valid slug.
     #[error("invalid name {name:?}: {reason}")]
     InvalidName {
         /// The rejected name.
@@ -128,17 +128,53 @@ pub enum Error {
         reason: NameRule,
     },
 
-    /// A profile with this name already exists.
-    #[error("profile {0:?} already exists")]
-    ProfileExists(String),
+    /// No account with this provider and slug exists.
+    #[error("account {provider}/{slug} not found")]
+    AccountNotFound {
+        /// Provider id.
+        provider: String,
+        /// Account slug.
+        slug: String,
+    },
 
-    /// No profile with this name exists.
-    #[error("profile {0:?} not found")]
-    ProfileNotFound(String),
+    /// The account is used by sessions and cannot be deleted.
+    #[error("account {name:?} is used by {count} session(s)")]
+    AccountInUse {
+        /// Account display name.
+        name: String,
+        /// Sessions using it.
+        count: usize,
+    },
 
-    /// The last remaining profile cannot be deleted.
-    #[error("cannot delete the last profile {0:?}")]
-    LastProfile(String),
+    /// No configuration with this slug exists.
+    #[error("configuration {0:?} not found")]
+    ConfigurationNotFound(String),
+
+    /// The configuration is used by sessions and cannot be deleted.
+    #[error("configuration {name:?} is used by {count} session(s)")]
+    ConfigurationInUse {
+        /// Configuration display name.
+        name: String,
+        /// Sessions using it.
+        count: usize,
+    },
+
+    /// The last remaining configuration cannot be deleted.
+    #[error("cannot delete the last configuration {0:?}")]
+    LastConfiguration(String),
+
+    /// No agent provider with this id is registered.
+    #[error("agent provider {0:?} not found")]
+    ProviderNotFound(String),
+
+    /// The provider has no login command (or no accounts at all).
+    #[error("agent provider {0:?} has no login command")]
+    ProviderNoLogin(String),
+
+    /// An MCP server name is empty, too long, has characters other than `[A-Za-z0-9_-]` or
+    /// is used twice in one configuration.
+    #[error("invalid or duplicate MCP server name {0:?}")]
+    InvalidMcpName(String),
 
     /// No session with this id exists.
     #[error("session {0} not found")]
@@ -205,13 +241,31 @@ pub enum ErrorMessage<'a> {
         name: &'a str,
         reason: NameRule,
     },
-    ProfileExists {
+    AccountNotFound {
+        provider: &'a str,
+        slug: &'a str,
+    },
+    AccountInUse {
+        name: &'a str,
+        count: usize,
+    },
+    ConfigurationNotFound {
         name: &'a str,
     },
-    ProfileNotFound {
+    ConfigurationInUse {
+        name: &'a str,
+        count: usize,
+    },
+    LastConfiguration {
         name: &'a str,
     },
-    LastProfile {
+    ProviderNotFound {
+        provider: &'a str,
+    },
+    ProviderNoLogin {
+        provider: &'a str,
+    },
+    InvalidMcpName {
         name: &'a str,
     },
     SessionNotFound {
@@ -248,9 +302,14 @@ impl ErrorMessage<'_> {
             ErrorMessage::Json { .. } => "json",
             ErrorMessage::NoDataDir => "no-data-dir",
             ErrorMessage::InvalidName { .. } => "invalid-name",
-            ErrorMessage::ProfileExists { .. } => "profile-exists",
-            ErrorMessage::ProfileNotFound { .. } => "profile-not-found",
-            ErrorMessage::LastProfile { .. } => "last-profile",
+            ErrorMessage::AccountNotFound { .. } => "account-not-found",
+            ErrorMessage::AccountInUse { .. } => "account-in-use",
+            ErrorMessage::ConfigurationNotFound { .. } => "configuration-not-found",
+            ErrorMessage::ConfigurationInUse { .. } => "configuration-in-use",
+            ErrorMessage::LastConfiguration { .. } => "last-configuration",
+            ErrorMessage::ProviderNotFound { .. } => "provider-not-found",
+            ErrorMessage::ProviderNoLogin { .. } => "provider-no-login",
+            ErrorMessage::InvalidMcpName { .. } => "invalid-mcp-name",
             ErrorMessage::SessionNotFound { .. } => "session-not-found",
             ErrorMessage::InvalidSessionId { .. } => "invalid-session-id",
             ErrorMessage::NotAGitRepo { .. } => "not-a-git-repo",
@@ -263,7 +322,8 @@ impl ErrorMessage<'_> {
 }
 
 impl Error {
-    pub(crate) fn io(action: IoAction, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+    /// An [`Error::Io`] (for crates building on `ide-core`).
+    pub fn io(action: IoAction, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Error::Io {
             action,
             path: path.into(),
@@ -292,9 +352,22 @@ impl Error {
                 name,
                 reason: *reason,
             },
-            Error::ProfileExists(name) => ErrorMessage::ProfileExists { name },
-            Error::ProfileNotFound(name) => ErrorMessage::ProfileNotFound { name },
-            Error::LastProfile(name) => ErrorMessage::LastProfile { name },
+            Error::AccountNotFound { provider, slug } => {
+                ErrorMessage::AccountNotFound { provider, slug }
+            }
+            Error::AccountInUse { name, count } => ErrorMessage::AccountInUse {
+                name,
+                count: *count,
+            },
+            Error::ConfigurationNotFound(name) => ErrorMessage::ConfigurationNotFound { name },
+            Error::ConfigurationInUse { name, count } => ErrorMessage::ConfigurationInUse {
+                name,
+                count: *count,
+            },
+            Error::LastConfiguration(name) => ErrorMessage::LastConfiguration { name },
+            Error::ProviderNotFound(provider) => ErrorMessage::ProviderNotFound { provider },
+            Error::ProviderNoLogin(provider) => ErrorMessage::ProviderNoLogin { provider },
+            Error::InvalidMcpName(name) => ErrorMessage::InvalidMcpName { name },
             Error::SessionNotFound(id) => ErrorMessage::SessionNotFound { id },
             Error::InvalidSessionId(id) => ErrorMessage::InvalidSessionId { id },
             Error::NotAGitRepo { path, stderr } => ErrorMessage::NotAGitRepo {

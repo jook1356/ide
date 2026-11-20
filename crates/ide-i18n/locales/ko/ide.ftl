@@ -9,7 +9,6 @@ language-name = 한국어
 ## Sidebar
 
 settings = 설정
-profile-label = 프로필
 sessions-label = 세션
 new-session = 새 세션
 no-sessions = 세션이 아직 없어요. +를 눌러 시작하세요.
@@ -31,9 +30,6 @@ status-failed = 실패
 
 ## Agent kinds
 
-agent-claude = Claude
-agent-codex = Codex
-agent-shell = 셸
 
 ## Centre
 
@@ -81,12 +77,6 @@ deleting = 삭제 중…
 
 language-label = 언어
 language-system = 시스템 설정
-profiles-label = 프로필
-profiles-note = 프로필마다 Claude 설정 폴더와 Codex 홈을 따로 써요.
-profile-sessions = 세션 { $total }개, 실행 중 { NUMBER($running) }개
-profile-name-placeholder = 새 프로필 이름 (a-z, 0-9, -, _)
-profile-rename-placeholder = 새 이름
-profile-delete-tooltip = 삭제 (디스크의 파일은 남아요)
 save = 저장
 add = 추가
 close = 닫기
@@ -136,8 +126,6 @@ err-web-view = 웹 뷰 오류: { $detail }
 err-rename-failed = 이름을 바꾸지 못했어요: { $detail }
 err-choose-repo = 저장소 폴더를 선택하세요.
 err-server-missing = 서버 프로그램을 찾지 못했어요: { $detail }
-err-profile-in-use = “{ $name }” 프로필을 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
-err-profile-running = “{ $name }” 프로필의 세션 { $count }개가 실행 중이에요. 이름을 바꾸기 전에 중지하세요.
 
 ## Errors from the server and the connection (ide_proto::ProtoError ids)
 
@@ -169,13 +157,18 @@ io-removing = 삭제
 err-json = { $path } 파일의 JSON이 올바르지 않아요: { $detail }
 err-no-data-dir = 앱 데이터 폴더를 정할 수 없어요. IDE_DATA_DIR 환경 변수를 설정하세요.
 err-invalid-name = 이름이 올바르지 않아요 (“{ $name }”): { $reason }
+err-account-not-found = “{ $name }” 계정을 찾을 수 없어요 (에이전트: { $provider }).
+err-account-in-use = “{ $name }” 계정을 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
+err-configuration-not-found = “{ $name }” 구성을 찾을 수 없어요.
+err-configuration-in-use = “{ $name }” 구성을 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
+err-last-configuration = 마지막 남은 구성은 삭제할 수 없어요: “{ $name }”
+err-provider-not-found = 서버에서 “{ $provider }” 에이전트를 쓸 수 없어요.
+err-provider-no-login = “{ $provider }” 에이전트에는 계정이나 로그인 명령이 없어요.
+err-invalid-mcp-name = MCP 서버 “{ $name }”: 영문자, 숫자, -, _로 된 겹치지 않는 이름과 명령이 필요해요.
 name-rule-empty = 비워 둘 수 없어요
 name-rule-too-long = 64자 이하여야 해요
 name-rule-invalid-chars = 영문 소문자, 숫자, '-', '_'만 쓸 수 있어요
 name-rule-bad-start = 영문 소문자나 숫자로 시작해야 해요
-err-profile-exists = “{ $name }” 프로필이 이미 있어요.
-err-profile-not-found = “{ $name }” 프로필을 찾을 수 없어요.
-err-last-profile = 마지막 남은 프로필은 삭제할 수 없어요: “{ $name }”
 err-session-not-found = 세션을 찾을 수 없어요: { $id }
 err-invalid-session-id = 세션 ID가 올바르지 않아요: “{ $id }”
 err-not-a-git-repo = git 저장소가 아니에요: { $path } ({ $detail })
@@ -287,3 +280,36 @@ err-def-external-module = 외부 모듈이에요: { $spec }
 err-def-module-not-found = 모듈을 찾을 수 없어요: { $spec }
 err-def-external-name = 외부 모듈에 정의돼 있어요: { $spec }
 err-def-not-found = 정의를 찾지 못했어요: { $name }
+
+## 계정과 구성 (설정, 새 세션 대화상자)
+
+configuration-label = 구성
+account-label = 계정
+account-default = 기본 로그인 (CLI 자체 설정)
+accounts-label = 계정
+accounts-note = 계정마다 에이전트 CLI 로그인 하나와 설정 폴더를 따로 써요. 추가하면 터미널에서 로그인을 열어요.
+account-name-placeholder = 계정 이름
+account-add = 추가 후 로그인
+account-check = 상태
+account-login = 로그인
+account-status-checking = 확인 중…
+account-logged-in = 로그인됨
+account-logged-out = 로그인 안 됨
+account-status-unknown = 알 수 없음
+account-delete-tooltip = 계정과 로그인 파일 삭제
+configurations-label = 구성
+configurations-note = 어떤 에이전트와 계정에도 붙일 수 있는 스킬, MCP 서버, 지침이에요.
+configuration-name-placeholder = 구성 이름
+configuration-name-label = 이름
+configuration-edit = 편집
+configuration-delete-tooltip = 구성 삭제
+configuration-instructions = 지침
+configuration-skills = 스킬 (SKILL.md가 있는 폴더)
+configuration-skill-placeholder = 서버의 스킬 폴더
+configuration-mcp = MCP 서버 (stdio)
+configuration-sessions = 세션 { $total }개, 실행 중 { NUMBER($running) }개
+mcp-name-placeholder = 이름
+mcp-command-placeholder = 명령
+mcp-args-placeholder = 인수
+mcp-env-placeholder = KEY=값
+provider-support = { $provider }: 스킬 { $skills } · MCP { $mcp } · 지침 { $instructions }

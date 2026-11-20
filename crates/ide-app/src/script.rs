@@ -7,6 +7,11 @@
 //! - `IDE_APP_TEST_REPO`: throwaway repo folder (created with `git init` + one commit if missing)
 //! - `IDE_APP_EVIDENCE`: screenshot/log folder (default `<data dir>/evidence`)
 //! - `IDE_APP_SCRIPT_CLAUDE=1`: also open a Claude session (first-run screen only; never types)
+//!   with a script account under `<data>/accounts/claude/` (never the user's own login)
+//!
+//! The script installs a declarative provider `fake` (`<data>/providers/script-fake.toml`,
+//! `cmd.exe` echoing a marker as its "login") to exercise accounts and login terminals without
+//! running a real CLI's login.
 //! - `IDE_APP_SCRIPT_PAUSE=1`: hold key screens for an external read-only capture
 //!
 //! The script runs in English (it switches the language first; error checks match English
@@ -23,13 +28,13 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::{Key, Modifiers, key::Named};
 use iced::{Task, window};
-use ide_client::Agent;
 use ide_i18n::{Lang, LanguagePref, tr};
 use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMessage, TreeMessage};
 
-use crate::app::{App, Conn, Message, Modal, NewForm, RunState};
+use crate::app::{App, Conn, McpField, Message, Modal, NewForm, RunState};
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
 use crate::ui_state::{CloseAction, ServerPref};
+use ide_client::{AccountState, SessionKind};
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
@@ -53,12 +58,14 @@ enum Step {
     EnsureRepo,
     /// Wait until the client is connected and the lists arrived.
     WaitReady(u64),
-    /// Open the new-session dialog and fill it (repo, agent, title) like a user would.
+    /// Open the new-session dialog and fill it (repo, provider, title) like a user would.
     FillNew {
         repo: Repo,
-        agent: Agent,
+        provider: &'static str,
         title: &'static str,
     },
+    /// Pick a configuration in the open new-session dialog.
+    NewConfiguration(&'static str),
     Submit,
     /// Wait for the dialog to close (session created) and remember the new session.
     WaitCreated(u64),
@@ -108,12 +115,32 @@ enum Step {
     WaitDeleted(usize, u64),
     GitWorktreeList,
     OpenSettings,
-    SettingsCreate(&'static str),
-    SettingsRename(&'static str, &'static str),
     ExpectSettingsError(&'static str),
-    WaitProfile(&'static str, bool, u64),
-    SettingsDelete(&'static str),
-    ListProfileDir,
+    /// Settings: add a configuration by name.
+    CfgCreate(&'static str),
+    /// The configuration slug is listed (or not).
+    WaitConfig(&'static str, bool, u64),
+    /// Open the editor of a configuration and fill instructions, one skill folder (the test
+    /// repo) and one MCP server like a user would.
+    CfgFill(&'static str),
+    CfgSave,
+    /// The saved configuration has the filled values (server list and `configurations.json`).
+    WaitConfigSaved(&'static str, u64),
+    CfgDelete(&'static str),
+    /// Settings: add an account (provider, name): creates it and opens its login terminal.
+    AcctAdd(&'static str, &'static str),
+    /// A login session appeared and is selected; remember it as the next session index.
+    WaitLogin(u64),
+    /// The account is listed (or not) and its dir exists (or not).
+    WaitAccount(&'static str, &'static str, bool, u64),
+    AcctRename(&'static str, &'static str, &'static str),
+    WaitAccountName(&'static str, &'static str, &'static str, u64),
+    AcctStatus(&'static str, &'static str),
+    WaitAccountStatus(&'static str, &'static str, u64),
+    AcctDelete(&'static str, &'static str),
+    /// Create an account without opening its login (for the Claude first-run check).
+    AcctCreateQuiet(&'static str, &'static str),
+    ListAccountDir(&'static str, &'static str),
     TasklistMark,
     TasklistDiff,
     /// Switch the UI language through the settings message.
@@ -222,6 +249,8 @@ pub struct Script {
     started: Option<Instant>,
     waiting_shot: bool,
     ids: Vec<String>,
+    /// Ids of sessions the script deleted.
+    gone: Vec<String>,
     repo: PathBuf,
     evidence: PathBuf,
     data: PathBuf,
@@ -291,6 +320,7 @@ impl Script {
             .map(PathBuf::from)
             .unwrap_or_else(|| data.join("test-repo"));
         let claude = std::env::var("IDE_APP_SCRIPT_CLAUDE").is_ok_and(|v| v == "1");
+        install_fake_provider(data);
         // `IDE_APP_SCRIPT_ONLY=p2`: startup, the phase 2 checks and the server stop only.
         let only_p2 = std::env::var("IDE_APP_SCRIPT_ONLY").is_ok_and(|v| v == "p2");
         log(&format!(
@@ -309,6 +339,7 @@ impl Script {
             started: None,
             waiting_shot: false,
             ids: Vec::new(),
+            gone: Vec::new(),
             repo,
             evidence,
             data: data.to_path_buf(),
@@ -372,7 +403,7 @@ fn steps(claude: bool) -> Vec<Step> {
         Log("--- error path: not a git repo (server error id -> translated message)"),
         FillNew {
             repo: Repo::NotARepo,
-            agent: Agent::Shell,
+            provider: "shell",
             title: "",
         },
         Submit,
@@ -383,7 +414,7 @@ fn steps(claude: bool) -> Vec<Step> {
         Log("--- create two shell sessions through the dialog"),
         FillNew {
             repo: Repo::Test,
-            agent: Agent::Shell,
+            provider: "shell",
             title: "shell A",
         },
         Wait(300),
@@ -398,7 +429,7 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitText(0, "README.md", 5000),
         FillNew {
             repo: Repo::Test,
-            agent: Agent::Shell,
+            provider: "shell",
             title: "shell B",
         },
         Submit,
@@ -455,22 +486,60 @@ fn steps(claude: bool) -> Vec<Step> {
         CloseModal,
         Wait(800),
         Shot("08c_modal_closed_web_back"),
-        Log("--- profiles"),
+        Log("--- configurations"),
         OpenSettings,
-        SettingsCreate("work"),
-        WaitProfile("work", true, 5000),
-        SettingsRename("work", "job"),
-        WaitProfile("job", true, 5000),
-        WaitProfile("work", false, 5000),
-        SettingsRename("default", "renamed"),
-        ExpectSettingsError("running"),
-        WaitProfile("default", true, 1000),
-        Wait(300),
-        Shot("09_profiles_rename_refused"),
-        Pause("profiles"),
-        SettingsDelete("job"),
-        WaitProfile("job", false, 5000),
+        CfgCreate("Work"),
+        WaitConfig("work", true, 5000),
+        CfgFill("work"),
+        Wait(400),
+        Shot("09_configuration_editor"),
+        Pause("configuration_editor"),
+        CfgSave,
+        WaitConfigSaved("work", 5000),
+        CfgDelete("default"),
+        Wait(1000),
+        ExpectSettingsError("configuration “default”; delete them first"),
         CloseModal,
+        FillNew {
+            repo: Repo::Test,
+            provider: "shell",
+            title: "work config",
+        },
+        NewConfiguration("work"),
+        Wait(400),
+        Shot("09a_new_session_configuration"),
+        Pause("new_session_configuration"),
+        CloseModal,
+        Log("--- accounts: add -> login terminal (fake provider), rename, status, delete"),
+        OpenSettings,
+        AcctAdd("fake", "Script login"),
+        WaitLogin(15_000),
+        WaitText(2, "FAKE-LOGIN-OK", 15_000),
+        Wait(500),
+        Shot("09b_login_terminal"),
+        OpenSettings,
+        WaitAccount("fake", "script-login", true, 5000),
+        AcctRename("fake", "script-login", "Renamed login"),
+        WaitAccountName("fake", "script-login", "Renamed login", 5000),
+        AcctStatus("fake", "script-login"),
+        WaitAccountStatus("fake", "script-login", 15_000),
+        AcctDelete("fake", "script-login"),
+        Wait(1000),
+        ExpectSettingsError("account “Renamed login”; delete them first"),
+        Wait(300),
+        Shot("09c_accounts"),
+        Pause("accounts"),
+        CloseModal,
+        AskDelete(2),
+        ConfirmDelete,
+        WaitDeleted(2, 15_000),
+        OpenSettings,
+        AcctDelete("fake", "script-login"),
+        WaitAccount("fake", "script-login", false, 5000),
+        CfgDelete("work"),
+        WaitConfig("work", false, 5000),
+        CloseModal,
+        Select(0),
         Log("--- i18n: Korean UI, then back to English"),
         SetLang(LanguagePref::Fixed(Lang::Ko)),
         ExpectLang(Lang::Ko, "새 세션"),
@@ -480,7 +549,7 @@ fn steps(claude: bool) -> Vec<Step> {
         Pause("ko_main"),
         FillNew {
             repo: Repo::Test,
-            agent: Agent::Shell,
+            provider: "shell",
             title: "한국어 세션",
         },
         Wait(300),
@@ -489,7 +558,7 @@ fn steps(claude: bool) -> Vec<Step> {
         CloseModal,
         FillNew {
             repo: Repo::NotARepo,
-            agent: Agent::Shell,
+            provider: "shell",
             title: "",
         },
         Submit,
@@ -575,25 +644,27 @@ fn steps(claude: bool) -> Vec<Step> {
     ];
     if claude {
         s.extend([
-            Log("--- Claude session in the profile's own CLAUDE_CONFIG_DIR (no input is sent)"),
+            Log("--- Claude session with a script account's CLAUDE_CONFIG_DIR (no input is sent)"),
+            AcctCreateQuiet("claude", "Script first-run"),
+            WaitAccount("claude", "script-first-run", true, 5000),
             TasklistMark,
             FillNew {
                 repo: Repo::Test,
-                agent: Agent::Claude,
+                provider: "claude",
                 title: "claude first-run",
             },
             Submit,
             WaitCreated(20_000),
             Wait(12_000),
             Shot("18_claude_first_run"),
-            ListProfileDir,
-            Stop(2),
-            WaitStopped(2, 10_000),
+            ListAccountDir("claude", "script-first-run"),
+            Stop(3),
+            WaitStopped(3, 10_000),
             Wait(1500),
             TasklistDiff,
-            AskDelete(2),
+            AskDelete(3),
             ConfirmDelete,
-            WaitDeleted(2, 15_000),
+            WaitDeleted(3, 15_000),
             GitWorktreeList,
         ]);
     }
@@ -1138,7 +1209,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             task = Task::batch([
                 app.update(Message::OpenNew),
                 app.update(Message::NewRepo(String::new())),
-                app.update(Message::NewAgent(Agent::Shell)),
+                app.update(Message::NewProvider("shell".into())),
                 app.update(Message::NewTitle(title.into())),
             ]);
             true
@@ -1615,7 +1686,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     next = false;
                 }
             }
-            Step::FillNew { repo, agent, title } => {
+            Step::FillNew {
+                repo,
+                provider,
+                title,
+            } => {
                 tasks.push(app.update(Message::OpenNew));
                 let path = match repo {
                     Repo::Test => sc.repo.display().to_string(),
@@ -1626,8 +1701,17 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     }
                 };
                 tasks.push(app.update(Message::NewRepo(path)));
-                tasks.push(app.update(Message::NewAgent(agent)));
+                tasks.push(app.update(Message::NewProvider(provider.into())));
                 tasks.push(app.update(Message::NewTitle(title.into())));
+            }
+            Step::NewConfiguration(slug) => {
+                tasks.push(app.update(Message::NewConfiguration(slug.into())));
+                let picked =
+                    matches!(&app.modal, Some(Modal::NewSession(f)) if f.configuration == slug);
+                sc.check(
+                    picked,
+                    &format!("new-session dialog uses configuration {slug:?}"),
+                );
             }
             Step::Submit => tasks.push(app.update(Message::NewSubmit)),
             Step::WaitCreated(ms) => {
@@ -1807,8 +1891,14 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::ExpectReloaded => {
                 let ids: Vec<String> = app.sessions.iter().map(|l| l.info.id.clone()).collect();
+                let expected: Vec<String> = sc
+                    .ids
+                    .iter()
+                    .filter(|id| !sc.gone.contains(id))
+                    .cloned()
+                    .collect();
                 sc.check(
-                    ids == sc.ids,
+                    ids == expected,
                     &format!("sessions listed by the server: {ids:?}"),
                 );
                 let running = app.sessions.iter().all(|l| l.state == RunState::Running);
@@ -1912,6 +2002,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 };
                 if gone {
                     let s = sid.unwrap();
+                    sc.gone.push(s.clone());
                     let stored = std::fs::read_to_string(sc.data.join("sessions.json"))
                         .map(|t| !t.contains(&s))
                         .unwrap_or(false);
@@ -1955,15 +2046,6 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 }
             }
             Step::OpenSettings => tasks.push(app.update(Message::OpenSettings)),
-            Step::SettingsCreate(name) => {
-                tasks.push(app.update(Message::SettingsNewName(name.into())));
-                tasks.push(app.update(Message::SettingsCreate));
-            }
-            Step::SettingsRename(old, new) => {
-                tasks.push(app.update(Message::SettingsStartRename(old.into())));
-                tasks.push(app.update(Message::SettingsRenameInput(new.into())));
-                tasks.push(app.update(Message::SettingsRenameCommit));
-            }
             Step::ExpectSettingsError(needle) => {
                 let err = match &app.modal {
                     Some(Modal::Settings(f)) => f.error.clone(),
@@ -1971,37 +2053,181 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 };
                 sc.check(
                     err.as_deref().is_some_and(|e| e.contains(needle)),
-                    &format!("profile rename refused: {err:?}"),
+                    &format!("settings error shown: {err:?}"),
                 );
             }
-            Step::WaitProfile(name, exists, ms) => {
-                let listed = app.profiles.iter().any(|p| p.name == name);
-                let on_disk = sc.data.join("profiles").join(name).is_dir();
-                if listed == exists && on_disk == exists {
+            Step::CfgCreate(name) => {
+                tasks.push(app.update(Message::CfgName(name.into())));
+                tasks.push(app.update(Message::CfgAdd));
+            }
+            Step::WaitConfig(slug, exists, ms) => {
+                let listed = app.configs.iter().any(|c| c.slug == slug);
+                if listed == exists {
+                    sc.check(true, &format!("configuration {slug:?} listed={exists}"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("configuration {slug:?} listed={listed}"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::CfgFill(slug) => {
+                use iced::widget::text_editor::{Action, Edit};
+                let skill = sc.repo.display().to_string();
+                tasks.push(app.update(Message::CfgEdit(slug.into())));
+                for c in "Be brief.\nUse the test repo.".chars() {
+                    let edit = if c == '\n' {
+                        Edit::Enter
+                    } else {
+                        Edit::Insert(c)
+                    };
+                    tasks.push(app.update(Message::CfgInstructions(Action::Edit(edit))));
+                }
+                tasks.push(app.update(Message::CfgSkillAdd));
+                tasks.push(app.update(Message::CfgSkill(0, skill)));
+                tasks.push(app.update(Message::CfgMcpAdd));
+                for (field, v) in [
+                    (McpField::Name, "docs"),
+                    (McpField::Command, "node"),
+                    (McpField::Args, "server.js --port 3"),
+                    (McpField::Env, "TOKEN=abc"),
+                ] {
+                    tasks.push(app.update(Message::CfgMcp(0, field, v.into())));
+                }
+                log("configuration editor filled");
+            }
+            Step::CfgSave => tasks.push(app.update(Message::CfgSave)),
+            Step::WaitConfigSaved(slug, ms) => {
+                let c = app.configs.iter().find(|c| c.slug == slug);
+                let ok = c.is_some_and(|c| {
+                    c.instructions == "Be brief.\nUse the test repo."
+                        && c.skills.len() == 1
+                        && c.mcp_servers.len() == 1
+                        && c.mcp_servers[0].args == ["server.js", "--port", "3"]
+                        && c.mcp_servers[0].env == [("TOKEN".to_owned(), "abc".to_owned())]
+                });
+                let stored = std::fs::read_to_string(sc.data.join("configurations.json"))
+                    .is_ok_and(|t| t.contains("Be brief.") && t.contains("\"docs\""));
+                if ok && stored {
+                    sc.check(true, &format!("configuration {slug:?} saved: {c:?}"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("configuration {slug:?} not saved: {c:?}"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::CfgDelete(slug) => tasks.push(app.update(Message::CfgDelete(slug.into()))),
+            Step::AcctAdd(provider, name) => {
+                tasks.push(app.update(Message::AcctProvider(provider.into())));
+                tasks.push(app.update(Message::AcctName(name.into())));
+                tasks.push(app.update(Message::AcctAdd));
+            }
+            Step::WaitLogin(ms) => {
+                let login = app
+                    .selected_live()
+                    .filter(|l| l.info.kind == SessionKind::Login)
+                    .map(|l| l.info.id.clone());
+                if let Some(id) = login {
+                    sc.check(
+                        app.modal.is_none(),
+                        &format!("login terminal {id} opened and selected, settings closed"),
+                    );
+                    sc.ids.push(id);
+                } else if let Some(Modal::Settings(f)) = &app.modal
+                    && let Some(e) = &f.error
+                {
+                    let e = e.clone();
+                    sc.check(false, &format!("account/login failed: {e}"));
+                } else if timeout(ms) {
+                    sc.check(false, "timeout waiting for the login terminal");
+                } else {
+                    next = false;
+                }
+            }
+            Step::WaitAccount(provider, slug, exists, ms) => {
+                let listed = app
+                    .accounts
+                    .iter()
+                    .any(|a| a.provider == provider && a.slug == slug);
+                let dir = sc.data.join("accounts").join(provider).join(slug);
+                if listed == exists && dir.is_dir() == exists {
                     sc.check(
                         true,
-                        &format!("profile {name:?} exists={exists} (server list and disk)"),
+                        &format!(
+                            "account {provider}/{slug} exists={exists} (list and {})",
+                            dir.display()
+                        ),
                     );
                 } else if timeout(ms) {
                     sc.check(
                         false,
-                        &format!("profile {name:?}: listed={listed} on_disk={on_disk}"),
+                        &format!(
+                            "account {provider}/{slug}: listed={listed} dir={}",
+                            dir.is_dir()
+                        ),
                     );
                 } else {
                     next = false;
                 }
             }
-            Step::SettingsDelete(name) => {
-                tasks.push(app.update(Message::SettingsDelete(name.into())));
-                // `remove_files: false` keeps the dir: remove the throwaway one (test only).
-                let _ = std::fs::remove_dir_all(sc.data.join("profiles").join(name));
+            Step::AcctRename(provider, slug, name) => {
+                tasks.push(app.update(Message::AcctStartRename(provider.into(), slug.into())));
+                tasks.push(app.update(Message::AcctRenameInput(name.into())));
+                tasks.push(app.update(Message::AcctRenameCommit));
             }
-            Step::ListProfileDir => {
-                let dir = sc
-                    .data
-                    .join("profiles")
-                    .join(app.current_profile())
-                    .join("claude");
+            Step::WaitAccountName(provider, slug, name, ms) => {
+                let ok = app
+                    .accounts
+                    .iter()
+                    .any(|a| a.provider == provider && a.slug == slug && a.name == name);
+                if ok {
+                    sc.check(
+                        true,
+                        &format!("account {provider}/{slug} renamed to {name:?}"),
+                    );
+                } else if timeout(ms) {
+                    sc.check(false, &format!("account {provider}/{slug} not renamed"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::AcctStatus(provider, slug) => {
+                tasks.push(app.update(Message::AcctStatus(provider.into(), slug.into())));
+            }
+            Step::WaitAccountStatus(provider, slug, ms) => {
+                let st = match &app.modal {
+                    Some(Modal::Settings(f)) => f
+                        .acct_status
+                        .iter()
+                        .find(|(k, _)| k.0 == provider && k.1 == slug)
+                        .and_then(|(_, s)| *s),
+                    _ => None,
+                };
+                match st {
+                    // The fake provider has no status command.
+                    Some(s) => sc.check(
+                        s == AccountState::Unknown,
+                        &format!("account {provider}/{slug} status {s:?}"),
+                    ),
+                    None if timeout(ms) => sc.check(false, "no account status"),
+                    None => next = false,
+                }
+            }
+            Step::AcctDelete(provider, slug) => {
+                tasks.push(app.update(Message::AcctDelete(provider.into(), slug.into())));
+            }
+            Step::AcctCreateQuiet(provider, name) => {
+                if let Some(c) = app.client() {
+                    tasks.push(Task::perform(
+                        async move { c.create_account(provider, name).await },
+                        |r| {
+                            log(&format!("account created (no login): {r:?}"));
+                            Message::Expire
+                        },
+                    ));
+                }
+            }
+            Step::ListAccountDir(provider, slug) => {
+                let dir = sc.data.join("accounts").join(provider).join(slug);
                 let entries: Vec<String> = std::fs::read_dir(&dir)
                     .map(|rd| {
                         rd.filter_map(|e| e.ok())
@@ -2010,12 +2236,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     })
                     .unwrap_or_default();
                 log(&format!(
-                    "profile CLAUDE_CONFIG_DIR {} contains: {entries:?}",
+                    "account dir {} contains: {entries:?}",
                     dir.display()
                 ));
                 sc.check(
                     !entries.is_empty(),
-                    "claude wrote its first-run state into the profile dir",
+                    "the CLI wrote its first-run state into the account dir",
                 );
             }
             Step::TasklistMark => sc.pids_before = tasklist(),
@@ -2222,4 +2448,25 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
         sc.started = None;
     }
     Task::batch(tasks)
+}
+
+/// The script's declarative provider: `cmd.exe` stands in for an agent CLI whose "login" echoes
+/// a marker and the account dir it got (written before the server reads `providers/`).
+fn install_fake_provider(data: &Path) {
+    let dir = data.join("providers");
+    let _ = std::fs::create_dir_all(&dir);
+    let toml = r#"# Written by the in-app test script (IDE_APP_SCRIPT=1).
+id = "fake"
+name = "Fake CLI (script)"
+program = "cmd.exe"
+version_args = ["/d", "/c", "echo fake 1.0.0"]
+glyph = "◇"
+account_env = "FAKE_CLI_HOME"
+login_args = ["/d", "/k", "echo FAKE-LOGIN-OK %FAKE_CLI_HOME%"]
+"#;
+    let r = std::fs::write(dir.join("script-fake.toml"), toml);
+    log(&format!(
+        "fake provider installed in {}: {r:?}",
+        dir.display()
+    ));
 }

@@ -1,54 +1,63 @@
-//! Profiles, sessions, git worktrees and agent launch specs. UI-free.
+//! Accounts, configurations, sessions, git worktrees and launch helpers. UI-free.
 //!
-//! Typical app flow:
+//! Typical server flow:
 //! ```no_run
 //! use ide_core::*;
 //! # fn main() -> Result<()> {
 //! let paths = Paths::from_env()?;
-//! let profiles = ProfileStore::open(&paths)?;
+//! migrate_profiles(&paths)?; // legacy profiles -> accounts + configurations
+//! let configs = ConfigurationStore::open(&paths)?;
 //! let mut sessions = SessionStore::open(&paths)?;
 //!
-//! let repo = Repo::open("C:/src/my-repo")?;
-//! let id = SessionId::new();
-//! let wt = repo.create_worktree(&paths, &id, None)?;
-//! let session = Session::new(id, "my session", DEFAULT_PROFILE, &repo, wt, AgentKind::Claude);
-//! sessions.upsert(session.clone())?;
-//!
-//! let spec = LaunchSpec::for_session(&session, profiles.get(DEFAULT_PROFILE).unwrap())?;
-//! // hand `spec` to the PTY layer
-//!
-//! // Or, in one step (resolves the program before creating the worktree):
 //! let req = NewSession {
 //!     repo_path: "C:/src/my-repo".into(),
-//!     agent: AgentKind::Shell,
+//!     target: SessionTarget {
+//!         provider: "shell".into(),
+//!         account: None,
+//!         configuration: configs.list()[0].slug.clone(),
+//!     },
 //!     title: String::new(),
+//!     provider_name: "Shell".into(),
 //!     base_ref: String::new(),
 //! };
-//! let (session, spec) = create_session(&paths, profiles.get(DEFAULT_PROFILE).unwrap(), &req)?;
+//! // The precheck resolves the agent program before the worktree is created.
+//! let session = create_session(&paths, &req, |_planned| Ok(()))?;
 //! sessions.upsert(session.clone())?;
+//! // `ide-agents` turns (session, account, configuration) into a `LaunchSpec`.
 //! // ... later: stop the process, then
 //! delete_session(&paths, &mut sessions, &session.id, true)?;
 //! # Ok(()) }
 //! ```
 
+pub mod account;
+pub mod configuration;
 pub mod error;
 pub mod launch;
+pub mod migrate;
 pub mod ops;
 pub mod paths;
-pub mod profile;
 pub mod repo;
 pub mod session;
 pub mod slug;
 pub mod worktree;
 
-pub use error::{Error, ErrorMessage, IoAction, NameRule, Result};
-pub use launch::{LaunchEnv, LaunchSpec, is_batch_file, which, which_in};
-pub use ops::{
-    NewSession, create_session, create_session_with, delete_session, remove_session_files,
+pub use account::{Account, AccountStore};
+pub use configuration::{
+    Configuration, ConfigurationStore, DEFAULT_CONFIGURATION, McpServer, SkillRef,
+    validate_mcp_name,
 };
-pub use paths::{DATA_DIR_ENV, Paths};
-pub use profile::{DEFAULT_PROFILE, Profile, ProfileStore};
+pub use error::{Error, ErrorMessage, IoAction, NameRule, Result};
+pub use launch::{
+    LaunchEnv, LaunchSpec, is_batch_file, resolve_program, shell_program, which, which_in,
+    wrap_batch_file,
+};
+pub use migrate::{MigrationReport, migrate_profiles};
+pub use ops::{
+    NewSession, create_login_session, create_session, delete_session, remove_session_dir,
+    remove_session_files,
+};
+pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};
-pub use session::{AgentKind, Session, SessionId, SessionStatus, SessionStore};
+pub use session::{Session, SessionId, SessionKind, SessionStatus, SessionStore, SessionTarget};
 pub use slug::{slugify, validate_slug};
 pub use worktree::{BRANCH_PREFIX, Worktree, WorktreeInfo, worktree_exists};

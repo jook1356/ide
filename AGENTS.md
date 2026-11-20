@@ -48,7 +48,11 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   drive the real mouse/keyboard (SetCursorPos, SendInput, SendKeys, ...): it hits whatever window the
   user is using.
 - Never send prompts to `claude`/`codex` from tests: they run on paid subscriptions. Opening the TUI,
-  screenshots and exiting are fine.
+  screenshots and exiting are fine. Opt-in real-CLI checks of the generated provider flags (scratch
+  account dirs, nothing typed, no login): `IDE_REAL_CLI=1 cargo test -p ide-agents real_cli --
+  --ignored` and `IDE_REAL_CLI=1 cargo test -p ide-server --test real_cli -- --ignored`.
+- Provider-specific code (flags, env vars, files of an agent CLI) lives only in `ide-agents`; never
+  `match` on a provider id elsewhere (see `docs/agent-providers.md`).
 - Commit messages: imperative, one topic per commit.
 
 ## UI text and languages
