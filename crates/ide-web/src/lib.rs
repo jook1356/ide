@@ -19,6 +19,12 @@
 //! pipeline). iced must run on DX12 for that ([`backend`] or `WGPU_BACKEND=dx12`); if the import
 //! fails three times in a row the view re-creates its browser with software frames (`on_paint`
 //! + `queue.write_texture`) and emits [`WebEvent::RenderModeChanged`].
+//!
+//! Presentation is pixel-exact: the widget snaps its bounds to the physical pixel grid, sizes
+//! CEF so the frame has exactly that many pixels at iced's scale factor, and copies texels 1:1
+//! (no filtering). During a resize the last frame keeps its size (no stretching) until CEF
+//! delivers the new one. [`WebViewWidget::dimmed`] freezes the view as a dimmed snapshot (for
+//! modal dialogs).
 
 mod events;
 mod gpu;
@@ -30,8 +36,8 @@ mod widget;
 
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use runtime::{RuntimeSettings, WebRuntime, initialize, maybe_run_subprocess};
-pub use view::{RenderStats, ViewOptions, WebView};
-pub use widget::{WebViewWidget, web_view};
+pub use view::{FrameDump, RenderStats, ViewOptions, WebView};
+pub use widget::{DEFAULT_DIM, WebViewWidget, web_view};
 
 /// CEF log severity, for [`RuntimeSettings::log_severity`].
 pub use cef::LogSeverity;

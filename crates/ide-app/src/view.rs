@@ -599,17 +599,14 @@ impl App {
                 .padding([6, 8])
                 .align_y(Alignment::Center);
                 let page: El<'_> = match &live.web {
-                    // The CEF texture is a GPU primitive that iced draws above the modal
-                    // backdrop on the real window, so it is not drawn while a modal is open:
-                    // the backdrop then covers a plain panel instead (see docs, "modal z-order").
-                    Some(w) if !self.web_covered() => {
-                        WebViewWidget::new(w).width(Fill).height(Fill).into()
-                    }
-                    Some(_) => container(space())
+                    // Under a modal the page stays visible as a frozen, dimmed snapshot of its
+                    // last frame (no input reaches it, CEF stops rendering); the backdrop and
+                    // the dialog are drawn above it (see docs, "modal z-order").
+                    Some(w) => WebViewWidget::new(w)
                         .width(Fill)
                         .height(Fill)
-                        .style(style::bg(style::PANEL))
-                        .boxed(),
+                        .dimmed(self.web_covered())
+                        .into(),
                     None => container(text(live.error.as_deref().unwrap_or("")).size(12))
                         .center(Fill)
                         .boxed(),
@@ -627,7 +624,8 @@ impl App {
             .boxed()
     }
 
-    /// A modal covers the window: the web view is not drawn (see [`App::detail`]).
+    /// A modal covers the window: the web view shows a dimmed, frozen snapshot (see
+    /// [`App::detail`]).
     pub fn web_covered(&self) -> bool {
         self.modal.is_some() && !self.modal_web_unsafe
     }

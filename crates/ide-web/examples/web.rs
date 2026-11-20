@@ -2,13 +2,15 @@
 //!
 //! Run: `WGPU_BACKEND=dx12 cargo run -p ide-web --example web --release`
 //! Scripted mode (in-app event injection, no OS input):
-//!   `IDE_WEB_SCRIPT=basic|ime|perf|all` (+ `IDE_WEB_EVIDENCE=<dir>` for screenshots,
-//!   `IDE_WEB_FORCE_CPU=1` for the software-frame path).
+//!   `IDE_WEB_SCRIPT=basic|ime|perf|resize|sharpness|all` (+ `IDE_WEB_EVIDENCE=<dir>` for
+//!   screenshots, `IDE_WEB_FORCE_CPU=1` for the software-frame path,
+//!   `IDE_WEB_LEGACY_PRESENT=1` to reproduce the pre-fix stretched/bilinear presentation).
 
 use iced::keyboard::{self, Key, Location, Modifiers, key};
 use iced::widget::{button, column, container, opaque, row, scrollable, space, stack, text};
 use iced::{
-    Color, Element, Event, Fill, Point, Size, Subscription, Task, Widget as _, mouse, window,
+    Color, Element, Event, Fill, Length, Point, Size, Subscription, Task, Widget as _, mouse,
+    window,
 };
 use ide_web::testing::{self, Injector};
 use ide_web::{RenderMode, WebEvent, WebView, WebViewEvent, WebViewWidget};
@@ -124,6 +126,9 @@ struct App {
     stats_t0: Instant,
     window: Option<window::Id>,
     script: Option<Script>,
+    /// Fixed web view width (resize script; simulates dragging a split divider).
+    web_width: Option<f32>,
+    last_shot: Option<window::Screenshot>,
 }
 
 impl App {
@@ -149,6 +154,8 @@ impl App {
                 stats_t0: Instant::now(),
                 window: None,
                 script,
+                web_width: None,
+                last_shot: None,
             },
             window::latest().map(Message::WindowId),
         )
@@ -173,7 +180,8 @@ impl App {
                 other => println!("[app] web event {other:?}"),
             },
             Message::Tick => {
-                let measuring = self.script.as_ref().is_some_and(|s| s.measure_t0.is_some());
+                // Scripts read the counters themselves (Measure, ResizeStats).
+                let measuring = self.script.is_some();
                 if !measuring && self.stats_t0.elapsed() >= Duration::from_secs(2) {
                     let el = self.stats_t0.elapsed().as_secs_f64();
                     let s = self.web.take_stats();
@@ -220,6 +228,7 @@ impl App {
                     ),
                     Err(e) => println!("[script] screenshot {name} failed: {e}"),
                 }
+                self.last_shot = Some(shot);
                 if let Some(s) = &mut self.script {
                     s.waiting_shot = false;
                 }
@@ -232,7 +241,7 @@ impl App {
         Subscription::batch([
             ide_web::events().map(Message::Web),
             iced::time::every(Duration::from_millis(if self.script.is_some() {
-                30
+                16
             } else {
                 250
             }))
@@ -281,8 +290,12 @@ impl App {
                 .height(h)
                 .style(container::rounded_box)
         };
-        let web: Element<'_, Message> =
-            WebViewWidget::new(&self.web).width(Fill).height(560).into();
+        let web: Element<'_, Message> = WebViewWidget::new(&self.web)
+            .width(self.web_width.map(Length::Fixed).unwrap_or(Length::Fill))
+            .height(560)
+            // Under the modal: a dimmed, frozen snapshot of the page (no input reaches it).
+            .dimmed(self.modal)
+            .into();
         let list = scrollable(
             column![
                 filler(
@@ -386,6 +399,26 @@ enum Step {
     ToggleModal,
     Shot(&'static str),
     Measure(u64),
+    /// Fix the web view width (logical px; `None` = fill), like dragging a split divider.
+    SetWidth(Option<f32>),
+    /// Reset the render counters.
+    ResetStats,
+    /// Print the frame and widget sizes (px) as of the last drawn frame.
+    Sizes,
+    /// `WebView::set_hidden` (CEF stops producing frames while hidden).
+    Hidden(bool),
+    /// Print the resize lag stats; checks the frame on screen matches the widget's pixel size.
+    ResizeStats,
+    /// Copy the frame the widget draws back to the CPU (waits for it).
+    Dump,
+    /// Compare the last screenshot with the dumped frame pixel by pixel over a page rect (CSS
+    /// px, x0 y0 x1 y1); saves 4x crops of both as `<name>_screen.png` / `<name>_frame.png`.
+    Compare(&'static str, [f32; 4]),
+    /// Mean brightness of a page rect (CSS px) in the last screenshot, remembered under a name.
+    Brightness(&'static str, [f32; 4]),
+    /// Check brightness `a` < `b` * ratio (e.g. dimmed snapshot is darker than the live page)
+    /// and `a` > `min` (the page is still visible, not replaced by a plain panel).
+    ExpectDarker(&'static str, &'static str, f32, f32),
     Exit,
 }
 
@@ -400,6 +433,9 @@ struct Script {
     pass: u32,
     fail: u32,
     done: bool,
+    dump: Option<ide_web::FrameDump>,
+    dump_pending: bool,
+    brightness: Vec<(&'static str, f32)>,
 }
 
 fn basic() -> Vec<Step> {
@@ -532,15 +568,109 @@ fn perf() -> Vec<Step> {
     vec![WaitFor("READY", 20_000), Wait(3000), Measure(12_000)]
 }
 
+/// Static text region of the test page (header, input, button, textarea; CSS px).
+const TEXT_RECT: [f32; 4] = [10.0, 8.0, 360.0, 240.0];
+
+fn sharpness() -> Vec<Step> {
+    use Step::*;
+    vec![
+        WaitFor("READY", 20_000),
+        Wait(1500),
+        Dump,
+        Shot("s1_sharpness"),
+        Compare("s1_text", TEXT_RECT),
+        // Dimmed snapshot under the modal: darker, but still the page (not a plain panel).
+        Brightness("live", [10.0, 260.0, 400.0, 420.0]),
+        ToggleModal,
+        Wait(500),
+        Mark,
+        ClickPage(110.0, 128.0),
+        ExpectNone("MOUSEDOWN"),
+        Shot("s2_modal_dimmed"),
+        Brightness("modal", [10.0, 260.0, 400.0, 420.0]),
+        ExpectDarker("modal", "live", 0.6, 0.02),
+        ToggleModal,
+        Wait(500),
+        Mark,
+        ClickPage(110.0, 128.0),
+        Expect("CLICK btn".into()),
+        Shot("s3_modal_closed"),
+    ]
+}
+
+fn resize() -> Vec<Step> {
+    use Step::*;
+    let mut v = vec![
+        WaitFor("READY", 20_000),
+        Wait(1000),
+        SetWidth(Some(1000.0)),
+        Wait(1000),
+        Shot("r0_wide"),
+        // A big width change while CEF is paused (hidden), so its frame of the new size cannot
+        // arrive: shows deterministically how a resize in flight is presented (the real lag is
+        // ~3 frames, measured below).
+        Hidden(true),
+        SetWidth(Some(700.0)),
+        Wait(150),
+        Shot("r1_shrink_in_flight"),
+        Sizes,
+        Hidden(false),
+        Wait(1000),
+        Shot("r2_shrunk"),
+        Hidden(true),
+        SetWidth(Some(1000.0)),
+        Wait(150),
+        Shot("r3_grow_in_flight"),
+        Sizes,
+        Hidden(false),
+        Wait(1000),
+        ResetStats,
+    ];
+    // Divider drag: 3 logical px per tick (~every frame) from 1000 down to 640 and back.
+    let mut w = 1000.0;
+    while w > 640.0 {
+        w -= 3.0;
+        v.push(SetWidth(Some(w)));
+    }
+    v.push(Shot("r4_drag_in_flight"));
+    while w < 1000.0 {
+        w += 3.0;
+        v.push(SetWidth(Some(w)));
+    }
+    v.extend([
+        Wait(800),
+        ResizeStats,
+        Shot("r5_after_drag"),
+        SetWidth(None),
+        Wait(500),
+    ]);
+    // Fractional widths (scale 1.5): the frame must still match the widget pixel for pixel.
+    for w in [801.3, 802.7, 777.77] {
+        v.extend([
+            SetWidth(Some(w)),
+            Wait(600),
+            Dump,
+            Shot("r6_fractional"),
+            Compare("r6_fractional", TEXT_RECT),
+        ]);
+    }
+    v.extend([SetWidth(None), Wait(400), ResizeStats]);
+    v
+}
+
 impl Script {
     fn new(name: &str) -> Self {
         let mut steps = match name {
             "basic" => basic(),
             "ime" => ime(),
             "perf" => perf(),
+            "sharpness" => sharpness(),
+            "resize" => resize(),
             _ => {
                 let mut s = basic();
                 s.extend(ime().into_iter().skip(1));
+                s.extend(sharpness().into_iter().skip(1));
+                s.extend(resize().into_iter().skip(1));
                 s.extend(perf().into_iter().skip(1));
                 s
             }
@@ -558,6 +688,9 @@ impl Script {
             pass: 0,
             fail: 0,
             done: false,
+            dump: None,
+            dump_pending: false,
+            brightness: Vec::new(),
         }
     }
 
@@ -799,6 +932,105 @@ impl Script {
                     }
                 }
             },
+            Step::SetWidth(w) => app.web_width = w,
+            Step::Hidden(h) => app.web.set_hidden(h),
+            Step::Sizes => {
+                let s = app.web.take_stats();
+                println!(
+                    "[resize] frame {:?} px, widget {:?} px",
+                    s.frame_px, s.widget_px
+                );
+            }
+            Step::ResetStats => {
+                let _ = app.web.take_stats();
+            }
+            Step::ResizeStats => {
+                let s = app.web.take_stats();
+                println!(
+                    "[resize] {} resizes reached the screen: lag avg {:.2} frames (max {}), avg {:.1} ms (max {:.1} ms); frame {:?} px, widget {:?} px",
+                    s.resizes,
+                    s.resize_lag_frames_avg,
+                    s.resize_lag_frames_max,
+                    s.resize_lag_ms_avg,
+                    s.resize_lag_ms_max,
+                    s.frame_px,
+                    s.widget_px
+                );
+                let (f, w) = (s.frame_px, s.widget_px);
+                self.check(
+                    f.0 >= w.0 && f.1 >= w.1 && f.0 - w.0 <= 1 && f.1 - w.1 <= 1,
+                    &format!("frame {f:?} covers widget {w:?} with <= 1 px overflow"),
+                );
+            }
+            Step::Dump => {
+                if !self.dump_pending {
+                    self.dump = None;
+                    self.dump_pending = true;
+                    app.web.request_frame_dump();
+                    next = false;
+                } else {
+                    match app.web.take_frame_dump() {
+                        Some(d) => {
+                            println!(
+                                "[script] frame dump {}x{} at window px {:?}, widget {:?} px, scale {}",
+                                d.width, d.height, d.origin, d.widget_px, d.scale
+                            );
+                            self.dump = Some(d);
+                            self.dump_pending = false;
+                        }
+                        None if elapsed > Duration::from_secs(3) => {
+                            self.dump_pending = false;
+                            self.check(false, "frame dump arrived");
+                        }
+                        None => next = false,
+                    }
+                }
+            }
+            Step::Compare(name, css) => match (&app.last_shot, &self.dump) {
+                (Some(shot), Some(d)) => {
+                    let r = compare(shot, d, css, name);
+                    println!(
+                        "[sharpness] {name}: {} of {} px differ (max channel diff {}), mean abs diff {:.3}",
+                        r.0, r.1, r.2, r.3
+                    );
+                    self.check(
+                        r.1 > 0 && r.0 == 0,
+                        &format!("{name}: screen == CEF frame, pixel for pixel"),
+                    );
+                }
+                _ => self.check(false, &format!("{name}: have screenshot and frame dump")),
+            },
+            Step::Brightness(name, css) => {
+                if let (Some(shot), Some(b)) = (&app.last_shot, app.web.last_bounds()) {
+                    let s = shot.scale_factor;
+                    let x0 = ((b.x + css[0]) * s) as u32;
+                    let y0 = ((b.y - app.scroll_y + css[1]) * s) as u32;
+                    let x1 = ((b.x + css[2]) * s) as u32;
+                    let y1 = ((b.y - app.scroll_y + css[3]) * s) as u32;
+                    let (mut sum, mut n) = (0f64, 0f64);
+                    for y in y0..y1.min(shot.size.height) {
+                        for x in x0..x1.min(shot.size.width) {
+                            let i = ((y * shot.size.width + x) * 4) as usize;
+                            sum += (shot.rgba[i] as f64
+                                + shot.rgba[i + 1] as f64
+                                + shot.rgba[i + 2] as f64)
+                                / 765.0;
+                            n += 1.0;
+                        }
+                    }
+                    let mean = (sum / n.max(1.0)) as f32;
+                    println!("[script] brightness {name}: {mean:.3}");
+                    self.brightness.push((name, mean));
+                }
+            }
+            Step::ExpectDarker(a, b, ratio, min) => {
+                let get = |n: &str| self.brightness.iter().rev().find(|x| x.0 == n).map(|x| x.1);
+                let (va, vb) = (get(a).unwrap_or(-1.0), get(b).unwrap_or(-1.0));
+                self.check(
+                    va >= min && va < vb * ratio,
+                    &format!("{a} ({va:.3}) darker than {b} ({vb:.3}) x {ratio} and > {min}"),
+                );
+            }
             Step::Exit => {
                 println!("[script] DONE: {} passed, {} failed", self.pass, self.fail);
                 self.done = true;
@@ -811,6 +1043,71 @@ impl Script {
         }
         task
     }
+}
+
+/// Compares the screenshot with the frame dump over a page rect (CSS px) and saves 4x crops.
+/// Returns (differing pixels, compared pixels, max channel diff, mean abs channel diff).
+fn compare(
+    shot: &window::Screenshot,
+    d: &ide_web::FrameDump,
+    css: [f32; 4],
+    name: &str,
+) -> (u64, u64, u8, f64) {
+    let s = d.scale;
+    let (fx0, fy0) = ((css[0] * s) as u32, (css[1] * s) as u32);
+    let fx1 = ((css[2] * s) as u32).min(d.width).min(d.widget_px.0);
+    let fy1 = ((css[3] * s) as u32).min(d.height).min(d.widget_px.1);
+    let (mut differ, mut total, mut max, mut sum) = (0u64, 0u64, 0u8, 0u64);
+    let (w, h) = (fx1.saturating_sub(fx0), fy1.saturating_sub(fy0));
+    let mut screen = vec![0u8; (w * h * 4) as usize];
+    let mut frame = vec![0u8; (w * h * 4) as usize];
+    for fy in fy0..fy1 {
+        for fx in fx0..fx1 {
+            let (sx, sy) = (d.origin.0 + fx as i32, d.origin.1 + fy as i32);
+            if sx < 0 || sy < 0 || sx as u32 >= shot.size.width || sy as u32 >= shot.size.height {
+                continue;
+            }
+            let si = ((sy as u32 * shot.size.width + sx as u32) * 4) as usize;
+            let fi = ((fy * d.width + fx) * 4) as usize;
+            let sp = [shot.rgba[si], shot.rgba[si + 1], shot.rgba[si + 2]];
+            let fp = [d.bgra[fi + 2], d.bgra[fi + 1], d.bgra[fi]];
+            let o = (((fy - fy0) * w + (fx - fx0)) * 4) as usize;
+            screen[o..o + 4].copy_from_slice(&[sp[0], sp[1], sp[2], 255]);
+            frame[o..o + 4].copy_from_slice(&[fp[0], fp[1], fp[2], 255]);
+            let m = (0..3).map(|c| sp[c].abs_diff(fp[c])).max().unwrap();
+            sum += (0..3).map(|c| sp[c].abs_diff(fp[c]) as u64).sum::<u64>();
+            total += 1;
+            if m > 0 {
+                differ += 1;
+                max = max.max(m);
+            }
+        }
+    }
+    let dir = evidence_dir();
+    for (suffix, px) in [("screen", &screen), ("frame", &frame)] {
+        let path = dir.join(format!("{name}_{suffix}.png"));
+        if let Err(e) = save_scaled(&path, w, h, px, 4) {
+            println!("[script] saving {} failed: {e}", path.display());
+        }
+    }
+    (differ, total, max, sum as f64 / (total.max(1) * 3) as f64)
+}
+
+/// Saves an RGBA image upscaled `k` times (nearest neighbour) so single pixels stay visible.
+fn save_scaled(path: &std::path::Path, w: u32, h: u32, rgba: &[u8], k: u32) -> anyhow::Result<()> {
+    let mut out = Vec::with_capacity((w * h * k * k * 4) as usize);
+    for y in 0..h * k {
+        for x in 0..w * k {
+            let i = (((y / k) * w + x / k) * 4) as usize;
+            out.extend_from_slice(&rgba[i..i + 4]);
+        }
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut enc = png::Encoder::new(file, w * k, h * k);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&out)?;
+    Ok(())
 }
 
 fn code_for(c: char) -> Option<key::Code> {

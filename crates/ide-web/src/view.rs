@@ -1,13 +1,13 @@
 //! One off-screen CEF browser: shared state, CEF handlers and the [`WebView`] handle.
 
 use cef::{rc::Rc as _, *};
-use iced::{Rectangle, Size};
+use iced::{Color, Rectangle, Size};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::*};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use crate::events::{ConsoleLevel, RenderMode, ViewId, WebEvent, emit};
-use crate::gpu;
+use crate::gpu::{self, PendingResize};
 use crate::runtime::{self, LIVE_BROWSERS};
 
 /// `cef::Browser` is a ref-counted, thread-safe CEF object; the Rust wrapper is just not marked so.
@@ -25,6 +25,22 @@ pub(crate) struct CpuFrame {
     pub height: u32,
 }
 
+/// A copy of the frame currently drawn by the widget (see [`WebView::request_frame_dump`]).
+#[derive(Debug, Clone)]
+pub struct FrameDump {
+    /// Frame size in physical pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Premultiplied BGRA, top-down, tightly packed.
+    pub bgra: Vec<u8>,
+    /// Window pixel of the frame's top-left texel when it was drawn.
+    pub origin: (i32, i32),
+    /// The widget's size in physical pixels when it was drawn.
+    pub widget_px: (u32, u32),
+    /// iced's scale factor when it was drawn.
+    pub scale: f32,
+}
+
 /// Rendering/perf counters (reset by [`WebView::take_stats`]).
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -36,6 +52,12 @@ pub(crate) struct Counters {
     pub import_errors: AtomicU64,
     pub cpu_copy_ns: AtomicU64,
     pub frames_shown: AtomicU64,
+    /// Completed resizes (a frame of the new size reached the screen) and their lag.
+    pub resizes: AtomicU64,
+    pub resize_frames: AtomicU64,
+    pub resize_frames_max: AtomicU64,
+    pub resize_ns: AtomicU64,
+    pub resize_max_ns: AtomicU64,
 }
 
 /// Snapshot of render counters since the last [`WebView::take_stats`].
@@ -55,6 +77,16 @@ pub struct RenderStats {
     pub cpu_copy_avg_ms: f64,
     /// New frames bound for drawing by the iced pipeline.
     pub frames_shown: u64,
+    /// Resizes whose new-size frame reached the screen, and how long that took: iced frames
+    /// drawn and milliseconds from the frame that first showed the new bounds.
+    pub resizes: u64,
+    pub resize_lag_frames_avg: f64,
+    pub resize_lag_frames_max: u64,
+    pub resize_lag_ms_avg: f64,
+    pub resize_lag_ms_max: f64,
+    /// Size (physical px) of the frame on screen, and of the widget.
+    pub frame_px: (u32, u32),
+    pub widget_px: (u32, u32),
 }
 
 /// Input/IME state that must survive widget rebuilds.
@@ -76,11 +108,27 @@ pub(crate) struct InputState {
 pub(crate) struct ViewShared {
     pub id: ViewId,
     pub browser: Mutex<Option<SendBrowser>>,
+    /// Page background: CEF's `background_color` and the fill where no frame pixels are yet
+    /// (while a resize is in flight).
+    pub background: Color,
     /// Bumped whenever a browser is (re)created; handlers of older browsers become inert.
     pub generation: AtomicU64,
+    /// View size in DIP given to CEF (`view_rect`).
     pub width: AtomicU32,
     pub height: AtomicU32,
     pub scale_bits: AtomicU32,
+    /// The widget's physical size (px) at its last draw; CEF's frame covers it.
+    pub widget_px: AtomicU64,
+    /// Size (px) of the frame on screen.
+    pub frame_px: AtomicU64,
+    /// Resizes requested from CEF whose frame has not reached the screen yet (oldest first).
+    pub resize_pending: Mutex<Vec<PendingResize>>,
+    /// The app hid the browser ([`WebView::set_hidden`]).
+    pub app_hidden: AtomicBool,
+    /// The widget shows a frozen, dimmed snapshot ([`crate::WebViewWidget::dimmed`]).
+    pub frozen: AtomicBool,
+    pub dump_requested: AtomicBool,
+    pub dump: Mutex<Option<FrameDump>>,
     pub gpu_mode: AtomicBool,
     pub consecutive_import_failures: AtomicU32,
     pub gpu_frame: Mutex<Option<(iced::wgpu::Texture, u64)>>,
@@ -124,6 +172,14 @@ impl ViewShared {
         (self.width.load(Relaxed), self.height.load(Relaxed))
     }
 
+    /// Tells CEF whether it is hidden: by the app or while frozen under a modal.
+    pub fn apply_hidden(&self) {
+        let hidden = self.app_hidden.load(SeqCst) || self.frozen.load(SeqCst);
+        if let Some(host) = self.host() {
+            host.was_hidden(hidden as _);
+        }
+    }
+
     pub fn mode(&self) -> RenderMode {
         if self.gpu_mode.load(Relaxed) {
             RenderMode::Gpu
@@ -155,7 +211,7 @@ impl ViewShared {
         };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: runtime::options().frame_rate as _,
-            background_color: 0xFFFF_FFFF,
+            background_color: argb(self.background),
             ..Default::default()
         };
         let handler = Handler {
@@ -202,6 +258,12 @@ impl ViewShared {
         };
         self.create_browser(&url);
     }
+}
+
+fn argb(c: Color) -> u32 {
+    let [r, g, b, _] = c.into_rgba8();
+    // Opaque: CEF OSR treats a transparent background as "transparent page".
+    0xFF00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
 #[derive(Clone)]
@@ -519,6 +581,9 @@ wrap_life_span_handler! {
             *sh.browser.lock().unwrap() = Some(SendBrowser(browser.clone()));
             if let Some(host) = browser.host() {
                 host.was_resized();
+                if sh.app_hidden.load(SeqCst) || sh.frozen.load(SeqCst) {
+                    host.was_hidden(1);
+                }
                 if sh.input.lock().unwrap().focused {
                     host.set_focus(1);
                 }
@@ -607,6 +672,9 @@ pub struct ViewOptions {
     /// Inject a tiny script after each load that reports the caret of the focused text field
     /// (via a swallowed `console.debug`), so the IME window opens at the caret. Default: on.
     pub caret_probe: bool,
+    /// Page background (opaque): what CEF paints before/behind the page, and the fill for the
+    /// part of the widget a frame does not cover yet while a resize is in flight. Default white.
+    pub background: Color,
 }
 
 impl Default for ViewOptions {
@@ -615,6 +683,7 @@ impl Default for ViewOptions {
             size: Size::new(800.0, 600.0),
             scale_factor: 1.0,
             caret_probe: true,
+            background: Color::WHITE,
         }
     }
 }
@@ -672,10 +741,21 @@ impl WebView {
         let shared = Arc::new(ViewShared {
             id,
             browser: Mutex::new(None),
+            background: Color {
+                a: 1.0,
+                ..options.background
+            },
             generation: AtomicU64::new(0),
             width: AtomicU32::new(options.size.width.round().max(1.0) as u32),
             height: AtomicU32::new(options.size.height.round().max(1.0) as u32),
             scale_bits: AtomicU32::new(options.scale_factor.max(0.25).to_bits()),
+            widget_px: AtomicU64::new(0),
+            frame_px: AtomicU64::new(0),
+            resize_pending: Mutex::new(Vec::new()),
+            app_hidden: AtomicBool::new(false),
+            frozen: AtomicBool::new(false),
+            dump_requested: AtomicBool::new(false),
+            dump: Mutex::new(None),
             gpu_mode: AtomicBool::new(gpu),
             consecutive_import_failures: AtomicU32::new(0),
             gpu_frame: Mutex::new(None),
@@ -790,11 +870,26 @@ impl WebView {
         self.shared().input.lock().unwrap().focused
     }
 
-    /// Hides/shows the browser (stops painting while hidden, e.g. for an inactive tab).
+    /// Hides/shows the browser (stops painting while hidden, e.g. for an inactive tab). A view
+    /// frozen by [`crate::WebViewWidget::dimmed`] stays hidden to CEF until it is unfrozen.
     pub fn set_hidden(&self, hidden: bool) {
-        if let Some(host) = self.shared().host() {
-            host.was_hidden(hidden as _);
-        }
+        let sh = self.shared();
+        sh.app_hidden.store(hidden, SeqCst);
+        sh.apply_hidden();
+    }
+
+    /// Asks the widget to copy the frame it draws next back to the CPU (test/diagnostics; it
+    /// stalls that frame until the GPU copy is done). Fetch it with [`WebView::take_frame_dump`].
+    pub fn request_frame_dump(&self) {
+        let sh = self.shared();
+        *sh.dump.lock().unwrap() = None;
+        sh.dump_requested.store(true, SeqCst);
+        sh.wake();
+    }
+
+    /// The frame copied after [`WebView::request_frame_dump`], once available.
+    pub fn take_frame_dump(&self) -> Option<FrameDump> {
+        self.shared().dump.lock().unwrap().take()
     }
 
     /// Opens Chrome DevTools in a separate native window.
@@ -855,7 +950,11 @@ impl WebView {
 
     /// Returns and resets the render counters.
     pub fn take_stats(&self) -> RenderStats {
-        let c = &self.shared().counters;
+        let sh = self.shared();
+        let c = &sh.counters;
+        let resizes = c.resizes.swap(0, Relaxed);
+        let resize_frames = c.resize_frames.swap(0, Relaxed);
+        let resize_ns = c.resize_ns.swap(0, Relaxed);
         let imports = c.imports.swap(0, Relaxed);
         let import_ns = c.import_ns.swap(0, Relaxed);
         let cpu_paints = c.cpu_paints.swap(0, Relaxed);
@@ -878,6 +977,25 @@ impl WebView {
                 0.0
             },
             frames_shown: c.frames_shown.swap(0, Relaxed),
+            resizes,
+            resize_lag_frames_avg: if resizes > 0 {
+                resize_frames as f64 / resizes as f64
+            } else {
+                0.0
+            },
+            resize_lag_frames_max: c.resize_frames_max.swap(0, Relaxed),
+            resize_lag_ms_avg: if resizes > 0 {
+                resize_ns as f64 / resizes as f64 / 1e6
+            } else {
+                0.0
+            },
+            resize_lag_ms_max: c.resize_max_ns.swap(0, Relaxed) as f64 / 1e6,
+            frame_px: unpack(sh.frame_px.load(Relaxed)),
+            widget_px: unpack(sh.widget_px.load(Relaxed)),
         }
     }
+}
+
+pub(crate) fn unpack(v: u64) -> (u32, u32) {
+    ((v >> 32) as u32, v as u32)
 }

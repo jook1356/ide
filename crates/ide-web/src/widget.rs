@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::*;
 use std::time::{Duration, Instant};
 
-use crate::gpu::WebPrimitive;
+use crate::gpu::{PendingResize, PhysRect, WebPrimitive, dip_for, px_for};
 use crate::input::{self, EF_LEFT_MOUSE, EF_MIDDLE_MOUSE, EF_RIGHT_MOUSE};
 use crate::view::{ViewShared, WebView};
 
@@ -28,22 +28,53 @@ use crate::view::{ViewShared, WebView};
 /// the cursor is over it (the event is captured so outer scrollables don't also scroll); keys and
 /// IME go to the page while it is focused. The texture is clipped by parent scrollables and
 /// covered by later `stack` layers like any iced primitive.
+///
+/// The frame is drawn pixel-exact: CEF renders exactly the widget's physical pixel rectangle at
+/// iced's scale factor and every screen pixel shows one frame pixel (no resampling). While a
+/// resize is in flight the previous frame keeps its size (anchored top-left, the rest filled
+/// with [`crate::ViewOptions::background`]) instead of being stretched.
 pub struct WebViewWidget {
     view: Arc<ViewShared>,
     program: WebProgram,
     width: Length,
     height: Length,
+    dimmed: bool,
 }
+
+/// Default colour multiplier of [`WebViewWidget::dimmed`].
+pub const DEFAULT_DIM: f32 = 0.45;
 
 impl WebViewWidget {
     pub fn new(view: &WebView) -> Self {
         let view = view.shared().clone();
         Self {
-            program: WebProgram { view: view.clone() },
+            program: WebProgram {
+                view: view.clone(),
+                dim: 1.0,
+            },
             view,
             width: Length::Fill,
             height: Length::Fill,
+            dimmed: false,
         }
+    }
+
+    /// Shows a frozen, dimmed snapshot of the page instead of the live page, e.g. under a modal
+    /// dialog: the last frame is drawn darkened ([`DEFAULT_DIM`]), input is not forwarded (an
+    /// IME composition is finished and CEF loses focus), and CEF is told it is hidden so it
+    /// stops rendering. `dimmed(false)` resumes the live page (and gives focus back if the page
+    /// had it).
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self.program.dim = if dimmed { DEFAULT_DIM } else { 1.0 };
+        self
+    }
+
+    /// Like [`WebViewWidget::dimmed`] with a custom colour multiplier (0 = black, 1 = undimmed).
+    pub fn dimmed_by(mut self, factor: f32) -> Self {
+        self.dimmed = true;
+        self.program.dim = factor.clamp(0.0, 1.0);
+        self
     }
 
     pub fn width(mut self, width: impl Into<Length>) -> Self {
@@ -66,6 +97,7 @@ pub fn web_view(view: &WebView) -> WebViewWidget {
 /// public bound (`Shader: Widget`), without naming iced_wgpu's renderer trait.
 pub(crate) struct WebProgram {
     view: Arc<ViewShared>,
+    dim: f32,
 }
 
 impl<Message> shader::Program<Message> for WebProgram {
@@ -75,6 +107,7 @@ impl<Message> shader::Program<Message> for WebProgram {
     fn draw(&self, _state: &State, _cursor: mouse::Cursor, _bounds: Rectangle) -> WebPrimitive {
         WebPrimitive {
             view: self.view.clone(),
+            dim: self.dim,
         }
     }
 }
@@ -135,15 +168,80 @@ pub(crate) fn set_focus(sh: &ViewShared, focused: bool) {
     sh.wake();
 }
 
-/// Called from `Primitive::prepare` with iced's current scale factor.
-pub(crate) fn sync_scale(sh: &ViewShared, scale: f32) {
+/// Called from `Primitive::prepare` (the frame that first shows the bounds) with the widget's
+/// physical rectangle and iced's scale factor: sizes CEF's view so its frame is exactly
+/// `rect`'s pixel size (up to < 1 DIP of overflow when `px / scale` is fractional).
+///
+/// `legacy`: the logical bounds when the diagnostic pre-fix presentation is on (the view is then
+/// sized to the rounded logical bounds, as before).
+pub(crate) fn sync_geometry(
+    sh: &ViewShared,
+    rect: PhysRect,
+    scale: f32,
+    frame: u64,
+    legacy: Option<&iced::Rectangle>,
+) {
     let scale = scale.max(0.25);
-    if sh.scale_bits.swap(scale.to_bits(), Relaxed) != scale.to_bits()
-        && let Some(host) = sh.host()
+    sh.widget_px
+        .store(((rect.width as u64) << 32) | rect.height as u64, Relaxed);
+    let scale_changed = sh.scale_bits.swap(scale.to_bits(), Relaxed) != scale.to_bits();
+    let (w, h) = match legacy {
+        Some(b) => (
+            b.width.round().max(1.0) as u32,
+            b.height.round().max(1.0) as u32,
+        ),
+        None => (dip_for(rect.width, scale), dip_for(rect.height, scale)),
+    };
+    let size_changed = (sh.width.swap(w, Relaxed), sh.height.swap(h, Relaxed)) != (w, h);
+    if !(scale_changed || size_changed) {
+        return;
+    }
     {
-        host.notify_screen_info_changed();
+        let mut pending = sh.resize_pending.lock().unwrap();
+        if pending.len() >= 32 {
+            pending.remove(0);
+        }
+        pending.push(PendingResize {
+            at: Instant::now(),
+            frame,
+            expect_px: (px_for(w, scale), px_for(h, scale)),
+        });
+    }
+    if let Some(host) = sh.host() {
+        if scale_changed {
+            host.notify_screen_info_changed();
+        }
         host.was_resized();
     }
+}
+
+/// Enters/leaves the frozen (dimmed snapshot) state of [`WebViewWidget::dimmed`].
+fn sync_frozen(sh: &ViewShared, frozen: bool) {
+    if sh.frozen.swap(frozen, SeqCst) == frozen {
+        return;
+    }
+    let host = sh.host();
+    let mut input = sh.input.lock().unwrap();
+    if frozen {
+        if input.composing.take().is_some()
+            && let Some(h) = &host
+        {
+            h.ime_finish_composing_text(0);
+        }
+        input.ime_caret = None;
+        drop(input);
+        if let Some(h) = &host {
+            h.set_focus(0);
+        }
+    } else {
+        let focused = input.focused;
+        drop(input);
+        if focused && let Some(h) = &host {
+            h.set_focus(1);
+        }
+    }
+    sh.apply_hidden();
+    sh.wake();
 }
 
 fn set_composition(host: &cef::BrowserHost, text: &str, selection: Option<std::ops::Range<usize>>) {
@@ -189,24 +287,14 @@ impl WebViewWidget {
         match event {
             Event::Waken => {
                 if sh.frame_seq.load(Acquire) != sh.drawn_seq.load(Acquire)
+                    || sh.dump_requested.load(Acquire)
                     || sh.input.lock().unwrap().focused
                 {
                     shell.request_redraw();
                 }
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                let (w, h) = sh.logical_size();
-                let (bw, bh) = (
-                    bounds.width.round().max(1.0) as u32,
-                    bounds.height.round().max(1.0) as u32,
-                );
-                if (w, h) != (bw, bh) {
-                    sh.width.store(bw, Relaxed);
-                    sh.height.store(bh, Relaxed);
-                    if let Some(host) = sh.host() {
-                        host.was_resized();
-                    }
-                }
+                // (The view is sized to the widget in `Primitive::prepare`.)
                 let mut input = sh.input.lock().unwrap();
                 if input.ime_reset {
                     // Leave the IME disabled for this frame so the OS drops its composition.
@@ -530,6 +618,43 @@ where
             };
             *self.view.waker.lock().unwrap() = Some(shell.waker().clone());
         }
+        sync_frozen(&self.view, self.dimmed);
+        if self.dimmed {
+            // Frozen snapshot: nothing reaches the page; a drag in progress ends.
+            match event {
+                Event::Waken
+                    if self.view.frame_seq.load(Acquire) != self.view.drawn_seq.load(Acquire)
+                        || self.view.dump_requested.load(Acquire) =>
+                {
+                    shell.request_redraw()
+                }
+                Event::Window(window::Event::Focused) => state.window_focused = true,
+                Event::Window(window::Event::Unfocused) => state.window_focused = false,
+                _ => {}
+            }
+            if state.buttons != 0 || state.hovered {
+                if let Some(h) = self.view.host() {
+                    for (btn, flag) in [
+                        (MouseButtonType::LEFT, EF_LEFT_MOUSE),
+                        (MouseButtonType::MIDDLE, EF_MIDDLE_MOUSE),
+                        (MouseButtonType::RIGHT, EF_RIGHT_MOUSE),
+                    ] {
+                        if state.buttons & flag != 0 {
+                            h.send_mouse_click_event(
+                                Some(&mouse_event(state.last_pos, 0)),
+                                btn,
+                                1,
+                                1,
+                            );
+                        }
+                    }
+                    h.send_mouse_move_event(Some(&mouse_event(state.last_pos, 0)), 1);
+                }
+                state.buttons = 0;
+                state.hovered = false;
+            }
+            return;
+        }
         self.handle(state, event, layout.bounds(), cursor, shell);
     }
 
@@ -541,7 +666,7 @@ where
         _viewport: &Rectangle,
         _renderer: &Renderer,
     ) -> mouse::Interaction {
-        if cursor.is_over(layout.bounds()) {
+        if !self.dimmed && cursor.is_over(layout.bounds()) {
             interaction(self.view.cursor.load(Relaxed))
         } else {
             mouse::Interaction::None
@@ -561,6 +686,7 @@ where
         // `Shader::draw` reads `tree.state` as `Program::State` (= our `State`) and calls
         // `renderer.draw_primitive(bounds, program.draw(..))`.
         *self.view.last_bounds.lock().unwrap() = Some(layout.bounds());
+        sync_frozen(&self.view, self.dimmed);
         let shader = Shader::new(&self.program);
         Widget::<Message, Theme, Renderer>::draw(
             &shader, tree, renderer, theme, style, layout, cursor, viewport,
