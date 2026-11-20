@@ -14,5 +14,11 @@ ide-core.workspace = true
 ide-term.workspace = true
 ide-web.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Native folder picker for the new-session dialog.
+rfd = "0.15"
+# In-app screenshots written by the IDE_APP_SCRIPT test mode.
+png = "0.18"

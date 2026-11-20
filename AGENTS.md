@@ -12,6 +12,12 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   in the CEF wrapper build (`cl.exe C1083`).
 - Force DX12 for CEF texture sharing: `WGPU_BACKEND=dx12`.
 - Build/check: `cargo build --release -p ide-app`, `cargo test -p ide-core`, `cargo clippy --workspace`.
+- Run: `WGPU_BACKEND=dx12 <target>/release/ide.exe` (`IDE_DATA_DIR` overrides the data dir).
+- App end-to-end test (in-app, no OS input): `IDE_APP_SCRIPT=1 IDE_DATA_DIR=<scratch>
+  IDE_APP_TEST_REPO=<scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
+  Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture);
+  results in `<evidence>/script.log`. iced's `window::screenshot` (this iced rev) leaves
+  `text_input` values blank; capture the real window to check those.
 
 ## Conventions
 - `ide-core` stays UI-free and unit-tested; put logic there, not in widgets.
