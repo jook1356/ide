@@ -1,19 +1,20 @@
-//! UI language glue: translated labels for core types and `ide_core` errors.
+//! UI language glue: translated labels for protocol types and server errors.
 //!
 //! Every user-visible string goes through `ide_i18n::tr` (see AGENTS.md); this module maps the
-//! language-agnostic core values (agent kinds, run states, [`ide_core::ErrorMessage`]) to it.
+//! language-agnostic wire values (agent kinds, run states, [`ProtoError`] ids + args) to it.
+//! The server never sends localized text.
 
-use ide_core::{AgentKind, ErrorMessage, IoAction, NameRule};
+use ide_client::{Agent, ProtoError};
 pub use ide_i18n::tr;
 
 use crate::app::RunState;
 
 /// Display name of an agent kind.
-pub fn agent_label(agent: AgentKind) -> String {
+pub fn agent_label(agent: Agent) -> String {
     match agent {
-        AgentKind::Claude => tr::agent_claude(),
-        AgentKind::Codex => tr::agent_codex(),
-        AgentKind::Shell => tr::agent_shell(),
+        Agent::Claude => tr::agent_claude(),
+        Agent::Codex => tr::agent_codex(),
+        Agent::Shell => tr::agent_shell(),
     }
 }
 
@@ -29,54 +30,76 @@ pub fn status_label(state: RunState) -> String {
     }
 }
 
-fn io_action(a: IoAction) -> String {
-    match a {
-        IoAction::Reading => tr::io_reading(),
-        IoAction::Writing => tr::io_writing(),
-        IoAction::Replacing => tr::io_replacing(),
-        IoAction::CreatingDirectory => tr::io_creating_directory(),
-        IoAction::Renaming => tr::io_renaming(),
-        IoAction::Removing => tr::io_removing(),
+/// `ide_core::IoAction::id()` values.
+fn io_action(id: &str) -> String {
+    match id {
+        "reading" => tr::io_reading(),
+        "writing" => tr::io_writing(),
+        "replacing" => tr::io_replacing(),
+        "creating-directory" => tr::io_creating_directory(),
+        "renaming" => tr::io_renaming(),
+        "removing" => tr::io_removing(),
+        other => other.to_owned(),
     }
 }
 
-fn name_rule(r: NameRule) -> String {
-    match r {
-        NameRule::Empty => tr::name_rule_empty(),
-        NameRule::TooLong => tr::name_rule_too_long(),
-        NameRule::InvalidChars => tr::name_rule_invalid_chars(),
-        NameRule::BadStart => tr::name_rule_bad_start(),
+/// `ide_core::NameRule::id()` values.
+fn name_rule(id: &str) -> String {
+    match id {
+        "empty" => tr::name_rule_empty(),
+        "too-long" => tr::name_rule_too_long(),
+        "invalid-chars" => tr::name_rule_invalid_chars(),
+        "bad-start" => tr::name_rule_bad_start(),
+        other => other.to_owned(),
     }
 }
 
-/// An `ide_core` error in the current UI language.
-pub fn error(e: &ide_core::Error) -> String {
-    let p = |p: &std::path::Path| p.display().to_string();
-    match e.i18n() {
-        ErrorMessage::Io {
-            action,
-            path,
-            detail,
-        } => tr::err_io(&io_action(action), &p(path), &detail),
-        ErrorMessage::Json { path, detail } => tr::err_json(&p(path), &detail),
-        ErrorMessage::NoDataDir => tr::err_no_data_dir(),
-        ErrorMessage::InvalidName { name, reason } => {
-            tr::err_invalid_name(name, &name_rule(reason))
+/// A server/connection error in the current UI language. Every id the server, `ide-core` and
+/// the client produce has a message; an unknown id (newer server) gets a generic message that
+/// shows the id and its arguments.
+pub fn proto_error(e: &ProtoError) -> String {
+    let a = |name: &str| e.get(name).unwrap_or("").to_owned();
+    match e.id.as_str() {
+        // ide-core (ide_core::ErrorMessage ids)
+        "io" => tr::err_io(&io_action(&a("action")), &a("path"), &a("detail")),
+        "json" => tr::err_json(&a("path"), &a("detail")),
+        "no-data-dir" => tr::err_no_data_dir(),
+        "invalid-name" => tr::err_invalid_name(&a("name"), &name_rule(&a("reason"))),
+        "profile-exists" => tr::err_profile_exists(&a("name")),
+        "profile-not-found" => tr::err_profile_not_found(&a("name")),
+        "last-profile" => tr::err_last_profile(&a("name")),
+        "session-not-found" => tr::err_session_not_found(&a("id")),
+        "invalid-session-id" => tr::err_invalid_session_id(&a("id")),
+        "not-a-git-repo" => tr::err_not_a_git_repo(&a("path"), &a("detail")),
+        "git-spawn" => tr::err_git_spawn(&a("detail")),
+        "git" => tr::err_git(&a("args"), &a("status"), &a("detail")),
+        "worktree-exists" => tr::err_worktree_exists(&a("path")),
+        "program-not-found" => tr::err_program_not_found(&a("program")),
+        // protocol / server
+        "bad-message" => tr::err_bad_message(&a("detail")),
+        "bad-request" => tr::err_bad_request(&a("method")),
+        "proto-version" => tr::err_proto_version(&a("server"), &a("client")),
+        "not-handshaken" => tr::err_not_handshaken(),
+        "unauthorized" => tr::err_unauthorized(),
+        "session-running" => tr::err_session_running(&a("id")),
+        "session-not-running" => tr::err_session_not_running(&a("id")),
+        "spawn-failed" => tr::err_spawn_failed(&a("program"), &a("detail")),
+        "internal" => tr::err_internal(&a("detail")),
+        "message-too-large" => tr::err_message_too_large(),
+        "path-denied" => tr::err_path_denied(&a("path")),
+        // client side
+        "disconnected" => tr::err_disconnected(),
+        "timeout" => tr::err_timeout(),
+        "connect-failed" => tr::err_connect_failed(&a("detail")),
+        other => {
+            let details = e
+                .args
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tr::err_unknown(other, &details)
         }
-        ErrorMessage::ProfileExists { name } => tr::err_profile_exists(name),
-        ErrorMessage::ProfileNotFound { name } => tr::err_profile_not_found(name),
-        ErrorMessage::LastProfile { name } => tr::err_last_profile(name),
-        ErrorMessage::SessionNotFound { id } => tr::err_session_not_found(id),
-        ErrorMessage::InvalidSessionId { id } => tr::err_invalid_session_id(id),
-        ErrorMessage::NotAGitRepo { path, detail } => tr::err_not_a_git_repo(&p(path), detail),
-        ErrorMessage::GitSpawn { detail } => tr::err_git_spawn(&detail),
-        ErrorMessage::Git {
-            args,
-            status,
-            detail,
-        } => tr::err_git(args, status, detail),
-        ErrorMessage::WorktreeExists { path } => tr::err_worktree_exists(&p(path)),
-        ErrorMessage::ProgramNotFound { program } => tr::err_program_not_found(program),
     }
 }
 
@@ -91,28 +114,47 @@ mod tests {
     use ide_i18n::{Lang, set_language};
 
     #[test]
-    fn core_errors_follow_the_language() {
-        let e = ide_core::Error::NotAGitRepo {
-            path: "C:/x".into(),
-            stderr: "fatal: not a git repository".into(),
-        };
-        let invalid = ide_core::validate_slug("Bad Name").unwrap_err();
+    fn server_errors_follow_the_language() {
+        let e = ProtoError::new("not-a-git-repo")
+            .arg("path", "C:/x")
+            .arg("detail", "fatal: not a git repository");
+        let invalid = ProtoError::new("invalid-name")
+            .arg("name", "Bad Name")
+            .arg("reason", "invalid-chars");
+        let io = ProtoError::new("io")
+            .arg("action", "creating-directory")
+            .arg("path", "C:/d")
+            .arg("detail", "denied");
+        let unknown = ProtoError::new("quota-exceeded").arg("limit", "3");
         // One test changes the global language, so both languages are checked here.
         set_language(Lang::Ko);
         assert_eq!(
-            error(&e),
+            proto_error(&e),
             "git 저장소가 아니에요: C:/x (fatal: not a git repository)"
         );
-        assert!(
-            error(&invalid).contains("영문 소문자"),
-            "{}",
-            error(&invalid)
+        assert!(proto_error(&invalid).contains("영문 소문자"));
+        assert!(proto_error(&io).contains("폴더 만들기"));
+        assert_eq!(
+            proto_error(&unknown),
+            "서버 오류가 발생했어요 (quota-exceeded): limit=3"
         );
         assert_eq!(status_label(RunState::Exited(Some(3))), "종료됨 (3)");
-        assert_eq!(agent_label(AgentKind::Shell), "셸");
+        assert_eq!(agent_label(Agent::Shell), "셸");
         set_language(Lang::En);
-        assert!(error(&e).contains("is not a git repository"));
+        assert!(proto_error(&e).contains("is not a git repository"));
+        assert_eq!(
+            proto_error(&ProtoError::new("disconnected")),
+            "Not connected to the server."
+        );
+        assert_eq!(
+            proto_error(&ProtoError::new("session-running").arg("id", "s1")),
+            "Session s1 is already running."
+        );
+        assert_eq!(
+            proto_error(&unknown),
+            "Server error quota-exceeded: limit=3"
+        );
         assert_eq!(status_label(RunState::Running), "running");
-        assert_eq!(agent_label(AgentKind::Claude), "Claude");
+        assert_eq!(agent_label(Agent::Claude), "Claude");
     }
 }

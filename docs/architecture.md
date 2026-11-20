@@ -9,11 +9,12 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 ## Crates
 | Crate | Role | Depends on UI? |
 |---|---|---|
-| `ide-core` | Profiles, sessions, git worktrees, agent launch specs, persistence. Pure logic, unit-tested. | no |
+| `ide-core` | Profiles, sessions, git worktrees, agent launch specs, persistence. Pure logic, unit-tested. Used by the server only. | no |
+| `ide-proto` / `ide-server` / `ide-client` | Client/server split (see `docs/server-architecture.md`): wire protocol, the per-user daemon owning PTYs/sessions/git, the client library. | no (client: optional iced adapter) |
 | `ide-i18n` | UI translations: Fluent files embedded at build time, generated type-safe `tr::` API, current language. | no |
-| `ide-term` | PTY + `alacritty_terminal` state (`TermSession`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. | iced |
+| `ide-term` | Client-side terminal model fed by server bytes (`TermModel`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. No PTY. | iced |
 | `ide-web` | CEF runtime init/subprocess handling and an iced widget showing one browser off-screen (GPU texture import, input forwarding, IME). | iced |
-| `ide-app` | The binary: window layout, sidebar, session lifecycle, wiring core + term + web. | iced |
+| `ide-app` | The binary (client only): window layout, sidebar, connection status, `ide-client` calls, one `TermModel` per session, web tabs, `ui.json`. | iced |
 
 ## Core concepts
 - **Profile**: a named set of agent config. Holds its own Claude config dir and Codex home so skills
@@ -43,8 +44,8 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   (`"language": "system" | "en" | "ko"`, missing = system); `System` negotiates the OS UI locales
   (`sys-locale`) against the available languages, falling back to English.
 - `ide-core` stays language-agnostic: `Error::i18n()` returns an `ErrorMessage` (stable id + args,
-  untranslatable details such as git's stderr passed through); `ide-app/src/i18n.rs` maps it to
-  `tr::err_*`. `Display` stays English for logs. Errors are translated when they happen, so an error
+  untranslatable details such as git's stderr passed through); the server sends it as a
+  `ProtoError` and `ide-app/src/i18n.rs::proto_error` maps every id to `tr::err_*`. `Display` stays English for logs. Errors are translated when they happen, so an error
   already on screen keeps its language after a switch.
 - Korean UI text renders through iced's `Shaping::Auto` (advanced shaping for non-ASCII text) and
   cosmic-text's system fallback (Malgun Gothic on Windows); terminal output is never translated.
@@ -55,7 +56,8 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 2. New-session flow: pick repo folder, profile, agent kind -> create worktree -> spawn the agent in a PTY.
 3. Terminal widget ported from the spike: colours, wide chars, box/block drawn as quads, selection +
    Ctrl+C / Ctrl+V (bracketed paste), wheel scrollback, resize, Korean IME preedit at the cursor.
-4. Session switching keeps every PTY alive (background sessions keep running).
+4. Session switching keeps every PTY alive (background sessions keep running, in the server; they
+   also survive closing the app and are replayed on reopen).
 5. Detail area: one CEF tab per session showing a URL (preview placeholder).
 6. Persistence: profiles and session list (not scrollback) survive restart; worktrees are reused.
 

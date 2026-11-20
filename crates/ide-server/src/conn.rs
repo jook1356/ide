@@ -152,6 +152,17 @@ where
                 let r = attach(&conn, &session, from_offset);
                 conn.reply(id, r.map(Response::Attached));
             }
+            Request::ServerShutdown => {
+                let (conn, server) = (conn.clone(), server.clone());
+                tokio::spawn(async move {
+                    conn.ctx.audit_action("server.shutdown", "");
+                    let s = server.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.stop_all()).await;
+                    conn.reply(id, Ok(Response::Unit));
+                    tracing::info!("shutdown requested by a client");
+                    server.request_shutdown();
+                });
+            }
             Request::TermDetach { session } => {
                 if let Some(h) = conn.attachments.lock().unwrap().remove(&session) {
                     h.abort();

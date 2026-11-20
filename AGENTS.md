@@ -11,17 +11,33 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - Keep `CARGO_TARGET_DIR` short (e.g. `C:/t/ide`); deep target paths overflow the Windows path limit
   in the CEF wrapper build (`cl.exe C1083`).
 - Force DX12 for CEF texture sharing: `WGPU_BACKEND=dx12`.
-- Build/check: `cargo build --release -p ide-app`, `cargo test -p ide-core`, `cargo clippy --workspace`.
-- Run: `WGPU_BACKEND=dx12 <target>/release/ide.exe` (`IDE_DATA_DIR` overrides the data dir).
+- Build: **always build the app and the server together** (`ide.exe` starts `ide-server.exe` from
+  its own folder): `cargo build --release -p ide-app -p ide-server` (alias `cargo app`; debug:
+  `cargo app-debug`). `IDE_SERVER_BIN` points the app at another server binary.
+- Check: `cargo clippy --workspace --all-targets`, `cargo test --workspace` with
+  `IDE_TEST_TMP=<dir inside the workspace>` (server e2e tests spawn real `ide-server` daemons there).
+- Run: `WGPU_BACKEND=dx12 <target>/release/ide.exe`. `IDE_DATA_DIR` overrides the data dir of the app
+  *and* the server (each data dir gets its own daemon, pipe `\\.\pipe\ide-server-<user>-<hash>`).
+  The app attaches to a running daemon or starts one (detached, no console window); closing the
+  window keeps sessions running unless the user chooses otherwise (close dialog / Settings). The
+  daemon exits after 10 min without clients and running sessions (`IDE_SERVER_IDLE_EXIT_SECS`, 0 =
+  never). Settings -> Server selects local or SSH; `IDE_REMOTE=ssh:<host>` overrides it.
+- Test daemons: kill only your own, by PID (`<data>/ide-server.pid`), or end a script run with the
+  app's stop-server action; never `taskkill /IM ide-server.exe` (it hits other data dirs' daemons).
 - App end-to-end test (in-app, no OS input): `IDE_APP_SCRIPT=1 IDE_DATA_DIR=<scratch>
   IDE_APP_TEST_REPO=<scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
   Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture);
   results in `<evidence>/script.log` (`IDE_APP_SCRIPT_PAUSE_MS` lengthens the pauses). The script
-  runs in English and has one Korean pass (`ko_*` screenshots). iced's `window::screenshot` (this iced rev) leaves
-  `text_input` values blank; capture the real window to check those.
+  runs against a real local daemon (started from the data dir, stopped at the end through the close
+  dialog), in English with one Korean pass (`ko_*` screenshots). iced's `window::screenshot` (this
+  iced rev) leaves `text_input` values blank; capture the real window to check those. Do not block
+  the UI thread in script steps (slow `tasklist` calls once ended in a wgpu `Surface::configure`
+  panic): run external probes on a helper thread.
 
 ## Conventions
-- `ide-core` stays UI-free and unit-tested; put logic there, not in widgets.
+- `ide-core` stays UI-free and unit-tested; put logic there, not in widgets. Only `ide-server` uses
+  it: the app (`ide-app`) is a client and never spawns agents, runs git or touches project files;
+  everything goes through `ide_client::Client`.
 - Never enable the `cef` crate's default `sandbox` feature.
 - No `unsafe` outside `ide-web`'s texture import and FFI glue; comment every `unsafe` block.
 - Tests and test scripts must inject input inside the app (iced events, writing to the PTY). Never
@@ -45,8 +61,10 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - Korean: short nouns for buttons/labels (`새 세션`, `취소`, `저장`), polite 해요체 for messages
   (`세션이 아직 없어요.`). Never put a particle right after a variable (`{ $name }을(를)`): rephrase
   (`“{ $name }” 프로필을 ...`) so the particle follows a fixed word.
-- `ide-core` errors: add the variant to `ErrorMessage` in `ide-core/src/error.rs`, an `err-*` message
-  to every locale, and the mapping in `ide-app/src/i18n.rs` (the match is exhaustive).
+- Server/core errors reach the app as `ProtoError` (stable id + named args). A new id needs an
+  `err-*` message in every locale and an arm in `ide-app/src/i18n.rs::proto_error` (unknown ids
+  fall back to `err-unknown` with the id and args); for `ide-core` errors also add the variant to
+  `ErrorMessage` and its args in `ide-server/src/service.rs::core_error`.
 - Add a language: create `crates/ide-i18n/locales/<code>/ide.ftl` (copy `en`, translate every message,
   set `language-name` to the language's own name). `Lang`, the settings picker and OS-locale
   negotiation pick it up automatically.

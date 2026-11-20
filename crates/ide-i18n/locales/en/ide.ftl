@@ -99,18 +99,54 @@ save = Save
 add = Add
 close = Close
 
+## Connection and server (sidebar footer, settings)
+
+conn-connecting = Connecting to the server…
+conn-connected = Connected · server { $version }
+conn-reconnecting = Connection lost. Reconnecting…
+conn-disconnected = Disconnected: { $detail }
+conn-retry = Reconnect
+conn-server-stopped = The server was stopped. Sessions are not running.
+conn-closed = Connection closed.
+conn-read-only = Not connected: the terminal is read-only.
+conn-local = Local
+server-label = SERVER
+server-note = Sessions keep running in the background server when this window closes.
+stop-server = Stop server…
+stop-server-confirm = Stop server
+stop-server-title = Stop the server?
+stop-server-body = Every session (agents and shells) is stopped and the background server exits. Worktrees stay on disk.
+stopping = Stopping…
+
+conn-target = Server: { $target }
+server-ssh = SSH
+ssh-host-placeholder = user@host
+ssh-command-placeholder = Server command (default: ide-server --stdio)
+server-apply = Apply
+server-env-override = IDE_REMOTE={ $value } overrides this setting.
+err-ssh-host = Enter an SSH host such as user@host.
+switch-server-title = Switch server?
+switch-server-body = The app reconnects to { $target }. Sessions on the current server keep running there.
+switch-server = Switch
+on-close-label = WHEN THE WINDOW CLOSES
+on-close-ask = Ask
+on-close-keep = Keep agents running
+on-close-stop = Stop agents and server
+close-title = Agents are still running
+close-body = { $count ->
+    [one] 1 session is
+   *[other] { $count } sessions are
+} running on the local server.
+close-keep = Keep agents running in the background
+close-stop = Stop all agents and the server
+close-remember = Don't ask again (change it in Settings)
+
 ## Errors shown by the app
 
-err-sessions-unreadable = sessions.json could not be read: { $detail }
-err-start-process = Could not start the process: { $detail }
-err-worktree-missing = Worktree { $path } is missing; delete this session and create a new one.
-err-profile-gone = Profile “{ $name }” no longer exists.
 err-web-view = Web view: { $detail }
 err-rename-failed = Rename failed: { $detail }
-err-delete-cancelled = Delete was cancelled.
 err-choose-repo = Choose a repository folder.
-err-create-cancelled = Session creation was cancelled.
-err-session-save = Saving the session failed: { $detail }
+err-server-missing = The server program was not found: { $detail }
 err-profile-in-use = { $count ->
     [one] 1 session uses
    *[other] { $count } sessions use
@@ -119,6 +155,24 @@ err-profile-running = { $count ->
     [one] 1 session of profile “{ $name }” is running
    *[other] { $count } sessions of profile “{ $name }” are running
 }; stop them before renaming.
+
+## Errors from the server and the connection (ide_proto::ProtoError ids)
+
+err-bad-message = The server sent an invalid message: { $detail }
+err-bad-request = The server does not support this request: { $method }
+err-proto-version = Incompatible server (protocol { $server }; this app speaks { $client }).
+err-not-handshaken = The connection was not set up correctly.
+err-unauthorized = The server refused access.
+err-session-running = Session { $id } is already running.
+err-session-not-running = Session { $id } is not running.
+err-spawn-failed = Could not start “{ $program }”: { $detail }
+err-internal = Internal server error: { $detail }
+err-message-too-large = The request is too large.
+err-path-denied = Access to { $path } is not allowed.
+err-disconnected = Not connected to the server.
+err-timeout = The server did not answer in time.
+err-connect-failed = Could not reach the server: { $detail }
+err-unknown = Server error { $id }: { $details }
 
 ## Errors from ide-core (ide_core::ErrorMessage)
 

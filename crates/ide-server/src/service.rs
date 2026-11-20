@@ -67,6 +67,7 @@ pub struct Server {
     users: Mutex<HashMap<String, Arc<UserCtx>>>,
     tokens: Mutex<HashSet<String>>,
     connections: AtomicUsize,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Server {
@@ -78,6 +79,7 @@ impl Server {
             users: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashSet::new()),
             connections: AtomicUsize::new(0),
+            shutdown: tokio::sync::watch::channel(false).0,
         })
     }
 
@@ -157,6 +159,26 @@ impl Server {
             .values()
             .map(|u| u.running_sessions())
             .sum()
+    }
+
+    /// Ask the process serving this server to exit (`server.shutdown`).
+    pub fn request_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    /// Resolves once [`Server::request_shutdown`] was called.
+    pub async fn shutdown_requested(&self) {
+        let mut rx = self.shutdown.subscribe();
+        let _ = rx.wait_for(|s| *s).await;
+    }
+
+    /// Stop every running session (graceful, like `session.stop`). Blocking: call from a
+    /// blocking thread inside the runtime.
+    pub fn stop_all(&self) {
+        let users: Vec<Arc<UserCtx>> = self.users.lock().unwrap().values().cloned().collect();
+        for u in users {
+            u.stop_all();
+        }
     }
 
     /// Kill every session process (server exit).
@@ -242,6 +264,11 @@ impl UserCtx {
         self.audit.record(&self.user, action, target);
     }
 
+    /// Record an action of this user in the audit log.
+    pub fn audit_action(&self, action: &str, target: &str) {
+        self.audit(action, target);
+    }
+
     fn running_sessions(&self) -> usize {
         self.hosts
             .lock()
@@ -249,6 +276,25 @@ impl UserCtx {
             .values()
             .filter(|h| h.is_running())
             .count()
+    }
+
+    fn stop_all(&self) {
+        let hosts: Vec<(String, Arc<TermHost>)> = self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (id, h) in hosts {
+            if h.is_running() {
+                self.audit("session.stop", &id);
+                let stopped = tokio::runtime::Handle::current().block_on(h.stop(STOP_TIMEOUT));
+                if !stopped {
+                    tracing::warn!("session {id} did not stop within {STOP_TIMEOUT:?}");
+                }
+            }
+        }
     }
 
     /// Resolve a session id of this user.

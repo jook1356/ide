@@ -1,9 +1,14 @@
 //! `ide-server --stdio` | `--stdio --no-daemon` | `--daemon [--idle-exit SECS]` | `--version`.
+//! The daemon exits after `--idle-exit` / `IDE_SERVER_IDLE_EXIT_SECS` seconds (default 600,
+//! 0 = never) without clients and running sessions.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use ide_server::{Server, ServerConfig, daemon, socket_name};
+
+/// Default `--idle-exit` of the daemon.
+const DEFAULT_IDLE_EXIT_SECS: u64 = 600;
 
 const USAGE: &str =
     "usage: ide-server --stdio [--no-daemon] | --daemon [--idle-exit SECS] | --version";
@@ -15,6 +20,7 @@ fn main() {
         println!("ide-server {}", ide_proto::VERSION);
         return;
     }
+    // Daemon idle exit (no clients, no running sessions): default 10 minutes; 0 = never.
     let idle_exit = args
         .iter()
         .position(|a| a == "--idle-exit")
@@ -25,8 +31,8 @@ fn main() {
                 .ok()
                 .and_then(|s| s.parse().ok())
         })
-        .filter(|s| *s > 0)
-        .map(Duration::from_secs);
+        .unwrap_or(DEFAULT_IDLE_EXIT_SECS);
+    let idle_exit = (idle_exit > 0).then(|| Duration::from_secs(idle_exit));
     let mode = if has("--daemon") {
         Mode::Daemon
     } else if has("--stdio") && has("--no-daemon") {
@@ -77,7 +83,12 @@ fn main() {
                 let server: Arc<Server> = Server::new(config);
                 let io = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
                 let user = server.user().clone();
-                server.serve(io, user).await;
+                tokio::select! {
+                    _ = server.serve(io, user) => {}
+                    _ = server.shutdown_requested() => {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                }
                 server.kill_all();
                 0
             }

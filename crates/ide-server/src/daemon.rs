@@ -49,6 +49,12 @@ pub async fn run_daemon(
                     break;
                 }
             }
+            _ = server.shutdown_requested() => {
+                tracing::info!("shutdown requested; exiting");
+                // Let the reply reach the client before the process exits.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                break;
+            }
         }
     }
     let _ = std::fs::remove_file(&pid);

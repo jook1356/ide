@@ -202,6 +202,8 @@ pub enum Request {
         cols: u16,
         rows: u16,
     },
+    /// Stop every session and exit the server process (daemon or `--no-daemon`).
+    ServerShutdown,
 }
 
 impl Request {
@@ -225,6 +227,7 @@ impl Request {
             Request::TermDetach { .. } => "term.detach",
             Request::TermWrite { .. } => "term.write",
             Request::TermResize { .. } => "term.resize",
+            Request::ServerShutdown => "server.shutdown",
         }
     }
 }

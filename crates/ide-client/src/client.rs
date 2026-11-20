@@ -456,6 +456,13 @@ impl Client {
         )
     }
 
+    /// `server.shutdown`: the server stops every session and exits. The reply arrives before
+    /// the process exits; afterwards the connection drops (and a local transport would start
+    /// a new daemon on the next reconnect, so drop the client first if that is not wanted).
+    pub async fn shutdown_server(&self) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::ServerShutdown).await)
+    }
+
     /// Terminal resize (the most recent caller sets the PTY size).
     pub async fn resize(&self, session: &str, cols: u16, rows: u16) -> Result<(), ProtoError> {
         expect_unit(

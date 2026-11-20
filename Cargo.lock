@@ -1674,15 +1674,18 @@ name = "ide-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
  "iced",
- "ide-core",
+ "ide-client",
  "ide-i18n",
+ "ide-proto",
  "ide-term",
  "ide-web",
  "png",
  "rfd",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

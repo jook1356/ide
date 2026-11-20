@@ -1,5 +1,6 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
-//! detail collapsed, active profile, per-session web URL, last repo folder, UI language.
+//! detail collapsed, active profile, per-session web URL, last repo folder, UI language,
+//! which server to use (local / SSH) and what closing the window does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,45 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_SPLIT: f32 = 0.6;
 /// Limits of the centre share while dragging the divider.
 pub const SPLIT_RANGE: (f32, f32) = (0.2, 0.85);
+
+/// What closing the window does with a local server's running sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseAction {
+    /// Ask when sessions are running (default).
+    #[default]
+    Ask,
+    /// Exit the app; the daemon keeps the sessions running.
+    Keep,
+    /// Stop every session and the daemon, then exit.
+    Stop,
+}
+
+/// Which server the app connects to.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ServerPref {
+    /// `ide-server --stdio` next to `ide.exe` (attaches to or starts the local daemon).
+    #[default]
+    Local,
+    /// `ssh <host> <command>` (command empty = `ide-server --stdio`).
+    Ssh {
+        host: String,
+        #[serde(default)]
+        command: String,
+    },
+}
+
+/// Deserialize a field, falling back to its default when the value is invalid (so one bad
+/// field does not reset the whole file).
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +69,12 @@ pub struct UiState {
     pub last_repo: Option<String>,
     /// UI language (`"system"` or a language code); missing in older files = system.
     pub language: LanguagePref,
+    /// Closing the window: ask / keep sessions running / stop them and the server.
+    #[serde(deserialize_with = "lenient")]
+    pub on_close: CloseAction,
+    /// Server to connect to (`IDE_REMOTE` overrides it).
+    #[serde(deserialize_with = "lenient")]
+    pub server: ServerPref,
 }
 
 impl Default for UiState {
@@ -41,6 +87,8 @@ impl Default for UiState {
             web_urls: BTreeMap::new(),
             last_repo: None,
             language: LanguagePref::System,
+            on_close: CloseAction::Ask,
+            server: ServerPref::Local,
         }
     }
 }
@@ -102,6 +150,11 @@ mod tests {
             split_ratio: 0.42,
             detail_collapsed: true,
             language: LanguagePref::Fixed(ide_i18n::Lang::Ko),
+            on_close: CloseAction::Keep,
+            server: ServerPref::Ssh {
+                host: "me@devbox".into(),
+                command: "/opt/ide/ide-server --stdio".into(),
+            },
             ..Default::default()
         };
         s.web_urls.insert("abc".into(), "about:blank".into());
@@ -125,6 +178,32 @@ mod tests {
         assert_eq!(
             UiState::load(&base).language,
             LanguagePref::Fixed(ide_i18n::Lang::En)
+        );
+
+        // Invalid values of the new fields fall back to their defaults only.
+        std::fs::write(
+            UiState::file(&base),
+            r#"{"on_close": "explode", "server": {"kind": "ftp"}, "split_ratio": 0.5}"#,
+        )
+        .unwrap();
+        let l = UiState::load(&base);
+        assert_eq!(
+            (l.on_close, l.server, l.split_ratio),
+            (CloseAction::Ask, ServerPref::Local, 0.5)
+        );
+        std::fs::write(
+            UiState::file(&base),
+            r#"{"on_close": "stop", "server": {"kind": "ssh", "host": "h"}}"#,
+        )
+        .unwrap();
+        let l = UiState::load(&base);
+        assert_eq!(l.on_close, CloseAction::Stop);
+        assert_eq!(
+            l.server,
+            ServerPref::Ssh {
+                host: "h".into(),
+                command: String::new()
+            }
         );
 
         std::fs::write(UiState::file(&base), "not json").unwrap();

@@ -400,8 +400,32 @@ async fn local_child_daemon_end_to_end() {
     let welcome = sc.c1.welcome().unwrap();
     assert_eq!(welcome.user, ide_server::current_user());
     delete_and_check(&sc.c1, &sc.session).await;
+    // `server.shutdown` stops the daemon (and its sessions); the pid file goes away.
+    let extra = sc
+        .c1
+        .create_session(NewSession {
+            profile: "default".into(),
+            repo_path: repo.display().to_string(),
+            agent: Agent::Shell,
+            title: "shutdown".into(),
+            base_ref: String::new(),
+            start: true,
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .unwrap();
+    assert_eq!(extra.state, SessionState::Running);
+    sc.c1.shutdown_server().await.unwrap();
     drop(sc);
-    kill_pid(pid);
+    let gone = wait_until(Duration::from_secs(10), || {
+        !data.join("ide-server.pid").exists()
+    })
+    .await;
+    if !gone {
+        kill_pid(pid);
+    }
+    assert!(gone, "daemon exited after server.shutdown");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

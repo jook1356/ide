@@ -5,17 +5,18 @@ use iced::widget::{
     scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
-use ide_core::{AgentKind, Session, same_path};
+use ide_client::Agent;
 use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 use ide_web::WebViewWidget;
 
 use crate::app::{
-    App, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, PROFILE_NAME_ID, RENAME_ID, RunState,
-    SIDEBAR_W, TERM_ID, URL_ID,
+    AGENTS, App, Conn, DIVIDER_W, Live, Message, Modal, NEW_REPO_ID, PROFILE_NAME_ID, RENAME_ID,
+    RunState, SIDEBAR_W, SSH_HOST_ID, TERM_ID, URL_ID, path_name, same_path,
 };
 use crate::i18n::{self, tr};
 use crate::style;
+use crate::ui_state::{CloseAction, ServerPref};
 
 type El<'a> = Element<'a, Message>;
 
@@ -36,11 +37,11 @@ const I_EXPAND: &str = "«";
 const I_DOT: &str = "●";
 const I_RING: &str = "○";
 
-pub fn agent_glyph(agent: AgentKind) -> (&'static str, Color) {
+pub fn agent_glyph(agent: Agent) -> (&'static str, Color) {
     match agent {
-        AgentKind::Claude => ("✻", style::CLAUDE),
-        AgentKind::Codex => ("◆", style::CODEX),
-        AgentKind::Shell => ("❯", style::DIM),
+        Agent::Claude => ("✻", style::CLAUDE),
+        Agent::Codex => ("◆", style::CODEX),
+        Agent::Shell => ("❯", style::DIM),
     }
 }
 
@@ -82,6 +83,14 @@ fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
 }
 
+fn error_box<'a>(e: &'a str) -> El<'a> {
+    container(text(e).size(12))
+        .padding(8)
+        .width(Fill)
+        .style(style::error_box)
+        .boxed()
+}
+
 impl App {
     pub fn view(&self) -> El<'_> {
         let base = row![
@@ -95,7 +104,7 @@ impl App {
             self.detail(),
         ]
         .height(Fill);
-        // Always a stack so opening/closing a modal keeps the widget tree (terminal, web view).
+        // Always a stack so opening/closing a modal keeps the widget tree (terminal).
         let overlay: El<'_> = match &self.modal {
             Some(m) => self.modal_view(m),
             None => space().boxed(),
@@ -108,15 +117,15 @@ impl App {
         }
     }
 
+    /// `msg` if connected (server actions are disabled while disconnected).
+    fn when_connected(&self, msg: Message) -> Option<Message> {
+        self.connected().then_some(msg)
+    }
+
     // ------------------------------------------------------------------ sidebar
 
     fn sidebar(&self) -> El<'_> {
-        let names: Vec<String> = self
-            .profiles
-            .list()
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
+        let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
         let header = row![
             text("ide").size(15).font(style::BOLD),
             space().width(Fill),
@@ -136,35 +145,34 @@ impl App {
         let sessions_header = row![
             label(tr::sessions_label()),
             space().width(Fill),
-            icon_button(I_PLUS, Some(Message::OpenNew), tr::new_session()),
+            icon_button(
+                I_PLUS,
+                self.when_connected(Message::OpenNew),
+                tr::new_session()
+            ),
         ]
         .align_y(Alignment::Center);
 
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         let profile_name = self.current_profile();
-        let mine: Vec<&Session> = self
-            .store
-            .list()
+        let mine: Vec<&Live> = self
+            .sessions
             .iter()
-            .filter(|s| s.profile == profile_name)
+            .filter(|l| l.info.profile == profile_name)
             .collect();
         // Group by repository, in order of first appearance.
-        let mut groups: Vec<(&Session, Vec<&Session>)> = Vec::new();
-        for s in &mine {
+        let mut groups: Vec<(&Live, Vec<&Live>)> = Vec::new();
+        for l in &mine {
             match groups
                 .iter_mut()
-                .find(|(first, _)| same_path(&first.repo_path, &s.repo_path))
+                .find(|(first, _)| same_path(&first.info.repo_path, &l.info.repo_path))
             {
-                Some((_, v)) => v.push(s),
-                None => groups.push((s, vec![s])),
+                Some((_, v)) => v.push(l),
+                None => groups.push((l, vec![l])),
             }
         }
         for (first, members) in groups {
-            let repo_name = first
-                .repo_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| first.repo_path.display().to_string());
+            let repo_name = path_name(&first.info.repo_path);
             list = list.push(
                 container(
                     text(repo_name.to_uppercase())
@@ -175,13 +183,11 @@ impl App {
                 .padding([6, 4])
                 .boxed(),
             );
-            for s in members {
-                if let Some(live) = self.live(&s.id) {
-                    list = list.push(self.session_row(s, live));
-                }
+            for l in members {
+                list = list.push(self.session_row(l));
             }
         }
-        if mine.is_empty() {
+        if mine.is_empty() && self.loaded {
             list = list.push(
                 container(text(tr::no_sessions()).size(12).color(style::DIM))
                     .padding([8, 4])
@@ -209,6 +215,7 @@ impl App {
                     .boxed(),
             );
         }
+        col = col.push(self.connection_footer());
         container(col)
             .width(SIDEBAR_W)
             .height(Fill)
@@ -216,8 +223,63 @@ impl App {
             .boxed()
     }
 
-    fn session_row<'a>(&'a self, s: &'a Session, live: &'a Live) -> El<'a> {
-        let selected = self.selected.as_ref() == Some(&s.id);
+    /// Connection status: connected (target + server version), reconnecting, disconnected with
+    /// a retry button.
+    fn connection_footer(&self) -> El<'_> {
+        let (dot, color, msg, retry) = match &self.conn {
+            Conn::Connecting => (I_DOT, style::AMBER, tr::conn_connecting(), false),
+            Conn::Connected(w) => (
+                I_DOT,
+                style::GREEN,
+                tr::conn_connected(&w.server_version),
+                false,
+            ),
+            Conn::Reconnecting => (I_DOT, style::AMBER, tr::conn_reconnecting(), true),
+            Conn::Disconnected(why) => (I_DOT, style::RED, tr::conn_disconnected(why), true),
+        };
+        let mut r = row![
+            text(dot).size(10).color(color),
+            column![
+                text(tr::conn_target(&self.server_label()))
+                    .size(11)
+                    .font(style::BOLD)
+                    .color(style::DIM)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+                text(msg)
+                    .size(11)
+                    .color(style::DIM)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            ]
+            .width(Fill),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        if retry && self.target.transport.is_ok() {
+            r = r.push(icon_button(
+                I_RESTART,
+                Some(Message::Retry),
+                tr::conn_retry(),
+            ));
+        }
+        container(r)
+            .padding([6, 8])
+            .width(Fill)
+            .style(style::bg(style::HEADER))
+            .boxed()
+    }
+
+    /// The server the app talks to: "Local" or "ssh <host>".
+    pub fn server_label(&self) -> String {
+        if self.target.local {
+            tr::conn_local()
+        } else {
+            self.target.remote.clone()
+        }
+    }
+
+    fn session_row<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let s = &live.info;
+        let selected = self.selected.as_deref() == Some(s.id.as_str());
         let (glyph, gcolor) = agent_glyph(s.agent);
         let (dot, dcolor) = status_glyph(live.state);
 
@@ -234,8 +296,8 @@ impl App {
                 .boxed();
         }
 
-        let subtitle = if !live.term_title.is_empty() {
-            live.term_title.clone()
+        let subtitle = if !s.term_title.is_empty() {
+            s.term_title.clone()
         } else {
             i18n::status_label(live.state)
         };
@@ -266,27 +328,33 @@ impl App {
         let main = mouse_area(main).on_right_press(Message::StartRename(s.id.clone()));
 
         let run: El<'a> = match live.state {
-            RunState::Starting | RunState::Running => {
-                icon_button(I_STOP, Some(Message::Stop(s.id.clone())), tr::stop())
-            }
-            RunState::Stopped => {
-                icon_button(I_PLAY, Some(Message::Start(s.id.clone())), tr::start())
-            }
-            RunState::Exited(_) | RunState::Failed => {
-                icon_button(I_RESTART, Some(Message::Start(s.id.clone())), tr::restart())
-            }
+            RunState::Starting | RunState::Running => icon_button(
+                I_STOP,
+                self.when_connected(Message::Stop(s.id.clone())),
+                tr::stop(),
+            ),
+            RunState::Stopped => icon_button(
+                I_PLAY,
+                self.when_connected(Message::Start(s.id.clone())),
+                tr::start(),
+            ),
+            RunState::Exited(_) | RunState::Failed => icon_button(
+                I_RESTART,
+                self.when_connected(Message::Start(s.id.clone())),
+                tr::restart(),
+            ),
         };
         row![
             main,
             run,
             icon_button(
                 I_EDIT,
-                Some(Message::StartRename(s.id.clone())),
+                self.when_connected(Message::StartRename(s.id.clone())),
                 tr::rename()
             ),
             icon_button(
                 I_DELETE,
-                Some(Message::AskDelete(s.id.clone())),
+                self.when_connected(Message::AskDelete(s.id.clone())),
                 tr::delete()
             ),
         ]
@@ -304,18 +372,14 @@ impl App {
         } else {
             FillPortion(portion.max(1))
         };
-        let Some((s, live)) = self
-            .selected
-            .as_ref()
-            .and_then(|id| Some((self.session(id)?, self.live(id)?)))
-        else {
+        let Some(live) = self.selected_live() else {
             return container(
                 column![
                     text(tr::no_session_selected()).size(18).color(style::DIM),
                     button(text(tr::new_session()).size(13))
                         .padding([6, 14])
                         .style(style::primary)
-                        .on_press(Message::OpenNew),
+                        .on_press_maybe(self.when_connected(Message::OpenNew)),
                 ]
                 .spacing(12)
                 .align_x(Alignment::Center),
@@ -325,6 +389,7 @@ impl App {
             .style(style::bg(style::BG))
             .boxed();
         };
+        let s = &live.info;
 
         let (glyph, gcolor) = agent_glyph(s.agent);
         let header = container(
@@ -335,7 +400,7 @@ impl App {
                     .size(12)
                     .color(style::DIM)
                     .font(style::MONO),
-                text(s.worktree_path.display().to_string())
+                text(s.worktree_path.as_str())
                     .size(11)
                     .color(style::FAINT)
                     .wrapping(text::Wrapping::None)
@@ -349,71 +414,90 @@ impl App {
         .width(Fill)
         .style(style::bg(style::HEADER));
 
-        let body: El<'_> = match &live.term {
-            Some(term) => {
-                let mut col = Column::new().push(
-                    TerminalView::new(term, &self.term_config)
-                        .id(TERM_ID)
-                        .on_event(Message::TermView)
+        // Show the terminal whenever there is (or was) output: stopped sessions keep their
+        // scrollback on the server.
+        let has_term = live.attached || live.state.is_alive() || s.term_end > 0;
+        let body: El<'_> = if has_term {
+            let id = s.id.clone();
+            let mut view = TerminalView::new(&live.term, &self.term_config)
+                .id(TERM_ID)
+                .on_event(Message::TermView);
+            if self.connected() {
+                let (a, b) = (id.clone(), id.clone());
+                view = view
+                    .on_input(move |bytes| Message::TermInput(a.clone(), bytes))
+                    .on_resize(move |c, r| Message::TermResize(b.clone(), c, r));
+            }
+            let mut col = Column::new();
+            if !self.connected() {
+                col = col.push(
+                    container(text(tr::conn_read_only()).size(12).color(style::AMBER))
+                        .padding([4, 10])
+                        .width(Fill)
+                        .style(style::bg(style::HEADER))
                         .boxed(),
                 );
-                if let RunState::Exited(code) = live.state {
-                    col = col.push(
-                        container(
-                            row![
-                                text(match code {
-                                    Some(c) => tr::process_exited_code(&c.to_string()),
-                                    None => tr::process_exited(),
-                                })
-                                .size(12)
-                                .color(style::DIM),
-                                space().width(Fill),
-                                button(text(format!("{I_RESTART}  {}", tr::restart())).size(12))
-                                    .padding([3, 10])
-                                    .style(style::secondary)
-                                    .on_press(Message::Start(s.id.clone())),
-                            ]
-                            .align_y(Alignment::Center),
-                        )
+            }
+            col = col.push(view.boxed());
+            let exited = match live.state {
+                RunState::Exited(code) => Some(match code {
+                    Some(c) => tr::process_exited_code(&c.to_string()),
+                    None => tr::process_exited(),
+                }),
+                RunState::Stopped => Some(tr::session_stopped()),
+                RunState::Failed => Some(tr::session_start_failed()),
+                _ => None,
+            };
+            if let Some(msg) = exited {
+                let mut bar = column![
+                    row![
+                        text(msg).size(12).color(style::DIM),
+                        space().width(Fill),
+                        button(text(format!("{I_RESTART}  {}", tr::restart())).size(12))
+                            .padding([3, 10])
+                            .style(style::secondary)
+                            .on_press_maybe(self.when_connected(Message::Start(id))),
+                    ]
+                    .align_y(Alignment::Center)
+                ]
+                .spacing(4);
+                if let Some(e) = &live.error {
+                    bar = bar.push(error_box(e));
+                }
+                col = col.push(
+                    container(bar)
                         .padding([4, 10])
                         .style(style::bg(style::HEADER))
                         .boxed(),
-                    );
-                }
-                col.boxed()
+                );
             }
-            None => {
-                let mut c = column![
-                    text(match live.state {
-                        RunState::Failed => tr::session_start_failed(),
-                        _ => tr::session_stopped(),
-                    })
-                    .size(16)
-                    .color(style::DIM),
-                    button(
-                        text(format!(
-                            "{I_PLAY}  {}",
-                            tr::start_agent(&i18n::agent_label(s.agent))
-                        ))
-                        .size(13),
-                    )
-                    .padding([6, 14])
-                    .style(style::primary)
-                    .on_press(Message::Start(s.id.clone())),
-                ]
-                .spacing(12)
-                .align_x(Alignment::Center)
-                .width(520);
-                if let Some(e) = &live.error {
-                    c = c.push(
-                        container(text(e.as_str()).size(12))
-                            .padding(8)
-                            .style(style::error_box)
-                            .boxed(),
-                    );
-                }
-                container(c).center(Fill).boxed()
+            col.boxed()
+        } else {
+            let mut c = column![
+                text(match live.state {
+                    RunState::Failed => tr::session_start_failed(),
+                    _ => tr::session_stopped(),
+                })
+                .size(16)
+                .color(style::DIM),
+                button(
+                    text(format!(
+                        "{I_PLAY}  {}",
+                        tr::start_agent(&i18n::agent_label(s.agent))
+                    ))
+                    .size(13),
+                )
+                .padding([6, 14])
+                .style(style::primary)
+                .on_press_maybe(self.when_connected(Message::Start(s.id.clone()))),
+            ]
+            .spacing(12)
+            .align_x(Alignment::Center)
+            .width(520);
+            if let Some(e) = &live.error {
+                c = c.push(error_box(e));
             }
+            container(c).center(Fill).boxed()
         };
 
         container(column![header, body])
@@ -515,7 +599,17 @@ impl App {
                 .padding([6, 8])
                 .align_y(Alignment::Center);
                 let page: El<'_> = match &live.web {
-                    Some(w) => WebViewWidget::new(w).width(Fill).height(Fill).into(),
+                    // The CEF texture is a GPU primitive that iced draws above the modal
+                    // backdrop on the real window, so it is not drawn while a modal is open:
+                    // the backdrop then covers a plain panel instead (see docs, "modal z-order").
+                    Some(w) if !self.web_covered() => {
+                        WebViewWidget::new(w).width(Fill).height(Fill).into()
+                    }
+                    Some(_) => container(space())
+                        .width(Fill)
+                        .height(Fill)
+                        .style(style::bg(style::PANEL))
+                        .boxed(),
                     None => container(text(live.error.as_deref().unwrap_or("")).size(12))
                         .center(Fill)
                         .boxed(),
@@ -533,18 +627,18 @@ impl App {
             .boxed()
     }
 
+    /// A modal covers the window: the web view is not drawn (see [`App::detail`]).
+    pub fn web_covered(&self) -> bool {
+        self.modal.is_some() && !self.modal_web_unsafe
+    }
+
     // ------------------------------------------------------------------ modals
 
     fn modal_view<'a>(&'a self, modal: &'a Modal) -> El<'a> {
         let card = match modal {
             Modal::NewSession(f) => {
-                let names: Vec<String> = self
-                    .profiles
-                    .list()
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                let agents = AgentKind::ALL.iter().fold(row![].spacing(6), |r, a| {
+                let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+                let agents = AGENTS.iter().fold(row![].spacing(6), |r, a| {
                     let (g, c) = agent_glyph(*a);
                     r.push(
                         button(
@@ -604,13 +698,7 @@ impl App {
                 ]
                 .spacing(8);
                 if let Some(e) = &f.error {
-                    c = c.push(
-                        container(text(e.as_str()).size(12))
-                            .padding(8)
-                            .width(Fill)
-                            .style(style::error_box)
-                            .boxed(),
-                    );
+                    c = c.push(error_box(e));
                 }
                 c = c.push(
                     row![
@@ -622,7 +710,11 @@ impl App {
                         button(text(if f.busy { tr::creating() } else { tr::create() }).size(13))
                             .padding([6, 14])
                             .style(style::primary)
-                            .on_press_maybe((!f.busy).then_some(Message::NewSubmit)),
+                            .on_press_maybe(
+                                (!f.busy)
+                                    .then_some(Message::NewSubmit)
+                                    .filter(|_| self.connected())
+                            ),
                     ]
                     .spacing(8)
                     .boxed(),
@@ -630,7 +722,7 @@ impl App {
                 c.width(520).boxed()
             }
             Modal::Delete(f) => {
-                let s = self.session(&f.id);
+                let s = self.live(&f.id).map(|l| &l.info);
                 let title = s.map(|s| s.title.as_str()).unwrap_or("?");
                 let mut c = column![
                     text(tr::delete_session_title(title))
@@ -646,7 +738,7 @@ impl App {
                 .spacing(10);
                 if let Some(s) = s {
                     c = c.push(
-                        text(format!("{}  ({})", s.worktree_path.display(), s.branch))
+                        text(format!("{}  ({})", s.worktree_path, s.branch))
                             .size(11)
                             .font(style::MONO)
                             .color(style::FAINT)
@@ -654,13 +746,7 @@ impl App {
                     );
                 }
                 if let Some(e) = &f.error {
-                    c = c.push(
-                        container(text(e.as_str()).size(12))
-                            .padding(8)
-                            .width(Fill)
-                            .style(style::error_box)
-                            .boxed(),
-                    );
+                    c = c.push(error_box(e));
                 }
                 c = c.push(
                     row![
@@ -672,16 +758,130 @@ impl App {
                         button(text(if f.busy { tr::deleting() } else { tr::delete() }).size(13))
                             .padding([6, 14])
                             .style(style::danger)
-                            .on_press_maybe((!f.busy).then_some(Message::DeleteConfirm)),
+                            .on_press_maybe(
+                                (!f.busy)
+                                    .then_some(Message::DeleteConfirm)
+                                    .filter(|_| self.connected())
+                            ),
                     ]
                     .spacing(8)
                     .boxed(),
                 );
                 c.width(480).boxed()
             }
+            Modal::StopServer(f) => {
+                let mut c = column![
+                    text(tr::stop_server_title()).size(18).font(style::BOLD),
+                    text(tr::stop_server_body()).size(13).color(style::DIM),
+                ]
+                .spacing(10);
+                if let Some(e) = &f.error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(
+                    row![
+                        space().width(Fill),
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                        button(
+                            text(if f.busy {
+                                tr::stopping()
+                            } else {
+                                tr::stop_server_confirm()
+                            })
+                            .size(13)
+                        )
+                        .padding([6, 14])
+                        .style(style::danger)
+                        .on_press_maybe(
+                            (!f.busy)
+                                .then_some(Message::StopServerConfirm)
+                                .filter(|_| self.connected())
+                        ),
+                    ]
+                    .spacing(8)
+                    .boxed(),
+                );
+                c.width(460).boxed()
+            }
+            Modal::SwitchServer(pref) => {
+                let target = match pref {
+                    ServerPref::Local => tr::conn_local(),
+                    ServerPref::Ssh { host, .. } => format!("ssh {host}"),
+                };
+                column![
+                    text(tr::switch_server_title()).size(18).font(style::BOLD),
+                    text(tr::switch_server_body(&target))
+                        .size(13)
+                        .color(style::DIM),
+                    row![
+                        space().width(Fill),
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press(Message::CloseModal),
+                        button(text(tr::switch_server()).size(13))
+                            .padding([6, 14])
+                            .style(style::primary)
+                            .on_press(Message::SwitchServerConfirm),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10)
+                .width(460)
+                .boxed()
+            }
+            Modal::Close(f) => {
+                let running = self.sessions.iter().filter(|l| l.state.is_alive()).count();
+                let mut c = column![
+                    text(tr::close_title()).size(18).font(style::BOLD),
+                    text(tr::close_body(i18n::count(running)))
+                        .size(13)
+                        .color(style::DIM),
+                    checkbox(f.remember)
+                        .label(tr::close_remember())
+                        .on_toggle_maybe((!f.busy).then_some(Message::CloseRemember))
+                        .size(16)
+                        .text_size(13),
+                ]
+                .spacing(10);
+                if let Some(e) = &f.error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(
+                    row![
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                        space().width(Fill),
+                        button(
+                            text(if f.busy {
+                                tr::stopping()
+                            } else {
+                                tr::close_stop()
+                            })
+                            .size(13)
+                        )
+                        .padding([6, 14])
+                        .style(style::danger)
+                        .on_press_maybe((!f.busy).then_some(Message::CloseStop)),
+                        button(text(tr::close_keep()).size(13))
+                            .padding([6, 14])
+                            .style(style::primary)
+                            .on_press_maybe((!f.busy).then_some(Message::CloseKeep)),
+                    ]
+                    .spacing(8)
+                    .boxed(),
+                );
+                c.width(560).boxed()
+            }
             Modal::Settings(f) => {
+                let online = self.connected();
                 let mut list: Column<El<'_>> = Column::new().spacing(4);
-                for p in self.profiles.list() {
+                for p in &self.profiles {
                     let (total, running) = self.sessions_in_profile(&p.name);
                     let row_el: El<'_> = match &f.renaming {
                         Some((old, new)) if old == &p.name => row![
@@ -695,7 +895,7 @@ impl App {
                             button(text(tr::save()).size(12))
                                 .padding([4, 10])
                                 .style(style::primary)
-                                .on_press(Message::SettingsRenameCommit),
+                                .on_press_maybe(online.then_some(Message::SettingsRenameCommit)),
                         ]
                         .spacing(6)
                         .boxed(),
@@ -709,12 +909,12 @@ impl App {
                             .color(style::DIM),
                             icon_button(
                                 I_EDIT,
-                                Some(Message::SettingsStartRename(p.name.clone())),
+                                online.then(|| Message::SettingsStartRename(p.name.clone())),
                                 tr::rename()
                             ),
                             icon_button(
                                 I_DELETE,
-                                Some(Message::SettingsDelete(p.name.clone())),
+                                online.then(|| Message::SettingsDelete(p.name.clone())),
                                 tr::profile_delete_tooltip()
                             ),
                         ]
@@ -764,20 +964,98 @@ impl App {
                         button(text(tr::add()).size(13))
                             .padding([5, 12])
                             .style(style::secondary)
-                            .on_press(Message::SettingsCreate),
+                            .on_press_maybe((online && !f.busy).then_some(Message::SettingsCreate)),
                     ]
                     .spacing(6),
                 ]
                 .spacing(10);
                 if let Some(e) = &f.error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(space().height(4).boxed());
+                c = c.push(label(tr::server_label()));
+                let kinds = row![
+                    button(text(tr::conn_local()).size(13))
+                        .padding([5, 12])
+                        .style(style::choice(!f.ssh))
+                        .on_press(Message::SettingsServerSsh(false)),
+                    button(text(tr::server_ssh()).size(13))
+                        .padding([5, 12])
+                        .style(style::choice(f.ssh))
+                        .on_press(Message::SettingsServerSsh(true)),
+                    space().width(Fill),
+                    button(text(tr::server_apply()).size(13))
+                        .padding([5, 12])
+                        .style(style::secondary)
+                        .on_press(Message::SettingsApplyServer),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center);
+                c = c.push(kinds.boxed());
+                if f.ssh {
                     c = c.push(
-                        container(text(e.as_str()).size(12))
-                            .padding(8)
-                            .width(Fill)
-                            .style(style::error_box)
+                        text_input(tr::ssh_host_placeholder(), &f.ssh_host)
+                            .id(SSH_HOST_ID)
+                            .on_input(Message::SettingsSshHost)
+                            .on_submit(Message::SettingsApplyServer)
+                            .size(13)
+                            .padding([5, 8])
+                            .style(style::input)
+                            .boxed(),
+                    );
+                    c = c.push(
+                        text_input(tr::ssh_command_placeholder(), &f.ssh_command)
+                            .on_input(Message::SettingsSshCommand)
+                            .on_submit(Message::SettingsApplyServer)
+                            .size(13)
+                            .padding([5, 8])
+                            .style(style::input)
                             .boxed(),
                     );
                 }
+                if let Some(v) = &self.remote_override {
+                    c = c.push(
+                        text(tr::server_env_override(v))
+                            .size(12)
+                            .color(style::AMBER)
+                            .boxed(),
+                    );
+                }
+                if let Some(e) = &f.server_error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(
+                    row![
+                        text(tr::server_note())
+                            .size(12)
+                            .color(style::DIM)
+                            .width(Fill),
+                        button(text(tr::stop_server()).size(13))
+                            .padding([5, 12])
+                            .style(style::danger)
+                            .on_press_maybe(online.then_some(Message::AskStopServer)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .boxed(),
+                );
+                c = c.push(label(tr::on_close_label()));
+                let on_close = [
+                    (CloseAction::Ask, tr::on_close_ask()),
+                    (CloseAction::Keep, tr::on_close_keep()),
+                    (CloseAction::Stop, tr::on_close_stop()),
+                ]
+                .into_iter()
+                .fold(row![].spacing(6), |r, (a, name)| {
+                    r.push(
+                        button(text(name).size(13))
+                            .padding([5, 12])
+                            .style(style::choice(self.ui.on_close == a))
+                            .on_press(Message::SetOnClose(a))
+                            .boxed(),
+                    )
+                });
+                c = c.push(on_close.boxed());
                 c = c.push(
                     row![
                         space().width(Fill),
@@ -788,7 +1066,7 @@ impl App {
                     ]
                     .boxed(),
                 );
-                c.width(460).boxed()
+                c.width(480).boxed()
             }
         };
         opaque(

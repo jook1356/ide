@@ -1,7 +1,7 @@
 # Client/server split and multi-user foundation
 
-Status: agreed design. Phase 1 (protocol, server, client; no UI wiring yet) implemented — see
-"Phase 1 implementation" at the end for what exists and where it deviates from this text.
+Status: agreed design. Phase 1 implemented, including the app migration (`ide-app` is a pure
+client) — see "Phase 1 implementation" and "App integration" at the end.
 
 ## Goals
 - The app (`ide`) only draws: terminal rendering, IME, editor views, CEF display, layout, theme, language.
@@ -107,7 +107,7 @@ deploying to a company server.
 
 ## Phase 1 implementation
 Implemented in `crates/ide-proto`, `crates/ide-server` (lib + bin `ide-server`) and
-`crates/ide-client`; the app does not use them yet.
+`crates/ide-client`; `ide-app` uses them (see "App integration").
 
 | Piece | State |
 |---|---|
@@ -143,8 +143,9 @@ Deviations and details fixed during implementation:
 - **Local socket name**: `\\.\pipe\ide-server-<user>`; with `IDE_DATA_DIR` set, a hash of the data
   dir is appended so separate data dirs get separate daemons; `IDE_SERVER_SOCKET` overrides it.
   Unix: `<data>/ide-server.sock` (data dir chmod 700).
-- **Daemon lifetime**: runs until killed, or until idle (no connections, no running sessions) for
-  `--idle-exit SECS` / `IDE_SERVER_IDLE_EXIT_SECS`. Writes `<data>/ide-server.pid`; logs to
+- **Daemon lifetime**: runs until killed, `server.shutdown` (stops every session, replies, exits),
+  or until idle (no connections, no running sessions) for `--idle-exit SECS` /
+  `IDE_SERVER_IDLE_EXIT_SECS` (default 600; 0 = never). Writes `<data>/ide-server.pid`; logs to
   `<data>/logs/ide-server.log` (`IDE_SERVER_LOG` filter); audit to `<data>/audit.log` (JSON lines).
 - **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `ide-core`
   structs, so a Unix server can serve a Windows client.
@@ -163,3 +164,36 @@ Known gaps (phase 1):
   the owner is still to do. No `Authenticator` trait yet (gateway phase).
 - The resume token only reports `resumed`; there is no other per-client server state.
 - Stopping a session kills the PTY's direct child; descendants end when the pseudoconsole closes.
+
+## App integration (phase 1 completion)
+- `ide-app` depends on `ide-client` (+ `ide-proto`, `ide-term`, `ide-web`, `ide-i18n`), not on
+  `ide-core`/`portable-pty`. It never spawns agents, runs git or touches project files. Local state
+  only: `<data>/ui.json` (selection, split, detail collapsed, language, per-session web URL, last
+  repo folder, server choice, close behaviour) and the CEF profile (`<data>/web`).
+- **Server choice**: Settings -> Server: Local (default: `ide-server --stdio` next to `ide.exe`,
+  `IDE_DATA_DIR` passed through; the relay attaches to the running daemon or starts it detached
+  without a console) or SSH (`ssh <host> [command]`, `Ssh::new`; no local server is started).
+  Switching asks first and reconnects; sessions on the previous server keep running there.
+  `IDE_REMOTE=ssh:<host>` overrides the setting. SSH is verified only for the UI/persistence path
+  and "unreachable host -> disconnected, no local `ide-server` child"; not against a real host.
+- **Terminals**: one `TermModel` per session. A session is attached (`client.attach(id,
+  last_offset or None)`) once per client when it is shown, running or has output; attachments stay
+  open, so background sessions stay current and switching is instant. `ClientEvent::Term` chunks
+  are fed in order (`reset` -> `model.reset()` first). Input goes through one ordered pump per
+  client that coalesces queued keystrokes (`term.write`), plus `term.resize` from the widget; the
+  size is re-sent after every reconnect. A new `server_instance` resets all models (full replay).
+- **Connection UX**: sidebar footer = server (Local / `ssh host`) + state: connecting, connected
+  (server version), reconnecting, disconnected (translated reason) with a retry button. While not
+  connected the terminal stays visible read-only (banner) and server actions are disabled.
+- **Errors**: every `ProtoError` id (ide-core, protocol, client) maps to a `tr::err_*` message in
+  `ide-app/src/i18n.rs`; unknown ids show `err-unknown` with the id and args.
+- **Closing the window** never stops agents by itself: with a local server and running sessions
+  the app asks "keep running in the background" (default) / "stop all agents and the server" /
+  cancel, with "don't ask again" (stored as `on_close` in `ui.json`, changeable in Settings). With
+  nothing running it exits without asking (and stops the daemon only if `on_close` = stop).
+  Reopening re-attaches and replays the scrollback. Settings also has "Stop server…" (confirm).
+- **Modal z-order**: while a modal is open the web view's GPU primitive is not drawn (the detail
+  area shows a plain panel under the backdrop), so nothing can draw above the backdrop or the
+  dialog. Captured before/after in `IDE_APP_SCRIPT` (`08a`/`08b`). Note: on this machine the
+  unfixed build also showed the backdrop over the page (pixel check: page 109 -> 74, linear-space
+  blending, so a bright page still looks bright); the fix holds whatever the cause.

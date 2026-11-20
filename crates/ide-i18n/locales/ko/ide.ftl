@@ -92,20 +92,71 @@ save = 저장
 add = 추가
 close = 닫기
 
+## Connection and server (sidebar footer, settings)
+
+conn-connecting = 서버에 연결하는 중이에요…
+conn-connected = 연결됨 · 서버 { $version }
+conn-reconnecting = 연결이 끊겼어요. 다시 연결하는 중이에요…
+conn-disconnected = 연결 안 됨: { $detail }
+conn-retry = 다시 연결
+conn-server-stopped = 서버를 중지했어요. 실행 중인 세션이 없어요.
+conn-closed = 연결을 닫았어요.
+conn-read-only = 연결되지 않았어요. 터미널은 읽기 전용이에요.
+conn-local = 로컬
+server-label = 서버
+server-note = 창을 닫아도 세션은 백그라운드 서버에서 계속 실행돼요.
+stop-server = 서버 중지…
+stop-server-confirm = 서버 중지
+stop-server-title = 서버를 중지할까요?
+stop-server-body = 모든 세션(에이전트와 셸)을 중지하고 백그라운드 서버를 종료해요. worktree는 디스크에 남아요.
+stopping = 중지하는 중…
+
+conn-target = 서버: { $target }
+server-ssh = SSH
+ssh-host-placeholder = user@host
+ssh-command-placeholder = 서버 명령 (기본값: ide-server --stdio)
+server-apply = 적용
+server-env-override = IDE_REMOTE={ $value } 환경 변수가 이 설정보다 우선해요.
+err-ssh-host = user@host 형식으로 SSH 호스트를 입력하세요.
+switch-server-title = 서버를 바꿀까요?
+switch-server-body = { $target } 서버에 다시 연결해요. 지금 서버의 세션은 그 서버에서 계속 실행돼요.
+switch-server = 바꾸기
+on-close-label = 창을 닫을 때
+on-close-ask = 매번 묻기
+on-close-keep = 에이전트 계속 실행
+on-close-stop = 에이전트와 서버 중지
+close-title = 에이전트가 아직 실행 중이에요
+close-body = 로컬 서버에서 세션 { $count }개가 실행 중이에요.
+close-keep = 백그라운드에서 계속 실행
+close-stop = 에이전트와 서버 모두 중지
+close-remember = 다시 묻지 않기 (설정에서 바꿀 수 있어요)
+
 ## Errors shown by the app
 
-err-sessions-unreadable = sessions.json 파일을 읽지 못했어요: { $detail }
-err-start-process = 프로세스를 시작하지 못했어요: { $detail }
-err-worktree-missing = worktree가 없어요: { $path }. 이 세션을 삭제하고 새로 만드세요.
-err-profile-gone = “{ $name }” 프로필이 더 이상 없어요.
 err-web-view = 웹 뷰 오류: { $detail }
 err-rename-failed = 이름을 바꾸지 못했어요: { $detail }
-err-delete-cancelled = 삭제가 취소됐어요.
 err-choose-repo = 저장소 폴더를 선택하세요.
-err-create-cancelled = 세션 만들기가 취소됐어요.
-err-session-save = 세션을 저장하지 못했어요: { $detail }
+err-server-missing = 서버 프로그램을 찾지 못했어요: { $detail }
 err-profile-in-use = “{ $name }” 프로필을 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
 err-profile-running = “{ $name }” 프로필의 세션 { $count }개가 실행 중이에요. 이름을 바꾸기 전에 중지하세요.
+
+## Errors from the server and the connection (ide_proto::ProtoError ids)
+
+err-bad-message = 서버가 잘못된 메시지를 보냈어요: { $detail }
+err-bad-request = 서버가 이 요청을 지원하지 않아요: { $method }
+err-proto-version = 서버와 호환되지 않아요 (서버 프로토콜 { $server }, 앱 프로토콜 { $client }).
+err-not-handshaken = 연결이 올바르게 설정되지 않았어요.
+err-unauthorized = 서버가 접근을 거부했어요.
+err-session-running = 세션이 이미 실행 중이에요: { $id }
+err-session-not-running = 세션이 실행 중이 아니에요: { $id }
+err-spawn-failed = “{ $program }” 프로그램을 시작하지 못했어요: { $detail }
+err-internal = 서버 내부 오류가 발생했어요: { $detail }
+err-message-too-large = 요청이 너무 커요.
+err-path-denied = 이 경로에는 접근할 수 없어요: { $path }
+err-disconnected = 서버에 연결되어 있지 않아요.
+err-timeout = 서버가 제때 응답하지 않았어요.
+err-connect-failed = 서버에 연결하지 못했어요: { $detail }
+err-unknown = 서버 오류가 발생했어요 ({ $id }): { $details }
 
 ## Errors from ide-core (ide_core::ErrorMessage)
 
