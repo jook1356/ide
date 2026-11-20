@@ -508,7 +508,12 @@ async fn handshake_errors() {
     match hello(&server, me, h(PROTO_VERSION)).await.unwrap() {
         Response::Welcome(w) => {
             assert!(!w.resumed);
-            assert_eq!(w.capabilities, ["profiles", "sessions", "term"]);
+            assert_eq!(
+                w.capabilities,
+                [
+                    "profiles", "sessions", "term", "files", "browse", "search", "git", "def"
+                ]
+            );
         }
         other => panic!("{other:?}"),
     }

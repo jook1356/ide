@@ -1,0 +1,431 @@
+//! `search.text` (ripgrep's `ignore` walker + `grep-searcher`) and `search.files` (fuzzy
+//! file names with `nucleo-matcher`).
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{BinaryDetection, SearcherBuilder, sinks};
+use ide_proto::{ByteRange, FileMatch, ProtoError, SearchMatch, SearchSummary, TextSearch};
+use ignore::WalkBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
+
+/// Default `max_results` of `search.text`.
+pub const DEFAULT_MAX_TEXT: u32 = 2000;
+/// Default `max_results` of `search.files`.
+pub const DEFAULT_MAX_FILES: u32 = 100;
+/// Files larger than this are not searched.
+const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
+/// File-name search looks at no more files than this.
+const MAX_WALK_FILES: usize = 300_000;
+/// `line_text` is cut after this many bytes.
+const MAX_LINE: usize = 1000;
+/// A hit batch is sent at this size or after [`BATCH_TIME`].
+const BATCH: usize = 100;
+const BATCH_TIME: Duration = Duration::from_millis(100);
+
+/// A validated query: the compiled matcher and glob overrides.
+pub struct Prepared {
+    matcher: RegexMatcher,
+    overrides: Override,
+    include_ignored: bool,
+    max: u32,
+}
+
+/// Validate and compile a query (errors: `search-empty`, `search-bad-regex` (`detail`),
+/// `search-bad-glob` (`glob`, `detail`)).
+pub fn prepare(root: &Path, q: &TextSearch) -> Result<Prepared, ProtoError> {
+    if q.query.is_empty() {
+        return Err(ProtoError::new("search-empty"));
+    }
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(!q.case_sensitive)
+        .word(q.whole_word)
+        .fixed_strings(!q.regex)
+        .line_terminator(Some(b'\n'))
+        .build(&q.query)
+        .map_err(|e| ProtoError::new("search-bad-regex").arg("detail", e.to_string()))?;
+    Ok(Prepared {
+        matcher,
+        overrides: overrides(root, &q.globs)?,
+        include_ignored: q.include_ignored,
+        max: if q.max_results == 0 {
+            DEFAULT_MAX_TEXT
+        } else {
+            q.max_results
+        },
+    })
+}
+
+fn overrides(root: &Path, globs: &[String]) -> Result<Override, ProtoError> {
+    let mut b = OverrideBuilder::new(root);
+    for g in globs {
+        let g = g.trim();
+        if g.is_empty() {
+            continue;
+        }
+        b.add(g).map_err(|e| {
+            ProtoError::new("search-bad-glob")
+                .arg("glob", g)
+                .arg("detail", e.to_string())
+        })?;
+    }
+    b.build().map_err(|e| {
+        ProtoError::new("search-bad-glob")
+            .arg("glob", globs.join(" "))
+            .arg("detail", e.to_string())
+    })
+}
+
+fn walker(root: &Path, include_ignored: bool, ov: Override) -> WalkBuilder {
+    let mut w = WalkBuilder::new(root);
+    w.hidden(false)
+        .parents(true)
+        .ignore(!include_ignored)
+        .git_ignore(!include_ignored)
+        .git_exclude(!include_ignored)
+        .git_global(!include_ignored)
+        .follow_links(false)
+        .max_filesize(Some(MAX_FILE_SIZE))
+        .overrides(ov)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|e| e.file_name() != ".git");
+    w
+}
+
+fn rel_of(root: &Path, p: &Path) -> Option<String> {
+    let r = p.strip_prefix(root).ok()?;
+    let parts: Vec<String> = r
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Some(parts.join("/"))
+}
+
+/// Cut `s` to at most `max` bytes at a char boundary.
+fn cut(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut i = max;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    &s[..i]
+}
+
+/// Run a prepared search under `root`. Hits are delivered in batches through `emit` (return
+/// false to stop: the receiver is gone). Checks `cancel` between files and lines.
+pub fn run_text(
+    root: &Path,
+    p: &Prepared,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(Vec<SearchMatch>) -> bool,
+) -> SearchSummary {
+    let mut sum = SearchSummary {
+        matches: 0,
+        files: 0,
+        searched: 0,
+        truncated: false,
+        cancelled: false,
+        error: None,
+    };
+    let mut batch: Vec<SearchMatch> = Vec::new();
+    let mut last_flush = Instant::now();
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(b'\0'))
+        .build();
+    let walk = walker(root, p.include_ignored, p.overrides.clone()).build();
+    'files: for ent in walk {
+        if cancel.load(Ordering::Relaxed) {
+            sum.cancelled = true;
+            break;
+        }
+        let Ok(ent) = ent else { continue };
+        if !ent.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let Some(rel) = rel_of(root, ent.path()) else {
+            continue;
+        };
+        sum.searched += 1;
+        let mut file_hits = 0u32;
+        let mut stop = false;
+        let res = searcher.search_path(
+            &p.matcher,
+            ent.path(),
+            sinks::Bytes(|lnum, line| {
+                if cancel.load(Ordering::Relaxed) || sum.matches >= p.max {
+                    stop = true;
+                    return Ok(false);
+                }
+                let line = line.strip_suffix(b"\n").unwrap_or(line);
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                let mut raw = Vec::new();
+                let _ = p.matcher.find_iter(line, |m| {
+                    raw.push((m.start(), m.end()));
+                    raw.len() < 100
+                });
+                let full = String::from_utf8_lossy(line);
+                let text = cut(&full, MAX_LINE).to_owned();
+                // Byte offsets into the lossily decoded text.
+                let at =
+                    |b: usize| String::from_utf8_lossy(&line[..b.min(line.len())]).len() as u32;
+                let ranges: Vec<ByteRange> = raw
+                    .iter()
+                    .map(|&(s, e)| ByteRange {
+                        start: at(s),
+                        end: at(e),
+                    })
+                    .filter(|r| (r.end as usize) <= text.len())
+                    .collect();
+                let first = raw.first().map_or(0, |&(s, _)| s);
+                let col = String::from_utf8_lossy(&line[..first.min(line.len())])
+                    .chars()
+                    .count() as u32
+                    + 1;
+                batch.push(SearchMatch {
+                    path: rel.clone(),
+                    line: lnum as u32,
+                    col,
+                    line_text: text,
+                    ranges,
+                });
+                sum.matches += 1;
+                file_hits += 1;
+                Ok(true)
+            }),
+        );
+        if let Err(e) = res {
+            tracing::debug!("search {}: {e}", ent.path().display());
+        }
+        if file_hits > 0 {
+            sum.files += 1;
+        }
+        if !batch.is_empty() && (batch.len() >= BATCH || last_flush.elapsed() >= BATCH_TIME) {
+            if !emit(std::mem::take(&mut batch)) {
+                sum.cancelled = true;
+                break 'files;
+            }
+            last_flush = Instant::now();
+        }
+        if stop {
+            if cancel.load(Ordering::Relaxed) {
+                sum.cancelled = true;
+            } else {
+                sum.truncated = true;
+            }
+            break;
+        }
+        if sum.matches >= p.max {
+            sum.truncated = true;
+            break;
+        }
+    }
+    if !batch.is_empty() && !emit(batch) {
+        sum.cancelled = true;
+    }
+    sum
+}
+
+/// `search.files`: fuzzy match of `query` against root-relative paths of non-ignored files.
+/// An empty query returns the first paths in name order.
+pub fn files(root: &Path, query: &str, max: u32) -> Vec<FileMatch> {
+    use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+    use nucleo_matcher::{Config, Matcher, Utf32Str};
+    let max = if max == 0 { DEFAULT_MAX_FILES } else { max } as usize;
+    let mut paths = Vec::new();
+    let ov = Override::empty();
+    for ent in walker(root, false, ov).build().flatten() {
+        if ent.file_type().is_some_and(|t| t.is_file())
+            && let Some(rel) = rel_of(root, ent.path())
+        {
+            paths.push(rel);
+            if paths.len() >= MAX_WALK_FILES {
+                break;
+            }
+        }
+    }
+    let query = query.trim();
+    if query.is_empty() {
+        paths.sort();
+        return paths
+            .into_iter()
+            .take(max)
+            .map(|path| FileMatch {
+                path,
+                score: 0,
+                indices: Vec::new(),
+            })
+            .collect();
+    }
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, String)> = paths
+        .into_iter()
+        .filter_map(|p| {
+            let s = pattern.score(Utf32Str::new(&p, &mut buf), &mut matcher)?;
+            Some((s, p))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    scored.truncate(max);
+    scored
+        .into_iter()
+        .map(|(score, path)| {
+            let mut idx = Vec::new();
+            pattern.indices(Utf32Str::new(&path, &mut buf), &mut matcher, &mut idx);
+            idx.sort_unstable();
+            idx.dedup();
+            FileMatch {
+                path,
+                score,
+                indices: idx,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jail::testutil::*;
+
+    fn q(query: &str) -> TextSearch {
+        TextSearch {
+            session: String::new(),
+            query: query.into(),
+            regex: false,
+            case_sensitive: false,
+            whole_word: false,
+            globs: Vec::new(),
+            include_ignored: false,
+            max_results: 0,
+        }
+    }
+
+    fn all(root: &Path, query: &TextSearch) -> (Vec<SearchMatch>, SearchSummary) {
+        let p = prepare(root, query).unwrap();
+        let mut hits = Vec::new();
+        let sum = run_text(root, &p, &AtomicBool::new(false), |b| {
+            hits.extend(b);
+            true
+        });
+        (hits, sum)
+    }
+
+    #[test]
+    fn text_search() {
+        let t = tmp("search");
+        let root = t.join("r");
+        init_repo(
+            &root,
+            &[
+                (".gitignore", "target/\n"),
+                (
+                    "src/main.rs",
+                    "fn main() {\n    let 이름 = \"Hello hello\";\r\n}\n",
+                ),
+                ("src/lib.rs", "pub fn helloWorld() {}\n"),
+                ("docs/한글.md", "안녕 hello 세계\n"),
+                ("bin.dat", "hello\0binary"),
+            ],
+        );
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/out.txt"), "hello").unwrap();
+        std::fs::write(root.join(".hidden"), "hello").unwrap();
+
+        let (h, s) = all(&root, &q("hello"));
+        let paths: Vec<_> = h.iter().map(|m| (m.path.as_str(), m.line)).collect();
+        assert_eq!(
+            paths,
+            [
+                (".hidden", 1),
+                ("docs/한글.md", 1),
+                ("src/lib.rs", 1),
+                ("src/main.rs", 2)
+            ]
+        );
+        assert_eq!(
+            (s.matches, s.files, s.truncated, s.cancelled),
+            (4, 4, false, false)
+        );
+        let m = h.iter().find(|m| m.path == "src/main.rs").unwrap();
+        assert_eq!(m.line_text, "    let 이름 = \"Hello hello\";");
+        assert_eq!(m.ranges.len(), 2);
+        let r = m.ranges[0];
+        assert_eq!(&m.line_text[r.start as usize..r.end as usize], "Hello");
+        assert_eq!(m.col, 15);
+        let k = h.iter().find(|m| m.path == "docs/한글.md").unwrap();
+        assert_eq!(k.col, 4);
+        assert_eq!(
+            &k.line_text[k.ranges[0].start as usize..k.ranges[0].end as usize],
+            "hello"
+        );
+
+        // Case-sensitive, whole word, regex, globs, ignored files.
+        let mut cs = q("Hello");
+        cs.case_sensitive = true;
+        assert_eq!(all(&root, &cs).0.len(), 1);
+        let mut ww = q("hello");
+        ww.whole_word = true;
+        assert!(!all(&root, &ww).0.iter().any(|m| m.path == "src/lib.rs"));
+        let mut re = q(r"fn \w+\(");
+        re.regex = true;
+        assert_eq!(all(&root, &re).0.len(), 2);
+        let mut gl = q("hello");
+        gl.globs = vec!["*.rs".into()];
+        assert_eq!(all(&root, &gl).0.len(), 2);
+        gl.globs = vec!["!src/**".into()];
+        assert!(
+            all(&root, &gl)
+                .0
+                .iter()
+                .all(|m| !m.path.starts_with("src/"))
+        );
+        let mut ig = q("hello");
+        ig.include_ignored = true;
+        assert!(all(&root, &ig).0.iter().any(|m| m.path == "target/out.txt"));
+        let mut lim = q("hello");
+        lim.max_results = 2;
+        let (h, s) = all(&root, &lim);
+        assert_eq!((h.len(), s.truncated), (2, true));
+        // Errors.
+        let mut bad = q("(");
+        bad.regex = true;
+        assert_eq!(prepare(&root, &bad).err().unwrap().id, "search-bad-regex");
+        assert_eq!(prepare(&root, &q("")).err().unwrap().id, "search-empty");
+        let mut bg = q("x");
+        bg.globs = vec!["a{".into()];
+        assert_eq!(prepare(&root, &bg).err().unwrap().id, "search-bad-glob");
+        // Cancel before start.
+        let p = prepare(&root, &q("hello")).unwrap();
+        let s = run_text(&root, &p, &AtomicBool::new(true), |_| true);
+        assert!(s.cancelled && s.matches == 0);
+        // Receiver gone.
+        let s = run_text(&root, &p, &AtomicBool::new(false), |_| false);
+        assert!(s.cancelled);
+
+        // File names.
+        let f = files(&root, "mainrs", 10);
+        assert_eq!(f[0].path, "src/main.rs");
+        assert!(!f[0].indices.is_empty());
+        assert!(
+            files(&root, "out", 10)
+                .iter()
+                .all(|m| !m.path.starts_with("target"))
+        );
+        assert_eq!(files(&root, "한글", 10)[0].path, "docs/한글.md");
+        assert_eq!(files(&root, "", 2).len(), 2);
+        assert!(files(&root, "zzzzqqq", 10).is_empty());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+}

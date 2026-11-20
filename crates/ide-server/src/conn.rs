@@ -1,13 +1,14 @@
 //! One client connection: handshake, request dispatch, notifications and terminal streams.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use ide_proto::{
     Attached, Mux, MuxConfig, Notify, PROTO_VERSION, ProtoError, Request, Response, Role,
-    RpcMessage, Stream, UserInfo, VERSION, Welcome, encode_chunk,
+    RpcMessage, SearchSummary, Stream, TextSearch, UserInfo, VERSION, Welcome, encode_chunk,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -23,13 +24,118 @@ struct Conn {
     mux: Mux,
     ctx: Arc<UserCtx>,
     attachments: Mutex<HashMap<String, AbortHandle>>,
+    /// `fs.watch` forwarders of this connection, by session.
+    watches: Mutex<HashMap<String, AbortHandle>>,
+    /// Running `search.text` of this connection: cancel flags by client search id.
+    searches: Mutex<HashMap<u64, Arc<AtomicBool>>>,
 }
 
 impl Conn {
     fn reply(&self, id: u64, result: Result<Response, ProtoError>) {
-        let _ = self
+        let r = self
             .mux
             .send_rpc(&RpcMessage::Response { id, result }.encode());
+        if let Err(ide_proto::MuxError::TooLarge) = r {
+            let result = Err(ProtoError::new("message-too-large"));
+            let _ = self
+                .mux
+                .send_rpc(&RpcMessage::Response { id, result }.encode());
+        }
+    }
+
+    fn notify(&self, n: Notify) -> bool {
+        self.mux.send_rpc(&RpcMessage::Notify(n).encode()).is_ok()
+    }
+
+    /// `fs.watch`: idempotent per connection and session.
+    fn watch(self: &Arc<Self>, session: &str) -> Result<(), ProtoError> {
+        if self.watches.lock().unwrap().contains_key(session) {
+            return Ok(());
+        }
+        let mut rx = self.ctx.watch(session)?;
+        let conn = self.clone();
+        let sid = session.to_owned();
+        let task = tokio::spawn(async move {
+            loop {
+                let n = match rx.recv().await {
+                    Ok(n) => n,
+                    Err(broadcast::error::RecvError::Lagged(_)) => Notify::FsChanged {
+                        session: sid.clone(),
+                        paths: Vec::new(),
+                        rescan: true,
+                    },
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                if !conn.notify(n) {
+                    return;
+                }
+            }
+        });
+        let old = self
+            .watches
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), task.abort_handle());
+        if let Some(old) = old {
+            // A concurrent watch of the same session won the race: keep one reference.
+            old.abort();
+            self.ctx.unwatch(session);
+        }
+        Ok(())
+    }
+
+    fn unwatch(&self, session: &str) {
+        if let Some(h) = self.watches.lock().unwrap().remove(session) {
+            h.abort();
+            self.ctx.unwatch(session);
+        }
+    }
+
+    /// `search.text`: validate, reply, then stream hits and a final `SearchDone`.
+    fn search(self: &Arc<Self>, id: u64, search: u64, query: TextSearch) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let conn = self.clone();
+        tokio::spawn(async move {
+            let ctx = conn.ctx.clone();
+            let q = query.clone();
+            let prepared = tokio::task::spawn_blocking(move || ctx.search_prepare(&q))
+                .await
+                .unwrap_or_else(|e| Err(ProtoError::internal(e)));
+            let (jail, prepared) = match prepared {
+                Ok(p) => p,
+                Err(e) => {
+                    conn.reply(id, Err(e));
+                    return;
+                }
+            };
+            if let Some(old) = conn.searches.lock().unwrap().insert(search, cancel.clone()) {
+                old.store(true, Ordering::Relaxed);
+            }
+            conn.reply(id, Ok(Response::Unit));
+            let c2 = conn.clone();
+            let flag = cancel.clone();
+            let summary = tokio::task::spawn_blocking(move || {
+                crate::search::run_text(jail.root(), &prepared, &flag, |hits| {
+                    c2.notify(Notify::SearchHits { search, hits })
+                })
+            })
+            .await
+            .unwrap_or_else(|e| SearchSummary {
+                matches: 0,
+                files: 0,
+                searched: 0,
+                truncated: false,
+                cancelled: false,
+                error: Some(ProtoError::internal(e)),
+            });
+            {
+                let mut s = conn.searches.lock().unwrap();
+                if s.get(&search).is_some_and(|f| Arc::ptr_eq(f, &cancel)) {
+                    s.remove(&search);
+                }
+            }
+            conn.notify(Notify::SearchDone { search, summary });
+        });
     }
 }
 
@@ -105,7 +211,11 @@ where
             proto_version: PROTO_VERSION,
             server_version: VERSION.to_owned(),
             user: user.clone(),
-            capabilities: vec!["profiles".into(), "sessions".into(), "term".into()],
+            capabilities: [
+                "profiles", "sessions", "term", "files", "browse", "search", "git", "def",
+            ]
+            .map(String::from)
+            .to_vec(),
             resume_token: ide_proto::ResumeToken(token),
             resumed,
             server_instance: server.instance().to_owned(),
@@ -116,6 +226,8 @@ where
         mux: mux.clone(),
         ctx: ctx.clone(),
         attachments: Mutex::new(HashMap::new()),
+        watches: Mutex::new(HashMap::new()),
+        searches: Mutex::new(HashMap::new()),
     });
     let forwarder = tokio::spawn(forward_notifications(mux.clone(), ctx.subscribe()));
 
@@ -163,6 +275,21 @@ where
                     server.request_shutdown();
                 });
             }
+            Request::FsWatch { session } => {
+                let r = conn.watch(&session).map(|_| Response::Unit);
+                conn.reply(id, r);
+            }
+            Request::FsUnwatch { session } => {
+                conn.unwatch(&session);
+                conn.reply(id, Ok(Response::Unit));
+            }
+            Request::SearchText { search, query } => conn.search(id, search, query),
+            Request::SearchCancel { search } => {
+                if let Some(f) = conn.searches.lock().unwrap().get(&search) {
+                    f.store(true, Ordering::Relaxed);
+                }
+                conn.reply(id, Ok(Response::Unit));
+            }
             Request::TermDetach { session } => {
                 if let Some(h) = conn.attachments.lock().unwrap().remove(&session) {
                     h.abort();
@@ -185,6 +312,13 @@ where
     forwarder.abort();
     for (_, h) in conn.attachments.lock().unwrap().drain() {
         h.abort();
+    }
+    let watched: Vec<String> = conn.watches.lock().unwrap().keys().cloned().collect();
+    for s in watched {
+        conn.unwatch(&s);
+    }
+    for (_, f) in conn.searches.lock().unwrap().drain() {
+        f.store(true, Ordering::Relaxed);
     }
     mux.close();
     tracing::info!("client disconnected: user={}", user.id);

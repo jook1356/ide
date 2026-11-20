@@ -12,13 +12,20 @@ use ide_core::{
 };
 use ide_proto::{
     Agent, NewSession, Notify, ProfileInfo, ProtoError, Request, Response, SessionInfo,
-    SessionState, UserInfo,
+    SessionState, TextSearch, UserInfo,
 };
 use tokio::sync::broadcast;
 
 use crate::audit::{Audit, FileAudit};
+use crate::jail::{PathJail, RootJail, normalize_rel};
 use crate::pty::TermHost;
 use crate::runner::{Runner, SameUserRunner, SpawnSpec};
+use crate::watch::Watchers;
+use crate::{def, fsops, git, search};
+
+/// Server config file in the data dir: `{ "browse_roots": ["D:/src", ...] }` adds roots
+/// the repository picker (and `session.create`) may use besides the home dir.
+pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_COLS: u16 = 120;
@@ -36,6 +43,8 @@ pub struct ServerConfig {
     pub audit: Arc<dyn Audit>,
     /// Program resolution environment (`None` = the process environment).
     pub launch_env: Option<LaunchEnv>,
+    /// Browse roots (`None` = the home dir plus `browse_roots` of `<data>/server.json`).
+    pub browse_roots: Option<Vec<PathBuf>>,
 }
 
 impl ServerConfig {
@@ -56,6 +65,7 @@ impl ServerConfig {
             paths,
             user,
             launch_env: None,
+            browse_roots: None,
         }
     }
 }
@@ -117,6 +127,7 @@ impl Server {
                 .launch_env
                 .clone()
                 .unwrap_or_else(LaunchEnv::from_process),
+            self.config.browse_roots.clone(),
         )?);
         users.insert(user.id.clone(), ctx.clone());
         Ok(ctx)
@@ -221,6 +232,9 @@ pub struct UserCtx {
     runner: Arc<dyn Runner>,
     audit: Arc<dyn Audit>,
     launch_env: LaunchEnv,
+    browse_roots: Option<Vec<PathBuf>>,
+    watchers: Watchers,
+    write_lock: Mutex<()>,
 }
 
 impl UserCtx {
@@ -230,6 +244,7 @@ impl UserCtx {
         runner: Arc<dyn Runner>,
         audit: Arc<dyn Audit>,
         launch_env: LaunchEnv,
+        browse_roots: Option<Vec<PathBuf>>,
     ) -> Result<Self, ProtoError> {
         let profiles = ProfileStore::open(&paths).map_err(|e| core_error(&e))?;
         let sessions = SessionStore::open(&paths).map_err(|e| core_error(&e))?;
@@ -243,6 +258,9 @@ impl UserCtx {
             runner,
             audit,
             launch_env,
+            browse_roots,
+            watchers: Watchers::default(),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -307,6 +325,77 @@ impl UserCtx {
             .get(&sid)
             .cloned()
             .ok_or_else(not_found)
+    }
+
+    /// The jail of a session's worktree (the session must belong to this user).
+    pub fn session_root(&self, id: &str) -> Result<(Session, RootJail), ProtoError> {
+        let s = self.resolve_session(id)?;
+        let j = RootJail::new(&s.worktree_path)?;
+        Ok((s, j))
+    }
+
+    /// Browse roots: the configured override, else the home dir plus `browse_roots` from
+    /// `<data>/server.json` (re-read on every call). Missing folders are skipped.
+    pub fn browse_jail(&self) -> PathJail {
+        if let Some(r) = &self.browse_roots {
+            return PathJail::new(r.iter().cloned());
+        }
+        let mut roots = Vec::new();
+        if let Some(h) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .filter(|h| !h.is_empty())
+        {
+            roots.push(PathBuf::from(h));
+        }
+        let cfg = self.paths.root().join(SERVER_CONFIG_FILE);
+        if let Ok(text) = std::fs::read_to_string(&cfg) {
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => {
+                    for r in v
+                        .get("browse_roots")
+                        .and_then(|r| r.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(p) = r.as_str() {
+                            roots.push(PathBuf::from(p));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("{}: {e}", cfg.display()),
+            }
+        }
+        PathJail::new(roots)
+    }
+
+    /// Start (or join) the watcher of a session for one connection.
+    pub fn watch(&self, id: &str) -> Result<broadcast::Receiver<Notify>, ProtoError> {
+        let (s, j) = self.session_root(id)?;
+        self.watchers
+            .acquire(s.id.as_str(), &j, crate::watch::git_dir_of(j.root()))
+    }
+
+    /// Release one connection's watch of a session.
+    pub fn unwatch(&self, id: &str) {
+        self.watchers.release(id);
+    }
+
+    /// Connections watching a session.
+    pub fn watching(&self, id: &str) -> usize {
+        self.watchers.watching(id)
+    }
+
+    /// Validate a text search: the session root and the compiled query.
+    pub fn search_prepare(
+        &self,
+        q: &TextSearch,
+    ) -> Result<(RootJail, search::Prepared), ProtoError> {
+        let (_, j) = self.session_root(&q.session)?;
+        let p = search::prepare(j.root(), q)?;
+        Ok((j, p))
+    }
+
+    fn audit_fs(&self, action: &str, session: &str, rel: &str) {
+        self.audit(action, &format!("{session} {rel}"));
     }
 
     /// The terminal host of a resolved session (created idle on first use).
@@ -450,6 +539,7 @@ impl UserCtx {
                 )
                 .map_err(core)?;
                 self.hosts.lock().unwrap().remove(s.id.as_str());
+                self.watchers.remove(s.id.as_str());
                 self.audit(
                     "session.delete",
                     &format!("{id} remove_worktree={remove_worktree}"),
@@ -469,6 +559,175 @@ impl UserCtx {
                 let s = self.resolve_session(&id)?;
                 Ok(Response::Session(self.info(&s)))
             }
+            other => self.handle_files(other),
+        }
+    }
+
+    /// Phase 2 requests: files, browsing, file search, git, go-to-definition.
+    fn handle_files(&self, req: Request) -> Result<Response, ProtoError> {
+        match req {
+            Request::FsList {
+                session,
+                dir,
+                include_ignored,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                let rel = normalize_rel(&dir)?;
+                let badges = git::badges(j.root(), &rel);
+                fsops::list(&j, &rel, include_ignored, &badges).map(Response::Entries)
+            }
+            Request::FsStat { session, path } => {
+                let (_, j) = self.session_root(&session)?;
+                fsops::stat(&j, &path).map(Response::Stat)
+            }
+            Request::FsRead {
+                session,
+                path,
+                max_bytes,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                fsops::read(&j, &path, max_bytes).map(Response::File)
+            }
+            Request::FsWrite {
+                session,
+                path,
+                content,
+                expected_version,
+                encoding,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                let version = {
+                    let _g = self.write_lock.lock().unwrap();
+                    fsops::write(
+                        &j,
+                        &path,
+                        &content,
+                        expected_version.as_deref(),
+                        encoding.as_ref(),
+                    )?
+                };
+                self.audit_fs("fs.write", &session, &normalize_rel(&path)?);
+                Ok(Response::Written { version })
+            }
+            Request::FsCreateFile {
+                session,
+                path,
+                content,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                let version = {
+                    let _g = self.write_lock.lock().unwrap();
+                    fsops::create_file(&j, &path, &content)?
+                };
+                self.audit_fs("fs.create_file", &session, &normalize_rel(&path)?);
+                Ok(Response::Written { version })
+            }
+            Request::FsCreateDir { session, path } => {
+                let (_, j) = self.session_root(&session)?;
+                fsops::create_dir(&j, &path)?;
+                self.audit_fs("fs.create_dir", &session, &normalize_rel(&path)?);
+                Ok(Response::Unit)
+            }
+            Request::FsRename { session, from, to } => {
+                let (_, j) = self.session_root(&session)?;
+                {
+                    let _g = self.write_lock.lock().unwrap();
+                    fsops::rename(&j, &from, &to)?;
+                }
+                let target = format!("{} -> {}", normalize_rel(&from)?, normalize_rel(&to)?);
+                self.audit_fs("fs.rename", &session, &target);
+                Ok(Response::Unit)
+            }
+            Request::FsDelete {
+                session,
+                path,
+                recursive,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                {
+                    let _g = self.write_lock.lock().unwrap();
+                    fsops::delete(&j, &path, recursive)?;
+                }
+                self.audit_fs("fs.delete", &session, &normalize_rel(&path)?);
+                Ok(Response::Unit)
+            }
+            Request::BrowseRoots => Ok(Response::Roots(
+                self.browse_jail()
+                    .roots()
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect(),
+            )),
+            Request::BrowseList { abs_dir } => {
+                fsops::browse(&self.browse_jail(), &abs_dir).map(Response::Browse)
+            }
+            Request::SearchFiles {
+                session,
+                query,
+                max_results,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                Ok(Response::FileMatches(search::files(
+                    j.root(),
+                    &query,
+                    max_results,
+                )))
+            }
+            Request::GitStatus { session, base } => {
+                let (s, j) = self.session_root(&session)?;
+                git::status(j.root(), Some(&s.repo_path), base.as_deref()).map(Response::GitStatus)
+            }
+            Request::GitDiff {
+                session,
+                path,
+                against,
+                base,
+            } => {
+                let (s, j) = self.session_root(&session)?;
+                let path = match path {
+                    Some(p) => {
+                        let n = normalize_rel(&p)?;
+                        j.resolve(&n)?;
+                        Some(n)
+                    }
+                    None => None,
+                };
+                git::diff(
+                    j.root(),
+                    Some(&s.repo_path),
+                    path.as_deref(),
+                    against,
+                    base.as_deref(),
+                )
+                .map(Response::Diff)
+            }
+            Request::GitFileAt {
+                session,
+                path,
+                rev,
+                base,
+            } => {
+                let (s, j) = self.session_root(&session)?;
+                let rel = normalize_rel(&path)?;
+                if rel.is_empty() {
+                    return Err(ProtoError::new("fs-is-a-dir").arg("path", ""));
+                }
+                j.resolve(&rel)?;
+                let blob = git::file_at(j.root(), Some(&s.repo_path), &rel, &rev, base.as_deref())?;
+                Ok(Response::FileAt(
+                    blob.map(|b| fsops::content_from_bytes(&rel, &b, 0)),
+                ))
+            }
+            Request::DefLookup {
+                session,
+                path,
+                line,
+                col,
+                text,
+            } => {
+                let (_, j) = self.session_root(&session)?;
+                def::lookup(&j, &path, line, col, text).map(Response::Def)
+            }
             other => Err(ProtoError::new("bad-request").arg("method", other.method())),
         }
     }
@@ -481,8 +740,10 @@ impl UserCtx {
             .get(&req.profile)
             .cloned()
             .ok_or_else(|| ProtoError::new("profile-not-found").arg("name", &req.profile))?;
+        // The repository must lie inside the browse roots (path jail).
+        let repo_path = self.browse_jail().resolve(&req.repo_path)?;
         let core_req = ide_core::NewSession {
-            repo_path: PathBuf::from(&req.repo_path),
+            repo_path,
             agent: agent_from_proto(req.agent),
             title: req.title.clone(),
             base_ref: req.base_ref.clone(),

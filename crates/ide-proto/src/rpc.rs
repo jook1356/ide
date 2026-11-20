@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProtoError;
+use crate::files::{
+    BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
+    GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
+};
 
 /// Major protocol version. Peers with a different major version refuse each other.
 pub const PROTO_VERSION: u32 = 1;
@@ -204,6 +208,115 @@ pub enum Request {
     },
     /// Stop every session and exit the server process (daemon or `--no-daemon`).
     ServerShutdown,
+
+    // ---- Phase 2: files (paths root-relative to the session worktree) ----
+    /// List a directory (`dir` = `""` for the root). `.git` is never listed; ignored entries
+    /// only with `include_ignored`.
+    FsList {
+        session: String,
+        dir: String,
+        include_ignored: bool,
+    },
+    FsStat {
+        session: String,
+        path: String,
+    },
+    /// Read a file (`max_bytes` 0 = default 2 MiB).
+    FsRead {
+        session: String,
+        path: String,
+        max_bytes: u64,
+    },
+    /// Write a whole file. `expected_version` = the `FileContent::version` it was read at
+    /// (`fs-conflict` if the file changed on disk since); `None` = overwrite unconditionally.
+    /// `encoding` `None` = UTF-8 without BOM.
+    FsWrite {
+        session: String,
+        path: String,
+        content: String,
+        expected_version: Option<String>,
+        encoding: Option<TextEncoding>,
+    },
+    /// Create a new file (`fs-exists` if it exists); parent folders are created.
+    FsCreateFile {
+        session: String,
+        path: String,
+        content: String,
+    },
+    /// Create a folder (and missing parents); `fs-exists` if it exists.
+    FsCreateDir {
+        session: String,
+        path: String,
+    },
+    /// Rename/move inside the session (`fs-exists` if `to` exists).
+    FsRename {
+        session: String,
+        from: String,
+        to: String,
+    },
+    /// Delete a file, symlink or folder (non-empty folders need `recursive`).
+    FsDelete {
+        session: String,
+        path: String,
+        recursive: bool,
+    },
+    /// Start sending `Notify::FsChanged`/`GitChanged` for the session to this connection.
+    FsWatch {
+        session: String,
+    },
+    FsUnwatch {
+        session: String,
+    },
+    /// The absolute roots repositories can be picked from.
+    BrowseRoots,
+    /// Sub-folders of an absolute folder inside a browse root (`""` = the first root).
+    BrowseList {
+        abs_dir: String,
+    },
+    /// Start a text search; `search` is a client-chosen id echoed in `Notify::SearchHits` /
+    /// `Notify::SearchDone` (sent to this connection only, after the `Unit` reply).
+    SearchText {
+        search: u64,
+        query: TextSearch,
+    },
+    /// Cancel a running search of this connection (no-op if finished).
+    SearchCancel {
+        search: u64,
+    },
+    /// Fuzzy file-name search over non-ignored files (`max_results` 0 = 100).
+    SearchFiles {
+        session: String,
+        query: String,
+        max_results: u32,
+    },
+    /// `base` = branch to compare with (`None` = the branch checked out in the main repo).
+    GitStatus {
+        session: String,
+        base: Option<String>,
+    },
+    /// `path` `None` = every changed tracked file.
+    GitDiff {
+        session: String,
+        path: Option<String>,
+        against: DiffAgainst,
+        base: Option<String>,
+    },
+    /// File content at a revision; `Response::FileAt(None)` if it does not exist there.
+    GitFileAt {
+        session: String,
+        path: String,
+        rev: GitRev,
+        base: Option<String>,
+    },
+    /// Go to definition at `line`/`col` (1-based; `col` in chars) of `path`. `text` = the
+    /// editor's current (possibly unsaved) content; `None` = read the file.
+    DefLookup {
+        session: String,
+        path: String,
+        line: u32,
+        col: u32,
+        text: Option<String>,
+    },
 }
 
 impl Request {
@@ -228,6 +341,25 @@ impl Request {
             Request::TermWrite { .. } => "term.write",
             Request::TermResize { .. } => "term.resize",
             Request::ServerShutdown => "server.shutdown",
+            Request::FsList { .. } => "fs.list",
+            Request::FsStat { .. } => "fs.stat",
+            Request::FsRead { .. } => "fs.read",
+            Request::FsWrite { .. } => "fs.write",
+            Request::FsCreateFile { .. } => "fs.create_file",
+            Request::FsCreateDir { .. } => "fs.create_dir",
+            Request::FsRename { .. } => "fs.rename",
+            Request::FsDelete { .. } => "fs.delete",
+            Request::FsWatch { .. } => "fs.watch",
+            Request::FsUnwatch { .. } => "fs.unwatch",
+            Request::BrowseRoots => "browse.roots",
+            Request::BrowseList { .. } => "browse.list",
+            Request::SearchText { .. } => "search.text",
+            Request::SearchCancel { .. } => "search.cancel",
+            Request::SearchFiles { .. } => "search.files",
+            Request::GitStatus { .. } => "git.status",
+            Request::GitDiff { .. } => "git.diff",
+            Request::GitFileAt { .. } => "git.file_at",
+            Request::DefLookup { .. } => "def.lookup",
         }
     }
 }
@@ -244,6 +376,20 @@ pub enum Response {
     Sessions(Vec<SessionInfo>),
     Session(SessionInfo),
     Attached(Attached),
+    Entries(Vec<FsEntry>),
+    Stat(FsStat),
+    File(FileContent),
+    /// `fs.write`: the new version.
+    Written {
+        version: String,
+    },
+    Roots(Vec<String>),
+    Browse(BrowseListing),
+    FileMatches(Vec<FileMatch>),
+    GitStatus(GitStatus),
+    Diff(Vec<DiffFile>),
+    FileAt(Option<FileContent>),
+    Def(DefResult),
 }
 
 /// Server -> client event.
@@ -267,6 +413,27 @@ pub enum Notify {
     SessionsChanged,
     /// The profile list changed.
     ProfilesChanged,
+    /// Files changed under a watched session (debounced; root-relative paths, deduplicated).
+    /// `rescan` = too many changes to list: re-read everything shown.
+    FsChanged {
+        session: String,
+        paths: Vec<String>,
+        rescan: bool,
+    },
+    /// The session's git state changed (index, HEAD, refs) without necessarily touching files.
+    GitChanged {
+        session: String,
+    },
+    /// A batch of `search.text` results.
+    SearchHits {
+        search: u64,
+        hits: Vec<SearchMatch>,
+    },
+    /// `search.text` finished (always sent last, also after a cancel).
+    SearchDone {
+        search: u64,
+        summary: SearchSummary,
+    },
 }
 
 /// One RPC frame payload.

@@ -1,15 +1,17 @@
 //! [`Client`]: RPC, events, terminal attachments, reconnect + resume.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    Attached, ChunkDecoder, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
-    ProfileInfo, ProtoError, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
-    SessionInfo, Stream, TermChunk, Welcome,
+    Attached, BrowseListing, ChunkDecoder, DefResult, DiffAgainst, DiffFile, FileContent,
+    FileMatch, FsEntry, FsStat, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession,
+    Notify, PROTO_VERSION, ProfileInfo, ProtoError, Request, Response, ResumeToken, Role,
+    RpcMessage, RpcReceiver, SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk,
+    TextEncoding, TextSearch, Welcome,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -86,9 +88,20 @@ struct Status {
 
 type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<Response, ProtoError>>>>;
 
+/// One `search.text` result batch or its end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchEvent {
+    /// Matching lines (in walk order).
+    Hits(Vec<SearchMatch>),
+    /// The search ended (always last).
+    Done(SearchSummary),
+}
+
 struct Conn {
     mux: Mux,
     pending: Pending,
+    /// `search.text` routes of this connection by search id.
+    searches: Mutex<HashMap<u64, mpsc::UnboundedSender<SearchEvent>>>,
     _child: Mutex<Option<tokio::process::Child>>,
 }
 
@@ -146,6 +159,8 @@ struct Inner {
     status: watch::Sender<Status>,
     next_id: AtomicU64,
     attachments: Mutex<HashMap<String, Arc<Attachment>>>,
+    /// Sessions watched with `fs.watch` (re-watched after a reconnect).
+    watched: Mutex<HashSet<String>>,
     ctrl_tx: mpsc::UnboundedSender<ClientEvent>,
     term_tx: mpsc::Sender<ClientEvent>,
     events: EventSlot,
@@ -196,6 +211,7 @@ impl Client {
             status: watch::channel(Status::default()).0,
             next_id: AtomicU64::new(1),
             attachments: Mutex::new(HashMap::new()),
+            watched: Mutex::new(HashSet::new()),
             ctrl_tx,
             term_tx,
             events: Arc::new(Mutex::new(Some((ctrl_rx, term_rx)))),
@@ -474,6 +490,419 @@ impl Client {
             .await,
         )
     }
+
+    // ---- Phase 2: files, browsing, search, git, go-to-definition ----
+    // Paths are root-relative to the session worktree (`/`-separated, `""` = root).
+
+    /// `fs.list`: entries of `dir` (directories first). `.git` is never listed; ignored
+    /// entries only with `include_ignored` (flagged `ignored`).
+    pub async fn fs_list(
+        &self,
+        session: &str,
+        dir: &str,
+        include_ignored: bool,
+    ) -> Result<Vec<FsEntry>, ProtoError> {
+        expect(
+            self.call(Request::FsList {
+                session: session.into(),
+                dir: dir.into(),
+                include_ignored,
+            })
+            .await,
+            |r| match r {
+                Response::Entries(e) => Some(e),
+                _ => None,
+            },
+        )
+    }
+
+    /// `fs.stat` (a symlink is reported as such, not followed).
+    pub async fn fs_stat(&self, session: &str, path: &str) -> Result<FsStat, ProtoError> {
+        expect(
+            self.call(Request::FsStat {
+                session: session.into(),
+                path: path.into(),
+            })
+            .await,
+            |r| match r {
+                Response::Stat(s) => Some(s),
+                _ => None,
+            },
+        )
+    }
+
+    /// `fs.read` (`max_bytes` 0 = 2 MiB; at most 8 MiB). Keep `version` and `encoding` for
+    /// [`Client::fs_write`].
+    pub async fn fs_read(
+        &self,
+        session: &str,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<FileContent, ProtoError> {
+        expect(
+            self.call(Request::FsRead {
+                session: session.into(),
+                path: path.into(),
+                max_bytes,
+            })
+            .await,
+            |r| match r {
+                Response::File(f) => Some(f),
+                _ => None,
+            },
+        )
+    }
+
+    /// `fs.write`: replace the file's content; returns the new version. With
+    /// `expected_version`, fails with `fs-conflict` (args `path`, `expected`, `actual`) when
+    /// the file changed on disk since it was read. `encoding` `None` = UTF-8 without BOM.
+    pub async fn fs_write(
+        &self,
+        session: &str,
+        path: &str,
+        content: impl Into<String>,
+        expected_version: Option<&str>,
+        encoding: Option<TextEncoding>,
+    ) -> Result<String, ProtoError> {
+        expect_written(
+            self.call(Request::FsWrite {
+                session: session.into(),
+                path: path.into(),
+                content: content.into(),
+                expected_version: expected_version.map(str::to_owned),
+                encoding,
+            })
+            .await,
+        )
+    }
+
+    /// `fs.create_file` (`fs-exists` if it exists); returns the version.
+    pub async fn fs_create_file(
+        &self,
+        session: &str,
+        path: &str,
+        content: impl Into<String>,
+    ) -> Result<String, ProtoError> {
+        expect_written(
+            self.call(Request::FsCreateFile {
+                session: session.into(),
+                path: path.into(),
+                content: content.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `fs.create_dir` (with parents; `fs-exists` if it exists).
+    pub async fn fs_create_dir(&self, session: &str, path: &str) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::FsCreateDir {
+                session: session.into(),
+                path: path.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `fs.rename` / move inside the session (`fs-exists` if `to` exists).
+    pub async fn fs_rename(&self, session: &str, from: &str, to: &str) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::FsRename {
+                session: session.into(),
+                from: from.into(),
+                to: to.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `fs.delete` (permanent; folders with content need `recursive`).
+    pub async fn fs_delete(
+        &self,
+        session: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::FsDelete {
+                session: session.into(),
+                path: path.into(),
+                recursive,
+            })
+            .await,
+        )
+    }
+
+    /// `fs.watch`: `Notify::FsChanged` / `Notify::GitChanged` for the session arrive as
+    /// [`ClientEvent::Notify`]. Remembered: re-watched after a reconnect (refresh what is
+    /// shown on `Connected`, changes during the gap are not replayed).
+    pub async fn fs_watch(&self, session: &str) -> Result<(), ProtoError> {
+        self.inner()
+            .watched
+            .lock()
+            .unwrap()
+            .insert(session.to_owned());
+        expect_unit(
+            self.call(Request::FsWatch {
+                session: session.into(),
+            })
+            .await,
+        )
+    }
+
+    /// Stop watching a session.
+    pub async fn fs_unwatch(&self, session: &str) -> Result<(), ProtoError> {
+        self.inner().watched.lock().unwrap().remove(session);
+        if !self.is_connected() {
+            return Ok(());
+        }
+        expect_unit(
+            self.call(Request::FsUnwatch {
+                session: session.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `browse.roots`: absolute folders repositories can be picked from.
+    pub async fn browse_roots(&self) -> Result<Vec<String>, ProtoError> {
+        expect(self.call(Request::BrowseRoots).await, |r| match r {
+            Response::Roots(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    /// `browse.list`: sub-folders of an absolute folder inside the browse roots (`""` = the
+    /// first root), with `is_git_repo` flags.
+    pub async fn browse_list(&self, abs_dir: &str) -> Result<BrowseListing, ProtoError> {
+        expect(
+            self.call(Request::BrowseList {
+                abs_dir: abs_dir.into(),
+            })
+            .await,
+            |r| match r {
+                Response::Browse(b) => Some(b),
+                _ => None,
+            },
+        )
+    }
+
+    /// `search.text`: start a search; results stream through the returned [`SearchStream`]
+    /// (dropping it cancels the search). Query errors (`search-bad-regex`, ...) are returned
+    /// here.
+    pub async fn search_text(&self, query: TextSearch) -> Result<SearchStream, ProtoError> {
+        let inner = self.inner();
+        let conn = inner.current().ok_or_else(disconnected)?;
+        let search = inner.next_id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        conn.searches.lock().unwrap().insert(search, tx);
+        let r = conn
+            .call(
+                inner.next_id(),
+                Request::SearchText { search, query },
+                inner.opts.request_timeout,
+            )
+            .await;
+        if let Err(e) = expect_unit(r) {
+            conn.searches.lock().unwrap().remove(&search);
+            return Err(e);
+        }
+        Ok(SearchStream {
+            id: search,
+            rx,
+            inner: Arc::downgrade(inner),
+            done: false,
+        })
+    }
+
+    /// `search.files`: fuzzy file-name search (`max_results` 0 = 100), best first.
+    pub async fn search_files(
+        &self,
+        session: &str,
+        query: &str,
+        max_results: u32,
+    ) -> Result<Vec<FileMatch>, ProtoError> {
+        expect(
+            self.call(Request::SearchFiles {
+                session: session.into(),
+                query: query.into(),
+                max_results,
+            })
+            .await,
+            |r| match r {
+                Response::FileMatches(m) => Some(m),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.status` (`base` = branch to compare with; `None` = the branch checked out in the
+    /// session's repository, else `main`/`master`).
+    pub async fn git_status(
+        &self,
+        session: &str,
+        base: Option<&str>,
+    ) -> Result<GitStatus, ProtoError> {
+        expect(
+            self.call(Request::GitStatus {
+                session: session.into(),
+                base: base.map(str::to_owned),
+            })
+            .await,
+            |r| match r {
+                Response::GitStatus(s) => Some(s),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.diff`: structured hunks of one file (`path`) or of every changed tracked file.
+    pub async fn git_diff(
+        &self,
+        session: &str,
+        path: Option<&str>,
+        against: DiffAgainst,
+        base: Option<&str>,
+    ) -> Result<Vec<DiffFile>, ProtoError> {
+        expect(
+            self.call(Request::GitDiff {
+                session: session.into(),
+                path: path.map(str::to_owned),
+                against,
+                base: base.map(str::to_owned),
+            })
+            .await,
+            |r| match r {
+                Response::Diff(d) => Some(d),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.file_at`: content at a revision (`None` if the file does not exist there), for
+    /// side-by-side views.
+    pub async fn git_file_at(
+        &self,
+        session: &str,
+        path: &str,
+        rev: GitRev,
+        base: Option<&str>,
+    ) -> Result<Option<FileContent>, ProtoError> {
+        expect(
+            self.call(Request::GitFileAt {
+                session: session.into(),
+                path: path.into(),
+                rev,
+                base: base.map(str::to_owned),
+            })
+            .await,
+            |r| match r {
+                Response::FileAt(f) => Some(f),
+                _ => None,
+            },
+        )
+    }
+
+    /// `def.lookup`: go to definition at 1-based `line`/`col` (`col` in chars) of `path`;
+    /// `text` = the editor's unsaved content (`None` = the file on disk).
+    pub async fn def_lookup(
+        &self,
+        session: &str,
+        path: &str,
+        line: u32,
+        col: u32,
+        text: Option<String>,
+    ) -> Result<DefResult, ProtoError> {
+        expect(
+            self.call(Request::DefLookup {
+                session: session.into(),
+                path: path.into(),
+                line,
+                col,
+                text,
+            })
+            .await,
+            |r| match r {
+                Response::Def(d) => Some(d),
+                _ => None,
+            },
+        )
+    }
+}
+
+/// Results of one [`Client::search_text`]. Dropping it before `Done` cancels the search.
+pub struct SearchStream {
+    id: u64,
+    rx: mpsc::UnboundedReceiver<SearchEvent>,
+    inner: std::sync::Weak<Inner>,
+    done: bool,
+}
+
+impl std::fmt::Debug for SearchStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchStream")
+            .field("id", &self.id)
+            .field("done", &self.done)
+            .finish()
+    }
+}
+
+impl SearchStream {
+    /// The search id (as in `Notify::SearchHits`).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Next batch, then `Done`, then `None`. `None` before `Done` = the connection dropped.
+    pub async fn next(&mut self) -> Option<SearchEvent> {
+        if self.done {
+            return None;
+        }
+        let e = self.rx.recv().await;
+        if matches!(e, Some(SearchEvent::Done(_)) | None) {
+            self.done = true;
+        }
+        e
+    }
+
+    /// Wait for everything: all hits and the summary (`None` if the connection dropped).
+    pub async fn collect(mut self) -> (Vec<SearchMatch>, Option<SearchSummary>) {
+        let mut hits = Vec::new();
+        while let Some(e) = self.next().await {
+            match e {
+                SearchEvent::Hits(h) => hits.extend(h),
+                SearchEvent::Done(s) => return (hits, Some(s)),
+            }
+        }
+        (hits, None)
+    }
+
+    /// Ask the server to stop; a `Done` with `cancelled` follows.
+    pub fn cancel(&self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let search = self.id;
+        rt.spawn(async move {
+            let _ = inner.call(Request::SearchCancel { search }).await;
+        });
+    }
+}
+
+impl Drop for SearchStream {
+    fn drop(&mut self) {
+        if !self.done {
+            self.cancel();
+            if let Some(inner) = self.inner.upgrade()
+                && let Some(c) = inner.current()
+            {
+                c.searches.lock().unwrap().remove(&self.id);
+            }
+        }
+    }
 }
 
 fn expect<T>(
@@ -490,6 +919,13 @@ fn expect_unit(r: Result<Response, ProtoError>) -> Result<(), ProtoError> {
 fn expect_session(r: Result<Response, ProtoError>) -> Result<SessionInfo, ProtoError> {
     expect(r, |r| match r {
         Response::Session(s) => Some(s),
+        _ => None,
+    })
+}
+
+fn expect_written(r: Result<Response, ProtoError>) -> Result<String, ProtoError> {
+    expect(r, |r| match r {
+        Response::Written { version } => Some(version),
         _ => None,
     })
 }
@@ -614,6 +1050,30 @@ async fn reader(conn: Arc<Conn>, mut rx: RpcReceiver, ctrl_tx: mpsc::UnboundedSe
                 }
             }
             Ok(RpcMessage::Notify(n)) => {
+                // Search results go to their stream; unknown searches fall through.
+                let n = match n {
+                    Notify::SearchHits { search, hits } => {
+                        let tx = conn.searches.lock().unwrap().get(&search).cloned();
+                        match tx {
+                            Some(tx) => {
+                                let _ = tx.send(SearchEvent::Hits(hits));
+                                continue;
+                            }
+                            None => Notify::SearchHits { search, hits },
+                        }
+                    }
+                    Notify::SearchDone { search, summary } => {
+                        let tx = conn.searches.lock().unwrap().remove(&search);
+                        match tx {
+                            Some(tx) => {
+                                let _ = tx.send(SearchEvent::Done(summary));
+                                continue;
+                            }
+                            None => Notify::SearchDone { search, summary },
+                        }
+                    }
+                    other => other,
+                };
                 let _ = ctrl_tx.send(ClientEvent::Notify(n));
             }
             Ok(RpcMessage::Request { .. }) => {}
@@ -621,6 +1081,7 @@ async fn reader(conn: Arc<Conn>, mut rx: RpcReceiver, ctrl_tx: mpsc::UnboundedSe
         }
     }
     conn.pending.lock().unwrap().clear();
+    conn.searches.lock().unwrap().clear();
 }
 
 async fn connect_once(inner: &Arc<Inner>) -> Result<(Arc<Conn>, Welcome), ProtoError> {
@@ -636,6 +1097,7 @@ async fn connect_once(inner: &Arc<Inner>) -> Result<(Arc<Conn>, Welcome), ProtoE
     let conn = Arc::new(Conn {
         mux,
         pending: Mutex::new(HashMap::new()),
+        searches: Mutex::new(HashMap::new()),
         _child: Mutex::new(c.child),
     });
     tokio::spawn(reader(conn.clone(), rx, inner.ctrl_tx.clone()));
@@ -708,6 +1170,24 @@ async fn run(inner: Arc<Inner>) {
                     s.last_error = None;
                 });
                 let _ = inner.ctrl_tx.send(ClientEvent::Connected(welcome));
+                let watched: Vec<String> = inner.watched.lock().unwrap().iter().cloned().collect();
+                for session in watched {
+                    let (inner2, conn2) = (inner.clone(), conn.clone());
+                    tokio::spawn(async move {
+                        let r = conn2
+                            .call(
+                                inner2.next_id(),
+                                Request::FsWatch {
+                                    session: session.clone(),
+                                },
+                                inner2.opts.request_timeout,
+                            )
+                            .await;
+                        if let Err(e) = r {
+                            tracing::debug!("re-watch {session}: {e}");
+                        }
+                    });
+                }
                 for a in atts {
                     let (inner2, conn2) = (inner.clone(), conn.clone());
                     tokio::spawn(async move {

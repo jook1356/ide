@@ -7,6 +7,68 @@ use std::process::Command;
 use crate::error::{Error, Result};
 use crate::slug::slugify;
 
+/// Raw result of a `git` run ([`git_raw`]).
+#[derive(Debug, Clone)]
+pub struct GitOutput {
+    /// Exit code (`None` if killed by a signal).
+    pub code: Option<i32>,
+    /// Raw stdout bytes (file contents, diffs: not necessarily UTF-8).
+    pub stdout: Vec<u8>,
+    /// Raw stderr bytes.
+    pub stderr: Vec<u8>,
+}
+
+impl GitOutput {
+    /// [`Error::Git`] for this output (`args` = the arguments, for the message).
+    pub fn error<S: AsRef<OsStr>>(&self, args: &[S]) -> Error {
+        Error::Git {
+            args: args
+                .iter()
+                .map(|a| a.as_ref().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+            status: self
+                .code
+                .map_or_else(|| "signal".to_owned(), |c| format!("exit code: {c}")),
+            stderr: String::from_utf8_lossy(&self.stderr).trim().to_owned(),
+        }
+    }
+}
+
+/// Run `git -C cwd -c core.quotepath=false <args>` without a terminal prompt (stdin closed,
+/// `GIT_TERMINAL_PROMPT=0`, no console window on Windows) and return its raw output whatever
+/// the exit code. `env` adds variables (e.g. `GIT_OPTIONAL_LOCKS=0`). Does not go through the
+/// server's `Runner` (see docs/server-architecture.md).
+pub fn git_raw<S: AsRef<OsStr>>(cwd: &Path, args: &[S], env: &[(&str, &str)]) -> Result<GitOutput> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(cwd)
+        .args(["-c", "core.quotepath=false"])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    tracing::debug!(
+        cwd = %cwd.display(),
+        args = ?args.iter().map(|a| a.as_ref().to_string_lossy()).collect::<Vec<_>>(),
+        "git"
+    );
+    let out = cmd.output().map_err(Error::GitSpawn)?;
+    Ok(GitOutput {
+        code: out.status.code(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
 /// Run `git` with `args` in `cwd`; returns trimmed stdout or [`Error::Git`] with stderr.
 pub(crate) fn git<I, S>(cwd: &Path, args: I) -> Result<String>
 where
@@ -14,35 +76,13 @@ where
     S: AsRef<OsStr>,
 {
     let args: Vec<std::ffi::OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(cwd)
-        .args(["-c", "core.quotepath=false"])
-        .args(&args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    tracing::debug!(cwd = %cwd.display(), ?args, "git");
-    let out = cmd.output().map_err(Error::GitSpawn)?;
-    if out.status.success() {
+    let out = git_raw(cwd, &args, &[])?;
+    if out.code == Some(0) {
         Ok(String::from_utf8_lossy(&out.stdout)
             .trim_end_matches(['\r', '\n'])
             .to_owned())
     } else {
-        Err(Error::Git {
-            args: args
-                .iter()
-                .map(|a| a.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" "),
-            status: out.status.to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-        })
+        Err(out.error(&args))
     }
 }
 

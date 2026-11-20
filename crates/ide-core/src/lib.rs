@@ -48,7 +48,7 @@ pub use ops::{
 };
 pub use paths::{DATA_DIR_ENV, Paths};
 pub use profile::{DEFAULT_PROFILE, Profile, ProfileStore};
-pub use repo::{Repo, same_path};
+pub use repo::{GitOutput, Repo, git_raw, same_path};
 pub use session::{AgentKind, Session, SessionId, SessionStatus, SessionStore};
 pub use slug::{slugify, validate_slug};
 pub use worktree::{BRANCH_PREFIX, Worktree, WorktreeInfo, worktree_exists};
