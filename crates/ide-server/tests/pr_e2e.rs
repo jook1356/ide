@@ -1,14 +1,19 @@
 //! Pull requests and agent prompts end to end through `ide_client::Client`: `pr.*` against a
 //! fake `gh` script (records its arguments and stdin, answers with canned `gh api --include`
-//! output in call order; no real GitHub), prompts built for a session's worktree, and
+//! output in call order; no real GitHub) when git has no credential token, and against a local
+//! fake GitHub over HTTP when it has one; prompts built for a session's worktree, and
 //! `session.send_prompt` into a shell session and a paste-mode provider. Over the memory
-//! transport (`ServerConfig::gh`) and a real `ide-server` child (`IDE_GH`).
+//! transport (`ServerConfig::gh`, `ServerConfig::git_credential_env`) and a real `ide-server`
+//! child (`IDE_GH`, `IDE_GITHUB_API`, `GIT_CONFIG_GLOBAL`). `git credential fill` only ever sees
+//! a scratch git config (`GIT_CONFIG_NOSYSTEM=1`), never the user's credential store.
 //! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
 
 mod common;
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
@@ -114,6 +119,68 @@ impl FakeGh {
     }
 }
 
+/// A helper answering every `get` with a token.
+const TOKEN_HELPER: &str =
+    "!f() { test \"$1\" = get && echo username=x-access-token && echo password=e2e-token; }; f";
+/// A helper telling git to stop (no credential, no prompt).
+const QUIT_HELPER: &str = "!f() { echo quit=1; }; f";
+
+/// A scratch global git config holding only `credential.helper = helper`; with
+/// `GIT_CONFIG_NOSYSTEM=1` it is all `git credential fill` reads.
+fn credential_config(dir: &Path, name: &str, helper: &str) -> PathBuf {
+    let cfg = dir.join(name);
+    std::fs::write(&cfg, "").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["config", "--file"])
+        .arg(&cfg)
+        .args(["credential.helper", helper])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    cfg
+}
+
+/// Requests the fake GitHub saw: `METHOD target` and the `Authorization` header.
+type Seen = Arc<Mutex<Vec<(String, String)>>>;
+
+/// A local fake GitHub over HTTP answering `[]`.
+fn fake_github() -> (String, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Seen::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            let (mut auth, mut len) = (String::new(), 0usize);
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    match k.trim().to_lowercase().as_str() {
+                        "authorization" => auth = v.trim().to_owned(),
+                        "content-length" => len = v.trim().parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
+            let mut body = vec![0; len];
+            let _ = reader.read_exact(&mut body);
+            let target: Vec<&str> = first.split_whitespace().take(2).collect();
+            log.lock().unwrap().push((target.join(" "), auth));
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]"
+            );
+        }
+    });
+    (base, seen)
+}
+
 fn pr_json(number: u64, branch: &str, state: &str) -> String {
     format!(
         r#"{{"number":{number},"state":"{state}","merged":false,"draft":false,"html_url":"{URL}/pull/{number}","title":"t","mergeable":true,"mergeable_state":"clean","head":{{"ref":"{branch}","sha":"{sha}","repo":{{"full_name":"acme/widgets"}}}},"base":{{"ref":"main","repo":{{"full_name":"acme/widgets"}}}}}}"#,
@@ -172,6 +239,12 @@ async fn pr_and_prompts_through_the_client() {
     .unwrap();
     let mut cfg = ServerConfig::for_paths(Paths::new(&data));
     cfg.gh = Some(gh.program.clone());
+    // git has no credential token for github.com here: every call goes through the fake gh.
+    let no_token = credential_config(&dir, "no-token.gitconfig", QUIT_HELPER);
+    cfg.git_credential_env = vec![
+        ("GIT_CONFIG_GLOBAL".into(), no_token.display().to_string()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ];
     let server = Server::new(cfg);
     let c = connect(&server).await;
     let col = collect(&c, Arc::default());
@@ -352,41 +425,78 @@ async fn pr_and_prompts_through_the_client() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A real `ide-server` child resolves `gh` from `IDE_GH`; a missing program is `gh-missing`.
+/// A real `ide-server` child: git's credential token goes to the API over HTTP
+/// (`IDE_GITHUB_API` -> local fake GitHub) and `gh` (`IDE_GH`) is not run; without a token the
+/// fake `gh` answers; with neither, `github-no-credentials`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gh_from_env_in_a_server_child() {
+async fn credential_token_first_in_a_server_child() {
     let dir = tmp_dir("pr-child");
     let repo = repo_with_origin(&dir);
     let gh = FakeGh::new(&dir.join("fake-gh"));
     gh.answers(&[(200, "[]")]);
-    let child = |data: &str, gh_path: &Path| {
+    let (api, seen) = fake_github();
+    let token = credential_config(&dir, "token.gitconfig", TOKEN_HELPER);
+    let no_token = credential_config(&dir, "no-token.gitconfig", QUIT_HELPER);
+    let child = |data: &str, gh_path: &Path, git_config: &Path| {
         LocalChild::new(env!("CARGO_BIN_EXE_ide-server"))
             .no_daemon()
             .env("IDE_DATA_DIR", dir.join(data).display().to_string())
             .env("IDE_GH", gh_path.display().to_string())
+            .env("IDE_GITHUB_API", api.clone())
+            .env("GIT_CONFIG_GLOBAL", git_config.display().to_string())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
     };
     let opts = || ClientOptions {
         reconnect: false,
         ..ClientOptions::default()
     };
-    let c = Client::connect(child("data", &gh.program), opts())
+
+    // A token: HTTP with it, gh untouched.
+    let c = Client::connect(child("data", &gh.program, &token), opts())
+        .await
+        .unwrap();
+    let r = c.register_repo(&repo.display().to_string()).await.unwrap();
+    let s = session(&c, "shell", &r.id, false).await;
+    assert_eq!(c.pr_status(&s.id, &r.id).await.unwrap(), None);
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0]
+            .0
+            .starts_with("GET /repos/acme/widgets/pulls?state=all&head=acme%3A"),
+        "{}",
+        calls[0].0
+    );
+    assert_eq!(calls[0].1, "Bearer e2e-token");
+    assert!(gh.calls().is_empty());
+    c.delete_session(&s.id, true).await.unwrap();
+    drop(c);
+
+    // No token: the fake gh.
+    let c = Client::connect(child("data1", &gh.program, &no_token), opts())
         .await
         .unwrap();
     let r = c.register_repo(&repo.display().to_string()).await.unwrap();
     let s = session(&c, "shell", &r.id, false).await;
     assert_eq!(c.pr_status(&s.id, &r.id).await.unwrap(), None);
     assert_eq!(gh.calls().len(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
     c.delete_session(&s.id, true).await.unwrap();
     drop(c);
 
-    let c = Client::connect(child("data2", &dir.join("missing-gh.exe")), opts())
-        .await
-        .unwrap();
+    // Neither.
+    let c = Client::connect(
+        child("data2", &dir.join("missing-gh.exe"), &no_token),
+        opts(),
+    )
+    .await
+    .unwrap();
     let r = c.register_repo(&repo.display().to_string()).await.unwrap();
     let s = session(&c, "shell", &r.id, false).await;
+    let e = c.pr_status(&s.id, &r.id).await.unwrap_err();
     assert_eq!(
-        c.pr_status(&s.id, &r.id).await.unwrap_err().id,
-        "gh-missing"
+        (e.id.as_str(), e.get("host")),
+        ("github-no-credentials", Some("github.com"))
     );
     c.delete_session(&s.id, true).await.unwrap();
     drop(c);

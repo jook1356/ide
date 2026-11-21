@@ -1,8 +1,13 @@
 //! Unit tests of the PR backend: a local bare `origin` (reached through `insteadOf` from a
 //! GitHub-like URL, so nothing touches the network) and an in-process fake GitHub API that
-//! records every call and answers with canned JSON. No real `gh`, no real GitHub.
+//! records every call and answers with canned JSON. No real `gh`, no real GitHub. The
+//! transport tests run `git credential fill` against a scratch git config only (its own
+//! `credential.helper`, `GIT_CONFIG_NOSYSTEM`), never the user's credential store, and a local
+//! fake GitHub over HTTP.
 
-use std::sync::Mutex;
+use std::io::{BufRead, BufReader};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use super::*;
 
@@ -572,6 +577,14 @@ fn create_without_api_or_refused_leaves_the_text() {
     )
     .unwrap();
     assert_eq!(res.reason.map(|e| e.id), Some("gh-missing".to_owned()));
+    // Neither a credential token nor gh (the transport's error): the same page.
+    let nocred =
+        FakeGh::new(|_| Err(ProtoError::new("github-no-credentials").arg("host", "github.com")));
+    let res = create(&fx.work, nocred.gh(), &request("main", &f)).unwrap();
+    assert_eq!(
+        (res.kind, res.reason.map(|e| e.id)),
+        (PrResultKind::Page, Some("github-no-credentials".to_owned()))
+    );
 
     // The API refuses (422): reconciled once, then Failed with the reason kept beside the text.
     let refused = FakeGh::new(|c| match c.method.as_str() {
@@ -955,4 +968,282 @@ fn pending_drift_unmerged_targets() {
         leftover(&fx.work, None, Some("-x")).unwrap_err().id,
         "pr-bad-branch"
     );
+}
+
+// ---- transport: git credential token + HTTPS, gh fallback ---------------------------------
+
+/// A helper answering every `get` with a token.
+const TOKEN_HELPER: &str =
+    "!f() { test \"$1\" = get && echo username=x-access-token && echo password=test-token-1; }; f";
+/// A helper telling git to stop (no credential, no prompt).
+const QUIT_HELPER: &str = "!f() { echo quit=1; }; f";
+
+/// Environment for `git credential fill` that never reaches the user's credential store: a
+/// scratch global config holding only `credential.helper = helper`, no system config.
+fn isolated_credentials(dir: &Path, helper: &str) -> Vec<(String, String)> {
+    let cfg = dir.join("gitconfig");
+    std::fs::write(&cfg, "").unwrap();
+    let out = Command::new("git")
+        .args(["config", "--file"])
+        .arg(&cfg)
+        .args(["credential.helper", helper])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    vec![
+        ("GIT_CONFIG_GLOBAL".into(), cfg.display().to_string()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]
+}
+
+type Seen = Arc<Mutex<Vec<(Call, Option<String>)>>>;
+
+/// A local fake GitHub over HTTP: records each request with its `Authorization` header.
+struct FakeHttp {
+    base: String,
+    seen: Seen,
+}
+
+impl FakeHttp {
+    fn start(handler: impl Fn(&Call) -> (u16, Value) + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Seen::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                serve(stream, &handler, &log);
+            }
+        });
+        FakeHttp { base, seen }
+    }
+    fn seen(&self) -> Vec<(Call, Option<String>)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn form_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap());
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap()
+}
+
+fn serve(mut stream: TcpStream, handler: &dyn Fn(&Call) -> (u16, Value), seen: &Seen) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let target = parts.next().unwrap_or_default().to_owned();
+    let mut headers: HashMap<String, String> = HashMap::new();
+    loop {
+        let mut h = String::new();
+        if reader.read_line(&mut h).unwrap() == 0 || h.trim_end().is_empty() {
+            break;
+        }
+        if let Some((k, v)) = h.split_once(':') {
+            headers.insert(k.trim().to_lowercase(), v.trim().to_owned());
+        }
+    }
+    let len: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; len];
+    reader.read_exact(&mut body).unwrap();
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let call = Call {
+        method,
+        path: path.trim_start_matches('/').to_owned(),
+        query: query
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let (k, v) = p.split_once('=').unwrap_or((p, ""));
+                (form_decode(k), form_decode(v))
+            })
+            .collect(),
+        body: (!body.is_empty()).then(|| serde_json::from_slice(&body).unwrap()),
+    };
+    let (status, answer) = handler(&call);
+    seen.lock()
+        .unwrap()
+        .push((call, headers.get("authorization").cloned()));
+    let text = if answer.is_null() {
+        String::new()
+    } else {
+        answer.to_string()
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+        text.len()
+    );
+}
+
+fn transport(
+    creds: &Arc<Credentials>,
+    http: &FakeHttp,
+    gh: Result<Arc<dyn GhApi>, ProtoError>,
+) -> GithubTransport {
+    GithubTransport {
+        credentials: creds.clone(),
+        http: Arc::new(HttpApi::new(Some(http.base.clone()))),
+        gh,
+    }
+}
+
+const LIST: GhRequest<'static> = GhRequest {
+    host: "github.com",
+    method: "GET",
+    path: "repos/acme/widgets/pulls",
+    query: &[],
+    body: None,
+};
+
+#[test]
+fn api_roots_like_desk() {
+    assert_eq!(api_base("github.com"), "https://api.github.com");
+    assert_eq!(
+        api_base("ghe.example.com"),
+        "https://ghe.example.com/api/v3"
+    );
+    assert_eq!(
+        endpoint("https://api.github.com", "repos/a/b/pulls"),
+        "https://api.github.com/repos/a/b/pulls"
+    );
+    assert_eq!(
+        endpoint("https://api.github.com", "graphql"),
+        "https://api.github.com/graphql"
+    );
+    assert_eq!(
+        endpoint("https://ghe.example.com/api/v3", "graphql"),
+        "https://ghe.example.com/api/graphql"
+    );
+}
+
+#[test]
+fn transport_sends_the_credential_token_over_https() {
+    let d = tmp("transport-token");
+    let fx = fixture("transport-token-repo");
+    let http = FakeHttp::start(|c| match (c.method.as_str(), c.path.as_str()) {
+        ("GET", "repos/acme/widgets/pulls") => (200, json!([])),
+        ("POST", "graphql") => (200, json!({ "data": null })),
+        _ => (404, json!({ "message": "Not Found" })),
+    });
+    let fallback = Arc::new(FakeGh::new(|_| r(200, json!([]))));
+    let creds = Arc::new(Credentials::new(isolated_credentials(&d, TOKEN_HELPER)));
+    let t = transport(&creds, &http, Ok(fallback.clone()));
+    // A PR function through the transport: the query arrives decoded, the token as Bearer.
+    assert_eq!(status(&fx.work, Ok(&t)).unwrap(), None);
+    let body = json!({ "query": "q", "variables": { "n": 1 } });
+    let res = t
+        .call(&GhRequest {
+            host: "github.com",
+            method: "POST",
+            path: "graphql",
+            query: &[],
+            body: Some(&body),
+        })
+        .unwrap();
+    assert_eq!(
+        res,
+        GhResponse {
+            status: 200,
+            body: json!({ "data": null })
+        }
+    );
+    let seen = http.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(
+        (
+            seen[0].0.q("state"),
+            seen[0].0.q("head"),
+            seen[0].0.q("per_page")
+        ),
+        (Some("all"), Some("acme:feature"), Some("20"))
+    );
+    assert_eq!(seen[1].0.body, Some(body));
+    assert!(
+        seen.iter()
+            .all(|(_, auth)| auth.as_deref() == Some("Bearer test-token-1"))
+    );
+    assert!(fallback.calls().is_empty());
+    // Cached per host (case-insensitive): the helper is not asked again for a while.
+    assert_eq!(
+        creds.cached("GitHub.com"),
+        Some(Some("test-token-1".into()))
+    );
+}
+
+#[test]
+fn transport_falls_back_to_gh_without_a_token() {
+    let d = tmp("transport-gh");
+    let http = FakeHttp::start(|_| (500, Value::Null));
+    let fallback = Arc::new(FakeGh::new(|_| r(200, json!([{ "number": 1 }]))));
+    let creds = Arc::new(Credentials::new(isolated_credentials(&d, QUIT_HELPER)));
+    let res = transport(&creds, &http, Ok(fallback.clone()))
+        .call(&LIST)
+        .unwrap();
+    assert_eq!(res.body, json!([{ "number": 1 }]));
+    assert_eq!(fallback.calls().len(), 1);
+    assert!(http.seen().is_empty());
+    assert_eq!(creds.cached("github.com"), Some(None));
+    // Neither a token nor gh.
+    let e = transport(&creds, &http, Err(ProtoError::new("gh-missing")))
+        .call(&LIST)
+        .unwrap_err();
+    assert_eq!(
+        (e.id.as_str(), e.get("host")),
+        ("github-no-credentials", Some("github.com"))
+    );
+    assert!(http.seen().is_empty());
+}
+
+#[test]
+fn transport_forgets_a_refused_token() {
+    let d = tmp("transport-401");
+    let http = FakeHttp::start(|_| (401, json!({ "message": "Bad credentials" })));
+    let fallback = Arc::new(FakeGh::new(|_| r(200, json!({ "via": "gh" }))));
+    let creds = Arc::new(Credentials::new(isolated_credentials(&d, TOKEN_HELPER)));
+    // 401 with the token: forgotten, the call made once more through gh.
+    let res = transport(&creds, &http, Ok(fallback.clone()))
+        .call(&LIST)
+        .unwrap();
+    assert_eq!(res.body, json!({ "via": "gh" }));
+    assert_eq!((http.seen().len(), fallback.calls().len()), (1, 1));
+    assert_eq!(creds.cached("github.com"), None);
+    // Without gh: `github-auth`; the token was asked for again (not served from the cache).
+    let e = transport(&creds, &http, Err(ProtoError::new("gh-missing")))
+        .call(&LIST)
+        .unwrap_err();
+    assert_eq!(
+        (e.id.as_str(), e.get("host")),
+        ("github-auth", Some("github.com"))
+    );
+    assert_eq!(http.seen().len(), 2);
+    assert_eq!(creds.cached("github.com"), None);
+    // No HTTP answer at all with a token: `github-failed`, no gh retry.
+    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = dead.local_addr().unwrap();
+    drop(dead);
+    let t = GithubTransport {
+        credentials: creds.clone(),
+        http: Arc::new(HttpApi::new(Some(format!("http://{addr}")))),
+        gh: Ok(fallback.clone()),
+    };
+    assert_eq!(t.call(&LIST).unwrap_err().id, "github-failed");
+    assert_eq!(fallback.calls().len(), 1);
 }

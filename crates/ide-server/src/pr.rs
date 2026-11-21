@@ -4,11 +4,13 @@
 //! a prompt to a session's agent. See `docs/changes-actions.md`, "Pull requests and agent
 //! prompts".
 //!
-//! GitHub is reached through the `gh` CLI (`gh api --include`, the same REST/GraphQL endpoints
-//! and payloads Desk sends with `fetch`); `gh` brings its own login. [`GhApi`] is the seam the
-//! tests replace; [`GhCli`] runs the real program (`IDE_GH` / `ServerConfig::gh`, else `PATH`,
-//! else the usual install folders). Git runs locally (`ide_core::git_raw`), network commands
-//! (`push`, `fetch`, `ls-remote`) without prompts and with a timeout.
+//! GitHub is reached like Desk does it: the token of git's credential store and the REST /
+//! GraphQL API over HTTPS ([`GithubTransport`], `pr/github.rs`), with the `gh` CLI
+//! (`gh api --include`, same endpoints and payloads) only as the fallback for hosts git has no
+//! token for. [`GhApi`] is the seam the tests replace; [`GhCli`] runs the real `gh` (`IDE_GH` /
+//! `ServerConfig::gh`, else `PATH`, else the usual install folders). Git runs locally
+//! (`ide_core::git_raw`), network commands (`push`, `fetch`, `ls-remote`) without prompts and
+//! with a timeout.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -26,6 +28,9 @@ use ide_proto::{
 use serde_json::{Value, json};
 
 use crate::service::core_error;
+
+mod github;
+pub use github::{API_ENV, Credentials, GithubTransport, HttpApi, api_base, endpoint};
 
 /// `gh` calls are given this long (Desk: 20 s per `fetch`; `gh` also starts a process).
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,8 +67,9 @@ pub struct GhResponse {
     pub body: Value,
 }
 
-/// GitHub API access (the real `gh` or a test double). `Err` only when no HTTP answer came:
-/// `gh-missing`, `gh-auth` (`host`), `gh-failed` (`detail`).
+/// GitHub API access ([`GithubTransport`], the real `gh` or a test double). `Err` only when no
+/// HTTP answer came: `gh-missing`, `gh-auth` (`host`), `gh-failed` (`detail`),
+/// `github-no-credentials` (`host`), `github-auth` (`host`), `github-failed` (`detail`).
 pub trait GhApi: Send + Sync {
     /// Make one call.
     fn call(&self, req: &GhRequest<'_>) -> Result<GhResponse, ProtoError>;
@@ -508,7 +514,7 @@ pub fn origin_repo(dir: &Path) -> Result<RemoteRepo, ProtoError> {
 
 // ---- GitHub calls -------------------------------------------------------------------------
 
-/// `gh` resolved, or why not (`gh-missing`).
+/// The GitHub API, or why it is not available.
 pub type Gh<'a> = Result<&'a dyn GhApi, ProtoError>;
 
 fn call(
@@ -1789,8 +1795,16 @@ pub struct CreateRequest<'a> {
     pub options: Option<&'a CommitPrTextOptions>,
 }
 
+/// Errors meaning "no usable login for the API": `create` returns the prefilled page.
+const NO_API: [&str; 4] = [
+    "gh-auth",
+    "gh-missing",
+    "github-auth",
+    "github-no-credentials",
+];
+
 /// Desk `createPullRequest`: push the branch (unless `push` false) and open a PR into `base`
-/// from the PR file. Without the API (GitLab, `gh` missing or not logged in) the prefilled page
+/// from the PR file. Without the API (GitLab, no credential token and no usable `gh`) the prefilled page
 /// is returned (`Page`); an API refusal is `Failed` with that page.
 pub fn create(
     dir: &Path,
@@ -1863,7 +1877,7 @@ pub fn create(
                 }
             }
             // Desk: no token -> straight to the page.
-            Err(e) if e.id == "gh-auth" => api = Err(e),
+            Err(e) if NO_API.contains(&e.id.as_str()) => api = Err(e),
             Err(e) => return Err(e),
         }
     }
@@ -2020,16 +2034,12 @@ pub(crate) fn handle(
     req: ide_proto::Request,
 ) -> Result<ide_proto::Response, ProtoError> {
     use ide_proto::{Request as Q, Response as A};
-    let gh_cli = || ctx.gh_cli();
+    let gh = ctx.github();
+    let g: Gh<'_> = Ok(&gh);
     match req {
         Q::PrStatus { session, repo } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            status(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-            )
-            .map(A::PrStatus)
+            status(&t.dir, g.clone()).map(A::PrStatus)
         }
         Q::PrGate {
             session,
@@ -2037,23 +2047,11 @@ pub(crate) fn handle(
             number,
         } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            gate(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-                number,
-            )
-            .map(A::PrGate)
+            gate(&t.dir, g.clone(), number).map(A::PrGate)
         }
         Q::PrFindOpen { session, repo } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            find_open(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-                &t.session_base,
-            )
-            .map(A::PrFound)
+            find_open(&t.dir, g.clone(), &t.session_base).map(A::PrFound)
         }
         Q::PrRemoteBranches { session, repo } => {
             let t = ctx.pr_target(&session, &repo)?;
@@ -2120,10 +2118,9 @@ pub(crate) fn handle(
             options,
         } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
             let res = create(
                 &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
+                g.clone(),
                 &CreateRequest {
                     base: &base,
                     pr_file: t.pr_file()?,
@@ -2148,15 +2145,7 @@ pub(crate) fn handle(
             delete_branch,
         } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            let res = merge(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-                number,
-                &sha,
-                method,
-                delete_branch,
-            )?;
+            let res = merge(&t.dir, g.clone(), number, &sha, method, delete_branch)?;
             ctx.audit_action("pr.merge", &format!("{session} {repo} #{number} {sha}"));
             Ok(A::PrMerged(res))
         }
@@ -2166,12 +2155,7 @@ pub(crate) fn handle(
             number,
         } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            let res = close(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-                number,
-            )?;
+            let res = close(&t.dir, g.clone(), number)?;
             ctx.audit_action("pr.close", &format!("{session} {repo} #{number}"));
             Ok(A::PrClosed(res))
         }
@@ -2182,13 +2166,7 @@ pub(crate) fn handle(
             sha,
         } => {
             let t = ctx.pr_target(&session, &repo)?;
-            let g = gh_cli();
-            let message = update_branch(
-                &t.dir,
-                g.as_ref().map(|g| g as &dyn GhApi).map_err(Clone::clone),
-                number,
-                &sha,
-            )?;
+            let message = update_branch(&t.dir, g.clone(), number, &sha)?;
             ctx.audit_action("pr.update_branch", &format!("{session} {repo} #{number}"));
             Ok(A::PrBranchUpdated { message })
         }

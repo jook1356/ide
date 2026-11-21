@@ -128,16 +128,39 @@ the PR file path: `ide-core/src/prompts.rs`; prompt delivery: `ide-agents/src/pr
 (`AgentProvider::prompt_input`); client: `Client::pr_*`, `prompt_*`, `send_prompt`.
 Capabilities `pr`, `send-prompt`.
 
-**GitHub through `gh`.** Desk calls the REST/GraphQL API with `fetch` and the token of git's
-credential store. Here every call is `gh api --hostname <host> --include -X <METHOD> <path>`
-(GET parameters as `-f k=v`, JSON bodies on stdin with `--input -`): the same endpoints,
-parameters and bodies as Desk, `gh` brings the login. `gh` is `IDE_GH` /
-`ServerConfig::gh` if set (missing file -> `gh-missing`), else `gh` on the server's `PATH`, else
-`%ProgramFiles%\GitHub CLI\gh.exe`, `%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe`
-(`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` elsewhere). No `gh` -> `gh-missing`; `gh`
-exit 4 (no login) or HTTP 401 -> `gh-auth` (`host`); no HTTP answer -> `gh-failed` (`detail`,
-also a 30 s timeout). The process gets `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`,
-`NO_COLOR=1`. `origin` is parsed like Desk (`git remote get-url origin`, https/ssh, credentials
+**GitHub transport: Desk's way first, `gh` as the fallback** (`ide-server/src/pr/github.rs`,
+`GithubTransport`, behind the `GhApi` seam the PR functions use).
+
+- **Primary (Desk `credentialToken` / `fillCredential` / `githubApi` / `githubHeaders`).** The
+  token is the password git's credential store has for the host: `git credential fill` with
+  `protocol=https\nhost=<host>\n\n` on stdin, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`,
+  no console window (`CREATE_NO_WINDOW`), 20 s; the `password=` line, nothing on any failure.
+  Cached per host (lower-cased) 10 min, "no token" 1 min; concurrent callers wait for the lookup
+  in flight. Calls go over HTTPS (`ureq`, rustls) to `https://api.github.com` for github.com,
+  `https://<host>/api/v3` otherwise (GraphQL: `/graphql`, Enterprise `/api/graphql`), with
+  `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`,
+  `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json` for bodies, GET parameters
+  form-encoded in the query, 20 s per request. Every HTTP status is passed on as is (403 / 429
+  rate limits included, like Desk). The token is never logged, put in an error or audited.
+- **401 with the credential token:** the token is forgotten (Desk `forgetToken`: the next call
+  asks git again) and the same call is made once through `gh` if `gh` is found; without `gh`
+  -> `github-auth` (`host`).
+- **Fallback (`gh`), only when git yields no token** (no credential, helper failed, timeout):
+  `gh api --hostname <host> --include -X <METHOD> <path>` (GET parameters as `-f k=v`, JSON
+  bodies on stdin with `--input -`). `gh` is `IDE_GH` / `ServerConfig::gh` if set (missing file
+  -> not found), else `gh` on the server's `PATH`, else `%ProgramFiles%\GitHub CLI\gh.exe`,
+  `%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe` (`/opt/homebrew/bin`, `/usr/local/bin`,
+  `/usr/bin` elsewhere). No token and no `gh` -> `github-no-credentials` (`host`); `gh` exit 4
+  (no login) or HTTP 401 -> `gh-auth` (`host`); no HTTP answer -> `gh-failed` (`detail`, also a
+  30 s timeout). The process gets `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`.
+- **No HTTP answer with a token** (network, TLS, timeout) -> `github-failed` (`detail`); no `gh`
+  retry (Desk: the `fetch` error).
+- `pr.create` treats `gh-auth`, `gh-missing`, `github-auth` and `github-no-credentials` as "no
+  API" and returns the prefilled page (Desk: no token -> page).
+- Test hooks: `IDE_GITHUB_API` / `ServerConfig::github_api` replaces the API root of every host
+  (and disables proxies), `ServerConfig::git_credential_env` adds environment to
+  `git credential fill` (tests pass `GIT_CONFIG_GLOBAL=<scratch config with a test
+  credential.helper>`, `GIT_CONFIG_NOSYSTEM=1`). `origin` is parsed like Desk (`git remote get-url origin`, https/ssh, credentials
 dropped); when that URL is not a web URL (an `insteadOf` rewrite) the configured
 `remote.origin.url` is parsed instead. GitLab: lookups/merge/close refused (`pr-gitlab`), create
 returns the prefilled merge-request page.
@@ -200,7 +223,7 @@ The app keeps Desk's flows; the server has no PR job / notice state.
 | Desk control | Calls |
 |---|---|
 | 커밋 맡기기 (checked files; tooltip, disabled while `ai.blocked` / nothing checked) | `prompt_commit(files, all = every row checked)` then `send_prompt(session, text)`; show `prompt-not-ready` / `session-not-running` as Desk's "지금은 요청을 보낼 수 없어요". There is no chat turn tracking: "에이전트가 답변 중" blocking is not available (no busy signal from the PTY). |
-| PR status (open PR turns "PR 올리기" into "머지하기") | `pr_status` when the repo is shown and when the commit list / unpushed set changes (Desk: on `commits`/`unpushed` change and after sync); `pr.state == Open` -> open PR. A `gh-missing` / `gh-auth` error means "unknown", not "no PR". For the sibling's sync status `merged_head`: `pr.head_sha` when `pr.state == Merged`. |
+| PR status (open PR turns "PR 올리기" into "머지하기") | `pr_status` when the repo is shown and when the commit list / unpushed set changes (Desk: on `commits`/`unpushed` change and after sync); `pr.state == Open` -> open PR. A `github-no-credentials` / `github-auth` / `github-failed` / `gh-missing` / `gh-auth` / `gh-failed` error means "unknown", not "no PR". For the sibling's sync status `merged_head`: `pr.head_sha` when `pr.state == Merged`. |
 | `...` -> 머지하기 · #N (hint) | Disabled with Desk's hint when uncommitted changes / unpushed commits, else `merge_blocker(&pr)` (translate `MergeBlocker`). Merge dialog (Squash default, 원격 브랜치 삭제 on) -> `pr_merge(number, pr.head_sha, method, delete)`; then `pr_status` again. |
 | `...` -> PR 보기 | open `pr.url` (client-side). |
 | `...` -> PR 닫기 · #N (confirm) | `pr_close(number)`, then `pr_status`. |
@@ -216,8 +239,12 @@ The app keeps Desk's flows; the server has no PR job / notice state.
 
 ### Error ids
 
-New (`ProtoError`, args in parentheses): `gh-missing` (`program` when `IDE_GH` names a missing
-file), `gh-auth` (`host`), `gh-failed` (`detail`), `pr-no-origin`, `pr-origin-unparsable`
+New (`ProtoError`, args in parentheses): `github-no-credentials` (`host`; no credential token
+and no `gh`), `github-auth` (`host`; the credential token got 401 and there is no `gh` to retry
+with), `github-failed` (`detail`; no HTTP answer with the credential token), `gh-missing`
+(`program`; the server no longer returns it — without a token the transport reports
+`github-no-credentials` — kept for the `GhApi` seam), `gh-auth`
+(`host`), `gh-failed` (`detail`), `pr-no-origin`, `pr-origin-unparsable`
 (`url`), `pr-gitlab`, `pr-gitlab-page` (a `Page` reason only), `pr-detached`, `pr-same-branch`
 (`branch`), `pr-no-remote-branch` (`branch`), `pr-bad-branch` (`branch`), `pr-bad-number`,
 `pr-bad-sha` (`sha`), `pr-not-on-branch` (`sha`), `pr-changed`, `pr-no-text`,
@@ -232,10 +259,9 @@ file), `gh-auth` (`host`), `gh-failed` (`detail`), `pr-no-origin`, `pr-origin-un
 
 ### Deviations (with reasons)
 
-- **`gh` instead of fetch + git credentials** (task contract: injectable, testable without
-  GitHub). Same endpoints/bodies; auth is `gh`'s (`gh auth login` / `GH_TOKEN`), not git's
-  credential store, so a user who can push but never logged in to `gh` gets `Page` results and
-  `gh-auth` errors where Desk would have used the git token.
+- **`gh` fallback** (Desk has none): hosts git has no token for still work when `gh` is logged
+  in, and a token GitHub refuses (401) is retried once through `gh` (Desk only forgets it).
+- **`User-Agent: ide-server`** (Desk: `hermes-desk`).
 - **Server-chosen PR file**: `pr.create` / `pr.commit_text` take no path (Desk passes the path
   from the renderer); folder `.ide/` instead of `.hermes-desk/`.
 - **Meta `reason` is a `ProtoError`** (translatable) instead of Desk's Korean sentence;
@@ -258,17 +284,26 @@ file), `gh-auth` (`host`), `gh-failed` (`detail`), `pr-no-origin`, `pr-origin-un
 ### Tests
 
 `ide-server/src/pr/tests.rs` (local bare `origin` behind an `insteadOf` GitHub URL, in-process
-fake `GhApi` recording calls): `origins_urls_and_gh_output` (origin parsing, compare URLs,
+fake `GhApi` recording calls; the transport tests run `git credential fill` against a scratch
+config only — `GIT_CONFIG_GLOBAL` with a test `credential.helper`, `GIT_CONFIG_NOSYSTEM=1` —
+and a local fake GitHub over HTTP; never the user's credential store or real GitHub):
+`api_roots_like_desk`, `transport_sends_the_credential_token_over_https` (Bearer token, query
+encoding, GraphQL body, gh untouched, cache), `transport_falls_back_to_gh_without_a_token`
+(gh called, HTTP untouched; no `gh` -> `github-no-credentials`),
+`transport_forgets_a_refused_token` (401 -> forgotten + one `gh` retry; no `gh` ->
+`github-auth`; no answer -> `github-failed`), `origins_urls_and_gh_output` (origin parsing, compare URLs,
 `gh --include` parsing, argument lists, `IDE_GH` resolution, porcelain), `pr_file_reading`,
 `status_gate_and_open_lookup` (filtering, reviews, gate mapping, session base, 401 / gh missing
 / refusal / retry / detached), `create_pushes_then_opens_the_pr` (no text, push + upstream,
 POST body, existing PR, same branch, no remote branch), `create_without_api_or_refused_leaves_the_text`
-(`Page` for gh-auth / gh-missing, `Failed` + reconciling lookup + meta reason, leftover
+(`Page` for gh-auth / gh-missing / github-no-credentials, `Failed` + reconciling lookup + meta reason, leftover
 same/ahead/diverged), `commit_based_pr_is_pinned`, `merge_close_update`,
 `pending_drift_unmerged_targets`. `ide-server/tests/pr_e2e.rs`: a fake `gh` script (`.cmd` /
 `sh`; records arguments and stdin, prints canned `--include` output) through the client over
-memory (prompts, PR file, local state, status / close / refused merge, `send_prompt` into a
+memory with a no-token credential config (prompts, PR file, local state, status / close / refused merge, `send_prompt` into a
 shell, `prompt-not-ready` for a paste-mode provider, original-repo session) and a real server
-child with `IDE_GH` (found / missing). `ide-core` `prompts` tests compare the full commit
+child with `IDE_GH`, `IDE_GITHUB_API` and a scratch `GIT_CONFIG_GLOBAL`
+(`credential_token_first_in_a_server_child`: token -> fake GitHub over HTTP with
+`Bearer`, gh not run; no token -> fake `gh`; neither -> `github-no-credentials`). `ide-core` `prompts` tests compare the full commit
 prompt with Desk's output; `ide-agents` `prompt` tests the byte sequences and the declarative
 `[prompt]` table; `ide-proto` `pr` tests the pure helpers and `pr_messages_round_trip`.

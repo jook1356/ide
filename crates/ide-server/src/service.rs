@@ -50,9 +50,15 @@ pub struct ServerConfig {
     pub audit: Arc<dyn Audit>,
     /// Program resolution environment (`None` = the process environment).
     pub launch_env: Option<LaunchEnv>,
-    /// The GitHub CLI for the `pr.*` requests (`IDE_GH`; `None` = `gh` on `PATH`, else its
-    /// usual install folders).
+    /// The GitHub CLI, the `pr.*` requests' fallback for hosts git's credential store has no
+    /// token for (`IDE_GH`; `None` = `gh` on `PATH`, else its usual install folders).
     pub gh: Option<PathBuf>,
+    /// API root used for every GitHub host instead of `https://api.github.com` /
+    /// `https://<host>/api/v3` (`IDE_GITHUB_API`; tests point it at a local fake GitHub).
+    pub github_api: Option<String>,
+    /// Extra environment of `git credential fill` (tests isolate git's config with
+    /// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_NOSYSTEM` so the user's credential store is never read).
+    pub git_credential_env: Vec<(String, String)>,
 }
 
 impl ServerConfig {
@@ -76,6 +82,10 @@ impl ServerConfig {
             gh: std::env::var_os(GH_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
+            github_api: std::env::var(crate::pr::API_ENV)
+                .ok()
+                .filter(|v| !v.is_empty()),
+            git_credential_env: Vec::new(),
         }
     }
 }
@@ -137,7 +147,13 @@ impl Server {
                 .launch_env
                 .clone()
                 .unwrap_or_else(LaunchEnv::from_process),
-            self.config.gh.clone(),
+            GithubSetup {
+                gh: self.config.gh.clone(),
+                credentials: Arc::new(crate::pr::Credentials::new(
+                    self.config.git_credential_env.clone(),
+                )),
+                http: Arc::new(crate::pr::HttpApi::new(self.config.github_api.clone())),
+            },
         )?);
         users.insert(user.id.clone(), ctx.clone());
         Ok(ctx)
@@ -248,7 +264,14 @@ pub struct UserCtx {
     launch_env: LaunchEnv,
     watchers: Watchers,
     write_lock: Mutex<()>,
+    github: GithubSetup,
+}
+
+/// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
+struct GithubSetup {
     gh: Option<PathBuf>,
+    credentials: Arc<crate::pr::Credentials>,
+    http: Arc<crate::pr::HttpApi>,
 }
 
 impl UserCtx {
@@ -258,7 +281,7 @@ impl UserCtx {
         runner: Arc<dyn Runner>,
         audit: Arc<dyn Audit>,
         launch_env: LaunchEnv,
-        gh: Option<PathBuf>,
+        github: GithubSetup,
     ) -> Result<Self, ProtoError> {
         let report = ide_core::migrate_profiles(&paths).map_err(|e| core_error(&e))?;
         if report != Default::default() {
@@ -313,7 +336,7 @@ impl UserCtx {
             launch_env,
             watchers: Watchers::default(),
             write_lock: Mutex::new(()),
-            gh,
+            github,
         })
     }
 
@@ -1668,12 +1691,20 @@ impl UserCtx {
         })
     }
 
-    /// The `gh` CLI (`gh-missing` when it cannot be found).
-    pub(crate) fn gh_cli(&self) -> Result<crate::pr::GhCli, ProtoError> {
-        Ok(crate::pr::GhCli {
-            program: crate::pr::resolve_gh(self.gh.as_deref(), &self.launch_env)?,
-            env: self.launch_env.clone(),
-        })
+    /// GitHub for the `pr.*` requests: git's credential token + HTTPS, `gh` as the fallback
+    /// (`gh-missing` inside when it cannot be found).
+    pub(crate) fn github(&self) -> crate::pr::GithubTransport {
+        let gh = crate::pr::resolve_gh(self.github.gh.as_deref(), &self.launch_env).map(|program| {
+            Arc::new(crate::pr::GhCli {
+                program,
+                env: self.launch_env.clone(),
+            }) as Arc<dyn crate::pr::GhApi>
+        });
+        crate::pr::GithubTransport {
+            credentials: self.github.credentials.clone(),
+            http: self.github.http.clone(),
+            gh,
+        }
     }
 
     /// `session.send_prompt`: submit `text` to a running session the way its provider takes
