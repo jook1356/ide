@@ -145,10 +145,46 @@ pub struct RepoInfo {
     pub name: String,
     /// Main checkout (server path).
     pub path: String,
-    /// Base branch new worktrees start from (empty if it cannot be determined).
+    /// Base branch new worktrees start from (empty if it cannot be determined): the rule's last
+    /// pick, else the fixed or automatic base.
     pub base: String,
     /// Sessions with this repo attached.
     pub sessions: u32,
+    /// Fixed base branch (full ref), `None` = automatic or a rule.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Base branch rule, if set.
+    #[serde(default)]
+    pub base_rule: Option<BaseRuleInfo>,
+    /// The repo's default base for new sessions (Desk `repoDefaultBase`: rule pick, else fixed
+    /// setting), `None` = automatic.
+    #[serde(default)]
+    pub default_base: Option<String>,
+}
+
+/// Rule-based base branch (Desk `BaseBranchRule`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BaseRuleInfo {
+    /// Remote whose branches are listed (`git ls-remote --heads`).
+    pub remote: String,
+    /// Candidate glob (`*` matches anything including `/`, `?` one character).
+    pub pattern: String,
+    /// Optional regex every candidate must also match.
+    #[serde(default)]
+    pub matches: Option<String>,
+}
+
+/// What a base branch rule picks (`repo.preview_base_rule`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BaseRulePreview {
+    /// Matching branches, highest version first.
+    pub matched: Vec<String>,
+    /// Glob candidates rejected by the regex.
+    pub excluded: Vec<String>,
+    /// The branch new worktrees would start from.
+    pub pick: Option<String>,
+    /// The remote's branches.
+    pub branches: Vec<String>,
 }
 
 /// Where a session runs.

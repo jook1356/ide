@@ -814,14 +814,28 @@ impl App {
             let mut list: Column<El<'_>> = Column::new().spacing(3);
             for r in &self.repos {
                 let id = r.id.clone();
-                list = list.push(
-                    checkbox(f.repos.contains(&r.id))
+                let checked = f.repos.contains(&r.id);
+                let mut line = row![
+                    checkbox(checked)
                         .label(format!("{}  ·  {}", r.name, r.path))
                         .on_toggle(move |v| Message::NewRepoChecked(id.clone(), v))
                         .size(15)
                         .text_size(12)
-                        .boxed(),
-                );
+                        .width(Fill),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                if checked {
+                    // Desk's RepoBaseTable: the repo default, any of origin's branches.
+                    let id = r.id.clone();
+                    line = line.push(self.base_picker(
+                        &r.id,
+                        f.bases.get(&r.id).cloned(),
+                        r.base.clone(),
+                        move |b| Message::NewBase(id.clone(), b),
+                    ));
+                }
+                list = list.push(line.boxed());
             }
             c = c.push(list.boxed());
             c = c.push(
@@ -830,10 +844,22 @@ impl App {
                 } else if f.repos.is_empty() {
                     tr::empty_workspace_note()
                 } else {
-                    tr::worktree_branch_note()
+                    tr::new_base_note()
                 })
                 .size(11)
                 .color(style::DIM)
+                .boxed(),
+            );
+            c = c.push(
+                column![
+                    checkbox(f.refresh_base)
+                        .label(tr::new_refresh_base())
+                        .on_toggle_maybe((!f.busy && !f.repos.is_empty()).then_some(Message::NewRefreshBase))
+                        .size(15)
+                        .text_size(12),
+                    text(tr::new_refresh_base_note()).size(11).color(style::FAINT),
+                ]
+                .spacing(3)
                 .boxed(),
             );
             c = c.push(text(tr::worktree_repos_note()).size(11).color(style::FAINT).boxed());
@@ -914,20 +940,39 @@ impl App {
             let mut row_el = row![
                 icons::icon(Icon::GitBranch, 14.0, style::DIM),
                 text(r.name.as_str()).size(13).width(Fill),
-                text(format!("{} ← {}", r.branch, r.base))
-                    .size(11)
-                    .font(style::MONO)
-                    .color(style::DIM),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
+            if workspace {
+                // Desk's "레포 · 기준 브랜치": the session's own base per repo.
+                let id = r.repo.clone();
+                row_el = row_el.push(
+                    text(format!("{} ←", r.branch))
+                        .size(11)
+                        .font(style::MONO)
+                        .color(style::DIM).boxed(),
+                );
+                row_el = row_el.push(self.base_picker(
+                    &r.repo,
+                    f.bases.get(&r.repo).cloned(),
+                    r.base.clone(),
+                    move |b| Message::SessionRepoBase(id.clone(), b),
+                ));
+            } else {
+                row_el = row_el.push(
+                    text(format!("{} ← {}", r.branch, r.base))
+                        .size(11)
+                        .font(style::MONO)
+                        .color(style::DIM).boxed(),
+                );
+            }
             if workspace {
                 row_el = row_el.push(icon_button(
                     I_DELETE,
                     (!f.busy && self.connected())
                         .then(|| Message::SessionRepoDetach(r.repo.clone())),
                     tr::session_repo_detach(),
-                ));
+                ).boxed());
             }
             list = list.push(
                 container(row_el)
@@ -955,14 +1000,27 @@ impl App {
                 );
                 for r in addable {
                     let id = r.id.clone();
-                    c = c.push(
-                        checkbox(f.add.contains(&r.id))
+                    let on = f.add.contains(&r.id);
+                    let mut line = row![
+                        checkbox(on)
                             .label(format!("{}  ·  {}", r.name, r.path))
                             .on_toggle(move |v| Message::SessionRepoAdd(id.clone(), v))
                             .size(15)
                             .text_size(12)
-                            .boxed(),
-                    );
+                            .width(Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                    if on {
+                        let id = r.id.clone();
+                        line = line.push(self.base_picker(
+                            &r.id,
+                            f.bases.get(&r.id).cloned(),
+                            r.base.clone(),
+                            move |b| Message::SessionRepoBase(id.clone(), b),
+                        ));
+                    }
+                    c = c.push(line.boxed());
                 }
             } else if self.repos.is_empty() {
                 c = c.push(
@@ -972,6 +1030,7 @@ impl App {
                         .boxed(),
                 );
             }
+            c = c.push(text(tr::session_repos_base_note()).size(11).color(style::FAINT).boxed());
             c = c.push(text(tr::session_repos_note()).size(11).color(style::FAINT).boxed());
         } else {
             c = c.push(
@@ -1001,7 +1060,44 @@ impl App {
             .spacing(8)
             .boxed(),
         );
-        c.width(520).boxed()
+        c.width(620).boxed()
+    }
+
+    /// A base-branch pick list (Desk's `RepoBaseTable` select): `picked` (else `fallback`,
+    /// the default) plus origin's branches as of the last fetch.
+    fn base_picker<'a>(
+        &'a self,
+        repo: &str,
+        picked: Option<String>,
+        fallback: String,
+        on: impl Fn(String) -> Message + 'a,
+    ) -> El<'a> {
+        let mut choices: Vec<String> = Vec::new();
+        for b in picked
+            .iter()
+            .chain(std::iter::once(&fallback))
+            .chain(self.origin_branches.get(repo).into_iter().flatten())
+        {
+            if !b.is_empty() && !choices.contains(b) {
+                choices.push(b.clone());
+            }
+        }
+        let sel = picked.or((!fallback.is_empty()).then_some(fallback));
+        let placeholder = if choices.is_empty() {
+            tr::base_no_origin_branches()
+        } else {
+            tr::base_pick_label()
+        };
+        tip(
+            pick_list(sel, choices, |b: &String| b.clone())
+                .on_select(on)
+                .placeholder(placeholder)
+                .text_size(12)
+                .padding([3, 6])
+                .width(200)
+                .boxed(),
+            tr::base_pick_label(),
+        )
     }
 
     /// The repos page's folder picker (`browse.pick_list`: any folder the server's OS user
@@ -1497,15 +1593,7 @@ impl App {
                         actions,
                     ]
                     .align_y(Alignment::Center),
-                    label(tr::repo_base_label()),
-                    text(if r.base.is_empty() {
-                        tr::repo_base_unknown()
-                    } else {
-                        r.base.clone()
-                    })
-                    .size(13)
-                    .font(style::MONO),
-                    text(tr::repo_base_note()).size(11).color(style::FAINT),
+                    self.base_card(r, f, online),
                     label(tr::repo_sessions_label(i18n::count(users.len()))),
                     sessions,
                 ]
@@ -1522,6 +1610,225 @@ impl App {
             c = c.push(error_box(e));
         }
         c.boxed()
+    }
+
+    /// Desk's 레포 page "기준 브랜치" card: 고정 브랜치 (`FixedBaseSettings`) or 규칙으로 자동
+    /// 선택 (`BaseBranchRuleSettings`, without the "AI로 만들기" regex draft).
+    fn base_card<'a>(&'a self, r: &'a ide_client::RepoInfo, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let Some(b) = f.base.as_ref().filter(|b| b.repo == r.id) else {
+            return column![
+                label(tr::repo_base_label()),
+                text(if r.base.is_empty() { tr::repo_base_unknown() } else { r.base.clone() })
+                    .size(13)
+                    .font(style::MONO),
+            ]
+            .spacing(6)
+            .boxed();
+        };
+        let seg = |on: bool, title: String, msg: Message| {
+            button(text(title).size(12))
+                .padding([4, 12])
+                .style(if on { style::primary } else { style::secondary })
+                .on_press(msg)
+        };
+        let mut c = column![
+            label(tr::repo_base_label()),
+            row![
+                seg(!b.rule_mode, tr::base_mode_fixed(), Message::BaseMode(false)),
+                seg(b.rule_mode, tr::base_mode_rule(), Message::BaseMode(true)),
+            ]
+            .spacing(4),
+        ]
+        .spacing(8);
+        if b.saved {
+            c = c.push(text(tr::base_saved()).size(12).color(style::GREEN).boxed());
+        }
+        let small = |s: String| text(s).size(11).color(style::FAINT);
+        let can = online && !b.busy && !f.repos_busy;
+        if !b.rule_mode {
+            if r.base_rule.is_some() {
+                c = c.push(
+                    container(text(tr::base_rule_active_warning()).size(11))
+                        .padding(8)
+                        .width(Fill)
+                        .style(style::warn_box).boxed(),
+                );
+            }
+            c = c.push(text(tr::base_fixed_note()).size(12).boxed());
+            let refs = b.refs.as_deref();
+            let missing = b.fixed.as_ref().filter(|x| {
+                refs.is_some_and(|refs| {
+                    !refs.contains(x)
+                        && !(!x.starts_with("refs/")
+                            && (refs.contains(&format!("refs/heads/{x}"))
+                                || refs.contains(&format!("refs/remotes/{x}"))))
+                })
+            });
+            let auto = Choice {
+                key: String::new(),
+                label: tr::base_auto(),
+            };
+            let mut choices = vec![auto.clone()];
+            for x in refs.unwrap_or_default() {
+                choices.push(Choice {
+                    key: x.clone(),
+                    label: x.clone(),
+                });
+            }
+            if let Some(x) = &b.fixed
+                && !choices.iter().any(|c| &c.key == x)
+            {
+                choices.push(Choice {
+                    key: x.clone(),
+                    label: if missing.is_some() { tr::base_missing(x) } else { x.clone() },
+                });
+            }
+            let sel = match &b.fixed {
+                None => Some(auto),
+                Some(x) => choices.iter().find(|c| &c.key == x).cloned(),
+            };
+            c = c.push(small(tr::base_fixed_pick_note()).boxed());
+            c = c.push(
+                pick_list(sel, choices, |c: &Choice| c.label.clone())
+                    .on_select(|c: Choice| Message::BaseFixed((!c.key.is_empty()).then_some(c.key)))
+                    .placeholder(if refs.is_none() { tr::base_loading() } else { tr::base_auto() })
+                    .text_size(12)
+                    .padding([5, 8])
+                    .width(Fill).boxed(),
+            );
+            if missing.is_some() {
+                c = c.push(text(tr::base_missing_error()).size(11).color(style::RED).boxed());
+            }
+            c = c.push(small(tr::base_auto_note()).boxed());
+            c = c.push(
+                row![
+                    space().width(Fill),
+                    button(text(tr::base_reset_auto()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe(can.then_some(Message::BaseFixed(None))),
+                    button(text(tr::cancel()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe(can.then_some(Message::BaseCancel)),
+                    button(text(tr::save()).size(12))
+                        .padding([4, 12])
+                        .style(style::primary)
+                        .on_press_maybe((can && missing.is_none() && refs.is_some()).then_some(Message::BaseFixedSave)),
+                ]
+                .spacing(6).boxed(),
+            );
+        } else {
+            c = c.push(text(tr::base_rule_note()).size(12).boxed());
+            c = c.push(
+                row![
+                    column![
+                        small(tr::base_rule_remote()),
+                        text_input("origin", &b.remote)
+                            .on_input(Message::BaseRuleRemote)
+                            .size(12)
+                            .padding([5, 8])
+                            .style(style::input),
+                    ]
+                    .spacing(3)
+                    .width(140),
+                    column![
+                        small(tr::base_rule_pattern()),
+                        text_input("release/*", &b.pattern)
+                            .on_input(Message::BaseRulePattern)
+                            .size(12)
+                            .padding([5, 8])
+                            .style(style::input),
+                        small(tr::base_rule_pattern_note()),
+                    ]
+                    .spacing(3)
+                    .width(Fill),
+                ]
+                .spacing(8).boxed(),
+            );
+            c = c.push(small(tr::base_rule_match()).boxed());
+            c = c.push(
+                text_input(tr::base_rule_match_placeholder(), &b.matches)
+                    .on_input(Message::BaseRuleMatch)
+                    .size(12)
+                    .padding([5, 8])
+                    .font(style::MONO)
+                    .style(style::input).boxed(),
+            );
+            c = c.push(small(tr::base_rule_version_note()).boxed());
+            let pick: El<'_> = if b.preview_loading {
+                text(tr::base_rule_loading()).size(12).color(style::DIM).boxed()
+            } else if let Some(e) = &b.preview_error {
+                text(e.as_str()).size(12).color(style::RED).boxed()
+            } else if let Some(p) = &b.preview {
+                let mut col: Column<El<'_>> = Column::new().spacing(2);
+                col = col.push(
+                    text(p.pick.clone().unwrap_or_else(tr::base_rule_no_pick))
+                        .size(13)
+                        .font(style::MONO)
+                        .color(if p.pick.is_some() { style::TEXT } else { style::RED })
+                        .boxed(),
+                );
+                let last = r
+                    .base_rule
+                    .as_ref()
+                    .and(r.default_base.as_ref())
+                    .filter(|l| p.pick.as_ref().is_some_and(|x| x != *l));
+                if let (Some(last), Some(pick)) = (last, &p.pick) {
+                    col = col.push(small(tr::base_rule_last_pick(last, pick)).boxed());
+                }
+                for m in p.matched.iter().take(8) {
+                    col = col.push(text(format!("✓ {m}")).size(11).font(style::MONO).color(style::DIM).boxed());
+                }
+                for x in p.excluded.iter().take(8) {
+                    col = col.push(
+                        text(format!("✕ {x} — {}", tr::base_rule_excluded()))
+                            .size(11)
+                            .font(style::MONO)
+                            .color(style::FAINT)
+                            .boxed(),
+                    );
+                }
+                col.boxed()
+            } else {
+                space().boxed()
+            };
+            c = c.push(
+                row![
+                    small(tr::base_rule_current()),
+                    space().width(Fill),
+                    button(text(tr::base_rule_recheck()).size(11))
+                        .padding([3, 8])
+                        .style(style::secondary)
+                        .on_press_maybe((can && !b.preview_loading).then_some(Message::BaseRuleCheck)),
+                ]
+                .align_y(Alignment::Center).boxed(),
+            );
+            c = c.push(container(pick).padding([6, 8]).width(Fill).style(style::bg(style::HEADER)).boxed());
+            c = c.push(
+                row![
+                    space().width(Fill),
+                    button(text(tr::base_rule_clear()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe((can && r.base_rule.is_some()).then_some(Message::BaseRuleClear)),
+                    button(text(tr::cancel()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe(can.then_some(Message::BaseCancel)),
+                    button(text(tr::save()).size(12))
+                        .padding([4, 12])
+                        .style(style::primary)
+                        .on_press_maybe(can.then_some(Message::BaseRuleSave)),
+                ]
+                .spacing(6).boxed(),
+            );
+        }
+        container(c)
+            .padding(10)
+            .width(Fill)
+            .style(style::card)
+            .boxed()
     }
 
     // ------------------------------------------------------------------ modals
@@ -2134,6 +2441,39 @@ impl App {
             Modal::QuickOpen(f) => self.quick_open_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
+            Modal::InitRepo(f) => {
+                // Desk's `ws:pickRepo` question for a plain folder.
+                let mut c = column![
+                    text(tr::init_repo_title()).size(18).font(style::BOLD),
+                    text(f.path.as_str()).size(12).font(style::MONO).color(style::DIM),
+                    text(tr::init_repo_message()).size(13),
+                    text(tr::init_repo_detail()).size(12).color(style::DIM),
+                    text(tr::init_repo_no_remote()).size(12).color(style::DIM),
+                ]
+                .spacing(10);
+                if let Some(e) = &f.error {
+                    c = c.push(error_box(e));
+                }
+                c.push(
+                    row![
+                        space().width(Fill),
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                        button(text(tr::init_repo_confirm()).size(13))
+                            .padding([6, 14])
+                            .style(style::primary)
+                            .on_press_maybe(
+                                (!f.busy && self.connected()).then_some(Message::RepoInitConfirm)
+                            ),
+                    ]
+                    .spacing(8)
+                    .boxed(),
+                )
+                .width(480)
+                .boxed()
+            }
             Modal::DefPicker(f) => {
                 let mut list = Column::new().spacing(2);
                 for (i, t) in f.targets.iter().enumerate() {

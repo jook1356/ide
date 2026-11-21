@@ -10,7 +10,7 @@
 //! let mut repos = RepoStore::open(&paths)?;
 //! let mut sessions = SessionStore::open(&paths)?;
 //! migrate_workspaces(&paths, &mut repos, &mut sessions, &[])?;
-//! let repo = repos.register("C:/src/my-repo".as_ref())?;
+//! let repo = repos.register("C:/src/my-repo".as_ref(), false)?;
 //! let req = NewSession {
 //!     target: SessionTarget {
 //!         provider: "shell".into(),
@@ -21,9 +21,11 @@
 //!     provider_name: "Shell".into(),
 //!     repos: vec![repo.id.clone()],
 //!     original_repo: None,
+//!     refresh_base: true, // 기준 브랜치 최신화
+//!     bases: Default::default(),
 //! };
 //! // The precheck resolves the agent program before anything is created.
-//! let (session, _failures) = create_session(&paths, &repos, &req, |_planned| Ok(()))?;
+//! let (session, _failures, _plans) = create_session(&paths, &repos, &req, |_planned| Ok(()))?;
 //! sessions.upsert(session.clone())?;
 //! // `ide-agents` turns (session, account, configuration) into a `LaunchSpec`.
 //! // ... later: stop the process, then
@@ -33,6 +35,7 @@
 //! ```
 
 pub mod account;
+pub mod base;
 pub mod configuration;
 pub mod error;
 pub mod launch;
@@ -58,10 +61,12 @@ pub use launch::{
 };
 pub use migrate::{MigrationReport, migrate_profiles};
 pub use ops::{create_login_session, remove_session_dir};
+pub use base::{BasePlan, BaseBranchRule, BaseRuleResult, repo_default_base, short_branch};
 pub use registry::{BaseBranch, RegisteredRepo, RepoId, RepoStore, detect_base};
 pub use workspace::{
     NewSession, RepoFailure, WorkspaceMigration, attach_repo, create_session, detach_repo,
-    is_managed_path, migrate_workspaces, remove_session_files, session_guidance,
+    is_managed_path, migrate_workspaces, pin_session_bases, remove_session_files, session_guidance,
+    set_session_base,
 };
 pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};

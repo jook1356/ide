@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, IoAction, Result};
 use crate::paths::{Paths, ensure_dir};
+use crate::base::{BasePlan, plan_base, repo_default_base, short_branch};
 use crate::registry::{RegisteredRepo, RepoId, RepoStore, detect_base};
 use crate::repo::{Repo, normalize_path};
 use crate::session::{Session, SessionId, SessionKind, SessionMode, SessionTarget, SessionWorktree};
@@ -26,7 +27,15 @@ pub struct NewSession {
     pub repos: Vec<RepoId>,
     /// Original-repo mode: run in this registered repository's checkout instead.
     pub original_repo: Option<RepoId>,
+    /// 기준 브랜치 최신화: fetch each base from its remote first (Desk default: on).
+    pub refresh_base: bool,
+    /// Base branch picked per repository (origin's branch name); others use the repo default.
+    pub bases: std::collections::BTreeMap<RepoId, String>,
 }
+
+/// What [`create_session`] returns: the session, the repos whose worktree failed, and each
+/// created worktree's base plan.
+pub type Created = (Session, Vec<RepoFailure>, Vec<(RepoId, BasePlan)>);
 
 /// A repository whose worktree could not be created (Desk reports these, the session stays).
 #[derive(Debug)]
@@ -43,12 +52,14 @@ pub struct RepoFailure {
 /// resolve the agent program) so a failure leaves nothing behind. Workspace mode: create the
 /// folder, then one worktree per repo in registry order (Desk: `state.repos.filter(...)`);
 /// a failing repo is returned in the failures, not fatal.
+/// Also returns each created worktree's [`BasePlan`] (the caller records rule picks with
+/// [`RepoStore::record_plan`]).
 pub fn create_session(
     paths: &Paths,
     repos: &RepoStore,
     req: &NewSession,
     precheck: impl FnOnce(&Session) -> Result<()>,
-) -> Result<(Session, Vec<RepoFailure>)> {
+) -> Result<Created> {
     let id = SessionId::new();
     if let Some(rid) = &req.original_repo {
         let r = repos.require(rid)?.clone();
@@ -72,7 +83,7 @@ pub fn create_session(
             base: String::new(),
         });
         precheck(&s)?;
-        return Ok((s, Vec::new()));
+        return Ok((s, Vec::new(), Vec::new()));
     }
     let picked: Vec<RegisteredRepo> = repos
         .list()
@@ -110,16 +121,19 @@ pub fn create_session(
     }
     ensure_dir(&root)?;
     let mut failures = Vec::new();
+    let mut plans = Vec::new();
     for r in picked {
-        if let Err(error) = add_worktree(&mut s, &r) {
-            failures.push(RepoFailure {
+        let pick = req.bases.get(&r.id).map(String::as_str);
+        match add_worktree(&mut s, &r, req.refresh_base, pick) {
+            Ok(plan) => plans.push((r.id.clone(), plan)),
+            Err(error) => failures.push(RepoFailure {
                 repo: r.id.clone(),
                 name: r.name.clone(),
                 error,
-            });
+            }),
         }
     }
-    Ok((s, failures))
+    Ok((s, failures, plans))
 }
 
 /// Desk's `freeName`: the repo name, suffixed `-2`, `-3`... when the session already has a
@@ -148,19 +162,47 @@ fn branch_exists(repo: &Repo, branch: &str) -> bool {
 }
 
 /// Add a worktree of `r` to the workspace session `s` (Desk's `addWorktree` / `worktreeAdd`):
-/// `<root>/<free name>` on `ide/<id>` from the repo's base, `--no-track`. An existing `ide/<id>`
-/// branch (kept by an earlier detach) is checked out again instead of created. On failure what
-/// this call created (folder, registration, new branch) is removed again.
-pub fn add_worktree(s: &mut Session, r: &RegisteredRepo) -> Result<()> {
-    if s.worktree(&r.id).is_some() {
-        return Ok(());
+/// `<root>/<free name>` on `ide/<id>` from the base chosen by [`plan_base`] (`refresh` = 기준
+/// 브랜치 최신화, `pick` = a base picked for this session), `--no-track`; the session keeps that
+/// base (`Session::bases`). An existing `ide/<id>` branch (kept by an earlier detach) is checked
+/// out again instead of created (no fetch). On failure what this call created (folder,
+/// registration, new branch) is removed again.
+pub fn add_worktree(
+    s: &mut Session,
+    r: &RegisteredRepo,
+    refresh: bool,
+    pick: Option<&str>,
+) -> Result<BasePlan> {
+    if let Some(w) = s.worktree(&r.id) {
+        return Ok(BasePlan {
+            name: w.base.clone(),
+            start: None,
+            rule_resolved: None,
+            fixed_upgrade: None,
+        });
     }
     let repo = Repo::open(&r.path)?;
-    let base = detect_base(&repo, r.base_branch.as_deref())?;
+    let existed = branch_exists(&repo, &s.id.branch());
+    let base = if existed {
+        let name = match pick.filter(|p| !p.trim().is_empty()) {
+            Some(p) => short_branch(p.trim()),
+            None => match repo_default_base(r) {
+                Some(b) => b,
+                None => detect_base(&repo, None)?.name,
+            },
+        };
+        BasePlan {
+            name,
+            start: None,
+            rule_resolved: None,
+            fixed_upgrade: None,
+        }
+    } else {
+        plan_base(&repo, r, refresh, pick)?
+    };
     let name = free_name(s, &r.name);
     let path = s.root.join(&name);
     let branch = s.id.branch();
-    let existed = branch_exists(&repo, &branch);
     let mut args: Vec<std::ffi::OsString> = vec!["worktree".into(), "add".into()];
     if existed {
         args.push(path.clone().into_os_string());
@@ -192,18 +234,76 @@ pub fn add_worktree(s: &mut Session, r: &RegisteredRepo) -> Result<()> {
         name,
         path,
         branch,
-        base: base.name,
+        base: base.name.clone(),
     });
-    Ok(())
+    s.bases.insert(r.id.clone(), base.name.clone());
+    Ok(base)
 }
 
-/// Attach a registered repository to a workspace session (Desk `addRepoToSessions`).
-/// Already attached: no-op.
-pub fn attach_repo(s: &mut Session, r: &RegisteredRepo) -> Result<()> {
+/// Attach a registered repository to a workspace session (Desk `addRepoToSessions`: no
+/// refresh, `base` = the base picked in the session settings, else the repo's). Already
+/// attached: no-op.
+pub fn attach_repo(s: &mut Session, r: &RegisteredRepo, base: Option<&str>) -> Result<BasePlan> {
     if !s.is_workspace() {
         return Err(Error::NotAWorkspaceSession(s.id.to_string()));
     }
-    add_worktree(s, r)
+    add_worktree(s, r, false, base)
+}
+
+/// Desk `setSessionBase`: the session's base for one repository (`None` = back to the
+/// repository's default). Must be one of origin's branches as of the last fetch. Only what the
+/// session is measured against changes; its branch is not rebased.
+pub fn set_session_base(s: &mut Session, r: &RegisteredRepo, base: Option<&str>) -> Result<()> {
+    if s.worktree(&r.id).is_none() {
+        return Err(Error::RepoNotAttached {
+            name: r.name.clone(),
+        });
+    }
+    match base.map(str::trim).filter(|b| !b.is_empty()) {
+        None => {
+            s.bases.remove(&r.id);
+        }
+        Some(b) => {
+            let name = short_branch(b);
+            let repo = Repo::open(&r.path)?;
+            repo.git([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/origin/{name}^{{commit}}"),
+            ])
+            .map_err(|_| Error::OriginBranchUnknown(name.clone()))?;
+            s.bases.insert(r.id.clone(), name);
+        }
+    }
+    Ok(())
+}
+
+/// Desk's `Workspace` constructor: sessions made before per-session bases get today's base
+/// pinned, so a later change of the repo default does not move them. Returns whether any
+/// session changed.
+pub fn pin_session_bases(sessions: &mut crate::session::SessionStore, repos: &RepoStore) -> bool {
+    let mut changed = false;
+    for s in sessions.all_mut() {
+        if !s.is_workspace() {
+            continue;
+        }
+        let missing: Vec<SessionWorktree> = s
+            .worktrees
+            .iter()
+            .filter(|w| !s.bases.contains_key(&w.repo))
+            .cloned()
+            .collect();
+        for w in missing {
+            let mut b = s.base_of(repos.get(&w.repo), &w);
+            if b.is_empty() {
+                b = "main".into();
+            }
+            s.bases.insert(w.repo.clone(), b);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Detach a repository from a workspace session: its worktree is removed (`--force`:
@@ -223,6 +323,7 @@ pub fn detach_repo(paths: &Paths, s: &mut Session, repo: &RepoId, r: Option<&Reg
     let wt = s.worktrees[idx].clone();
     remove_worktree(paths, &wt, r, false)?;
     s.worktrees.remove(idx);
+    s.bases.remove(repo);
     Ok(())
 }
 
@@ -322,10 +423,11 @@ pub fn session_guidance(s: &Session, repos: &RepoStore) -> Option<String> {
             } else {
                 format!("{}/", w.path.display().to_string().replace('\\', "/"))
             };
-            let base = if w.base.is_empty() {
+            let b = s.base_of(repos.get(&w.repo), w);
+            let base = if b.is_empty() {
                 String::new()
             } else {
-                format!(" (base `{}`)", w.base)
+                format!(" (base `{b}`)")
             };
             format!("- `{folder}` — {repo}, branch `{}`{base}", w.branch)
         })
@@ -402,9 +504,11 @@ pub fn migrate_workspaces(
             continue;
         }
         let old_repo = old_repo.unwrap_or_default();
-        let r = match repos.register(&old_repo) {
+        let r = match repos.register(&old_repo, false) {
             Ok(r) => r,
-            Err(Error::NotAGitRepo { .. }) => repos.adopt_missing(&old_repo)?,
+            Err(Error::NotAGitRepo { .. } | Error::FolderNotFound(_) | Error::NotAGitFolder(_)) => {
+                repos.adopt_missing(&old_repo)?
+            }
             Err(e) => return Err(e),
         };
         let root = paths.workspace_dir(s.id.as_str());
@@ -425,7 +529,7 @@ pub fn migrate_workspaces(
             if let Ok(repo) = Repo::open(root)
                 && crate::repo::same_path(repo.root(), root)
             {
-                repos.register(root)?;
+                repos.register(root, false)?;
             }
         }
         repos.save()?;
@@ -460,6 +564,8 @@ mod tests {
             provider_name: "Shell".into(),
             repos,
             original_repo: None,
+            refresh_base: false,
+            bases: Default::default(),
         }
     }
 
@@ -474,12 +580,12 @@ mod tests {
             test_repo::init(d);
         }
         let mut repos = RepoStore::open(&paths).unwrap();
-        let ra = repos.register(&a).unwrap();
-        let rb = repos.register(&b).unwrap();
-        let rc = repos.register(&c).unwrap();
+        let ra = repos.register(&a, false).unwrap();
+        let rb = repos.register(&b, false).unwrap();
+        let rc = repos.register(&c, false).unwrap();
 
         // Two repos with the same folder name: app, app-2.
-        let (mut s, failures) =
+        let (mut s, failures, _) =
             create_session(&paths, &repos, &req(vec![rb.id.clone(), ra.id.clone()]), |_| Ok(()))
                 .unwrap();
         assert!(failures.is_empty());
@@ -498,8 +604,8 @@ mod tests {
         assert!(g.contains(&format!("`{}`", s.id.branch())), "{g}");
 
         // Attach, attach again (no-op), detach (branch kept), re-attach (branch reused).
-        attach_repo(&mut s, &rc).unwrap();
-        attach_repo(&mut s, &rc).unwrap();
+        attach_repo(&mut s, &rc, None).unwrap();
+        attach_repo(&mut s, &rc, None).unwrap();
         assert_eq!(s.worktrees.len(), 3);
         let lib = s.worktree(&rc.id).unwrap().clone();
         assert_eq!(lib.name, "lib");
@@ -511,7 +617,7 @@ mod tests {
             detach_repo(&paths, &mut s, &rc.id, Some(&rc)),
             Err(Error::RepoNotAttached { .. })
         ));
-        attach_repo(&mut s, &rc).unwrap();
+        attach_repo(&mut s, &rc, None).unwrap();
         assert!(worktree_exists(&s.worktree(&rc.id).unwrap().path));
 
         // Delete: worktrees, branches and the folder are gone; originals untouched.
@@ -532,10 +638,10 @@ mod tests {
         let a = t.0.join("a");
         test_repo::init(&a);
         let mut repos = RepoStore::open(&paths).unwrap();
-        let ra = repos.register(&a).unwrap();
+        let ra = repos.register(&a, false).unwrap();
 
         // Zero repos: an empty workspace (Desk allows it).
-        let (s, f) = create_session(&paths, &repos, &req(vec![]), |_| Ok(())).unwrap();
+        let (s, f, _) = create_session(&paths, &repos, &req(vec![]), |_| Ok(())).unwrap();
         assert!(f.is_empty() && s.worktrees.is_empty() && s.root.is_dir());
         assert!(session_guidance(&s, &repos).unwrap().contains("no repositories"));
 
@@ -556,9 +662,9 @@ mod tests {
         // A repo that fails (moved away after registering) is reported, the session stays.
         let gone = t.0.join("gone");
         test_repo::init(&gone);
-        let rg = repos.register(&gone).unwrap();
+        let rg = repos.register(&gone, false).unwrap();
         std::fs::remove_dir_all(&gone).unwrap();
-        let (s2, f) =
+        let (s2, f, _) =
             create_session(&paths, &repos, &req(vec![ra.id.clone(), rg.id.clone()]), |_| Ok(()))
                 .unwrap();
         assert_eq!(f.len(), 1);
@@ -567,7 +673,7 @@ mod tests {
         remove_session_files(&paths, &s2, &repos, true).unwrap();
 
         // Original-repo mode: runs in the repo, nothing created; deleting keeps the repo.
-        let (o, _) = create_session(
+        let (o, _, _) = create_session(
             &paths,
             &repos,
             &NewSession {
@@ -583,12 +689,114 @@ mod tests {
         assert!(session_guidance(&o, &repos).is_none());
         let mut o2 = o.clone();
         assert!(matches!(
-            attach_repo(&mut o2, &ra),
+            attach_repo(&mut o2, &ra, None),
             Err(Error::NotAWorkspaceSession(_))
         ));
         remove_session_files(&paths, &o, &repos, true).unwrap();
         assert!(a.join("README.md").is_file());
         assert_eq!(Repo::open(&a).unwrap().list_worktrees().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bases_refresh_rules_and_offline() {
+        let t = TempDir::new("ws-base");
+        let paths = Paths::new(t.0.join("data"));
+        let seed = t.0.join("seed");
+        test_repo::init(&seed);
+        test_repo::run(&t.0, &["clone", "-q", "--bare", &seed.display().to_string(), "origin.git"]);
+        let origin = t.0.join("origin.git").display().to_string();
+        test_repo::run(&t.0, &["clone", "-q", &origin, "app"]);
+        test_repo::run(&t.0, &["clone", "-q", &origin, "pusher"]);
+        let a = t.0.join("app");
+        let pusher = t.0.join("pusher");
+        let rev = |d: &Path, r: &str| test_repo::run(d, &["rev-parse", r]);
+        let old = rev(&a, "main");
+        // origin moves on (main + a new release branch) after the clone.
+        test_repo::run(&pusher, &["commit", "-q", "--allow-empty", "-m", "remote"]);
+        test_repo::run(&pusher, &["branch", "release/2026.2.0"]);
+        test_repo::run(&pusher, &["branch", "release/2026.10.0"]);
+        test_repo::run(&pusher, &["push", "-q", "origin", "main", "release/2026.2.0", "release/2026.10.0"]);
+        let new = rev(&pusher, "main");
+        let mut repos = RepoStore::open(&paths).unwrap();
+        let ra = repos.register(&a, false).unwrap();
+        let mk = |refresh: bool, pick: Option<&str>| NewSession {
+            refresh_base: refresh,
+            bases: pick
+                .map(|p| [(ra.id.clone(), p.to_owned())].into_iter().collect())
+                .unwrap_or_default(),
+            ..req(vec![ra.id.clone()])
+        };
+        let head = |s: &Session| rev(&s.worktrees[0].path, "HEAD");
+
+        // Without 최신화: the last-fetched state (old). With it: origin's latest; local main unmoved.
+        let (s1, f, _) = create_session(&paths, &repos, &mk(false, None), |_| Ok(())).unwrap();
+        assert!(f.is_empty());
+        assert_eq!(head(&s1), old);
+        let (s2, f, _) = create_session(&paths, &repos, &mk(true, None), |_| Ok(())).unwrap();
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(head(&s2), new);
+        assert_eq!(rev(&a, "main"), old);
+        assert_eq!(s2.bases.get(&ra.id).map(String::as_str), Some("main"));
+
+        // A picked base: unknown to the last fetch without 최신화; fetched with it.
+        let (s3, f, _) =
+            create_session(&paths, &repos, &mk(false, Some("release/2026.10.0")), |_| Ok(())).unwrap();
+        assert!(matches!(f[0].error, Error::OriginBranchMissing(_)), "{f:?}");
+        assert!(s3.worktrees.is_empty());
+        let (s4, f, _) =
+            create_session(&paths, &repos, &mk(true, Some("release/2026.10.0")), |_| Ok(())).unwrap();
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(s4.worktrees[0].base, "release/2026.10.0");
+
+        // Rule: highest version, re-resolved and fetched at every creation.
+        let rule = crate::base::BaseBranchRule {
+            remote: "origin".into(),
+            pattern: "release/*".into(),
+            matches: None,
+        };
+        let r = repos.set_base_rule(&ra.id, Some(&rule)).unwrap();
+        assert_eq!(r.rule_resolved.as_deref(), Some("refs/remotes/origin/release/2026.10.0"));
+        let (s5, f, plans) = create_session(&paths, &repos, &mk(false, None), |_| Ok(())).unwrap();
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(s5.worktrees[0].base, "release/2026.10.0");
+        assert_eq!(plans[0].1.rule_resolved.as_deref(), Some("refs/remotes/origin/release/2026.10.0"));
+        // Session base override and resolution order.
+        let mut s5 = s5;
+        let r = repos.get(&ra.id).unwrap().clone();
+        assert!(matches!(
+            set_session_base(&mut s5, &r, Some("nope")),
+            Err(Error::OriginBranchUnknown(_))
+        ));
+        set_session_base(&mut s5, &r, Some("origin/main")).unwrap();
+        assert_eq!(s5.base_of(Some(&r), &s5.worktrees[0]), "main");
+        set_session_base(&mut s5, &r, None).unwrap();
+        assert_eq!(s5.base_of(Some(&r), &s5.worktrees[0]), "release/2026.10.0");
+        assert!(session_guidance(&s5, &repos).unwrap().contains("(base `release/2026.10.0`)"));
+        repos.set_base_rule(&ra.id, None).unwrap();
+
+        // Offline origin: 최신화 fails that repo (no fallback, as Desk); without it, local state.
+        test_repo::run(&a, &["remote", "set-url", "origin", &t.0.join("gone.git").display().to_string()]);
+        let (s6, f, _) = create_session(&paths, &repos, &mk(true, None), |_| Ok(())).unwrap();
+        assert!(matches!(f[0].error, Error::BaseRefreshFailed(_)), "{f:?}");
+        assert!(s6.worktrees.is_empty());
+        let (s7, f, _) = create_session(&paths, &repos, &mk(false, None), |_| Ok(())).unwrap();
+        assert!(f.is_empty());
+        assert_eq!(head(&s7), new); // origin/main as fetched by the earlier refresh
+        // A repo without any remote: 최신화 is refused with base-no-remote.
+        let lone = t.0.join("lone");
+        test_repo::init(&lone);
+        let rl = repos.register(&lone, false).unwrap();
+        let (_, f, _) = create_session(
+            &paths,
+            &repos,
+            &NewSession { refresh_base: true, ..req(vec![rl.id.clone()]) },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(matches!(f[0].error, Error::BaseNoRemote), "{f:?}");
+        for s in [&s1, &s2, &s3, &s4, &s5, &s6, &s7] {
+            remove_session_files(&paths, s, &repos, true).unwrap();
+        }
     }
 
     #[test]

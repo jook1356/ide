@@ -33,7 +33,7 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   stop). The phase 2 part creates its fixtures in the test repo on first use (TS import, Korean
   file name, binary file) and registers the repo on the repos page; a multi-repo pass (in Korean)
   registers the second repo, makes both a configuration's default repos, creates a two-worktree
-  session, switches Changes/Explore between repos, detaches/attaches, and checks delete cleanup. Unset an inherited `IDE_APP_SCRIPT_CLAUDE` unless a Claude first-run check is wanted. The script
+  session, switches Changes/Explore between repos, detaches/attaches, and checks delete cleanup. A base-branch pass (Korean) gives the test repo a local bare `origin` (`<data>/script-origin.git`), saves a fixed base and a `release/*` rule on the repos page, creates a session with 기준 브랜치 최신화 from the rule's pick, changes the session's base, and checks that an unreachable origin fails that repo with 최신화 and works without it; registering the plain folder `<data>/not-a-repo` shows Desk's git init question (English: cancelled, Korean: initialised). Other script sessions turn 최신화 off (their fixture commits are local only). Unset an inherited `IDE_APP_SCRIPT_CLAUDE` unless a Claude first-run check is wanted. The script
   runs against a real local daemon (started from the data dir, stopped at the end through the close
   dialog), in English with one Korean pass (`ko_*` screenshots). iced's `window::screenshot` (this
   iced rev) leaves `text_input` values blank; capture the real window to check those. Do not block

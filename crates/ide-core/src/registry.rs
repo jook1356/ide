@@ -78,6 +78,12 @@ pub struct RegisteredRepo {
     /// `None` = automatic ([`detect_base`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
+    /// Rule-based base (Desk `baseBranchRule`); wins over `base_branch` while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch_rule: Option<crate::base::BaseBranchRule>,
+    /// The rule's last pick (`refs/remotes/<remote>/<branch>`, Desk `ruleResolved`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_resolved: Option<String>,
     /// Registration time, Unix seconds.
     #[serde(default)]
     pub created_at: u64,
@@ -93,113 +99,14 @@ pub struct BaseBranch {
     pub start: Option<String>,
 }
 
-fn has_commit(repo: &Repo, rev: &str) -> bool {
-    repo.git([
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        "--end-of-options",
-        &format!("{rev}^{{commit}}"),
-    ])
-    .is_ok()
-}
-
-/// Desk's `mainBranch()`: `main`, else `master`, else origin's default branch; start from
-/// `origin/<name>` when the local branch is missing or only behind it. Else the current branch
-/// (unborn: no start). A configured `base_branch` (Desk's `configuredBase`) wins when it exists.
+/// The base new worktrees of `repo` start from without network access: the configured fixed
+/// base ([`crate::base::configured_base`]) when set, else automatic
+/// ([`crate::base::main_branch`]). Rules and 기준 브랜치 최신화 are in [`crate::base::plan_base`].
 pub fn detect_base(repo: &Repo, configured: Option<&str>) -> Result<BaseBranch> {
-    if let Some(b) = configured.map(str::trim).filter(|b| !b.is_empty() && !b.starts_with('-')) {
-        let refs: Vec<String> = if b.starts_with("refs/") {
-            vec![b.to_owned()]
-        } else {
-            vec![format!("refs/heads/{b}"), format!("refs/remotes/{b}")]
-        };
-        for r in refs {
-            if (r.starts_with("refs/heads/") || r.starts_with("refs/remotes/"))
-                && repo.git(["show-ref", "--verify", "--quiet", &r]).is_ok()
-            {
-                let name = match r.strip_prefix("refs/heads/") {
-                    Some(n) => n.to_owned(),
-                    None => {
-                        let rest = r.trim_start_matches("refs/remotes/");
-                        rest.split_once('/').map_or(rest, |(_, n)| n).to_owned()
-                    }
-                };
-                return Ok(BaseBranch {
-                    name,
-                    start: Some(r),
-                });
-            }
-        }
-        return Err(Error::Git {
-            args: format!("show-ref {b}"),
-            status: "missing".into(),
-            stderr: format!("base branch {b} does not exist locally"),
-        });
+    match configured.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) => crate::base::configured_base(repo, b),
+        None => crate::base::main_branch(repo),
     }
-    let origin_default = repo
-        .git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .unwrap_or_default();
-    let origin_default = origin_default
-        .trim()
-        .trim_start_matches("origin/")
-        .to_owned();
-    for name in ["main", "master", origin_default.as_str()] {
-        if name.is_empty() {
-            continue;
-        }
-        let local = has_commit(repo, &format!("refs/heads/{name}"));
-        let remote = has_commit(repo, &format!("refs/remotes/origin/{name}"));
-        match (local, remote) {
-            (false, false) => continue,
-            (true, false) => {
-                return Ok(BaseBranch {
-                    name: name.to_owned(),
-                    start: Some(name.to_owned()),
-                });
-            }
-            (false, true) => {
-                return Ok(BaseBranch {
-                    name: name.to_owned(),
-                    start: Some(format!("origin/{name}")),
-                });
-            }
-            (true, true) => {
-                let behind = repo
-                    .git([
-                        "merge-base",
-                        "--is-ancestor",
-                        name,
-                        &format!("origin/{name}"),
-                    ])
-                    .is_ok();
-                return Ok(BaseBranch {
-                    name: name.to_owned(),
-                    start: Some(if behind {
-                        format!("origin/{name}")
-                    } else {
-                        name.to_owned()
-                    }),
-                });
-            }
-        }
-    }
-    let current = repo.current_branch()?.unwrap_or_default();
-    if !current.is_empty() && !has_commit(repo, "HEAD") {
-        return Ok(BaseBranch {
-            name: current,
-            start: None,
-        });
-    }
-    let name = if current.is_empty() {
-        "HEAD".to_owned()
-    } else {
-        current
-    };
-    Ok(BaseBranch {
-        start: Some(name.clone()),
-        name,
-    })
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -209,7 +116,7 @@ struct ReposFile {
 }
 
 /// Persistent registry backed by `repos.json`. Every mutation saves immediately.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RepoStore {
     paths: Paths,
     repos: Vec<RegisteredRepo>,
@@ -251,10 +158,31 @@ impl RepoStore {
         self.repos.iter().find(|r| same_path(&r.path, path))
     }
 
-    /// Register the repository containing `path` (its main checkout). Not a git repository ->
-    /// [`Error::NotAGitRepo`]; an already registered repository returns the existing entry.
-    pub fn register(&mut self, path: &Path) -> Result<RegisteredRepo> {
-        let repo = Repo::open(path)?;
+    /// Register the repository containing `path` (its main checkout); an already registered
+    /// repository returns the existing entry (Desk `addRepo`). A missing folder ->
+    /// [`Error::FolderNotFound`]; a plain folder -> [`Error::NotAGitFolder`] unless `init`, which
+    /// git-initialises it first ([`crate::base::init_repository`]).
+    pub fn register(&mut self, path: &Path, init: bool) -> Result<RegisteredRepo> {
+        let repo = match Repo::open(path) {
+            Ok(r) => r,
+            Err(Error::NotAGitRepo { stderr, .. }) => {
+                if !path.is_dir() {
+                    return Err(Error::FolderNotFound(path.to_path_buf()));
+                }
+                if !stderr.to_lowercase().contains("not a git repository") {
+                    return Err(Error::NotAGitRepo {
+                        path: path.to_path_buf(),
+                        stderr,
+                    });
+                }
+                if !init {
+                    return Err(Error::NotAGitFolder(path.to_path_buf()));
+                }
+                crate::base::init_repository(path)?;
+                Repo::open(path)?
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(r) = self.find_path(repo.root()) {
             return Ok(r.clone());
         }
@@ -272,6 +200,8 @@ impl RepoStore {
             name,
             path: repo.root().to_path_buf(),
             base_branch: None,
+            base_branch_rule: None,
+            rule_resolved: None,
             created_at: now_unix(),
         };
         self.repos.push(r.clone());
@@ -293,11 +223,101 @@ impl RepoStore {
                 .unwrap_or_else(|| "repo".into()),
             path: path.to_path_buf(),
             base_branch: None,
+            base_branch_rule: None,
+            rule_resolved: None,
             created_at: now_unix(),
         };
         self.repos.push(r.clone());
         self.save()?;
         Ok(r)
+    }
+
+    fn require_mut(&mut self, id: &RepoId) -> Result<&mut RegisteredRepo> {
+        self.repos
+            .iter_mut()
+            .find(|r| &r.id == id)
+            .ok_or_else(|| Error::RepoNotFound(id.to_string()))
+    }
+
+    /// Desk `setRepoBaseBranch`: a fixed base (validated, stored as its full ref) or `None` =
+    /// automatic. Replaces a rule. Only future worktrees are affected.
+    pub fn set_base_branch(&mut self, id: &RepoId, base: Option<&str>) -> Result<RegisteredRepo> {
+        let path = self.require(id)?.path.clone();
+        let start = match base {
+            Some(b) => crate::base::configured_base(&Repo::open(&path)?, b)?.start,
+            None => None,
+        };
+        let r = self.require_mut(id)?;
+        r.base_branch = start;
+        r.base_branch_rule = None;
+        r.rule_resolved = None;
+        let r = r.clone();
+        self.save()?;
+        Ok(r)
+    }
+
+    /// Desk `setRepoBaseBranchRule`: save (checked against the remote's live branches: no match
+    /// fails) or remove (`None`) a rule. Saving drops the fixed base.
+    pub fn set_base_rule(
+        &mut self,
+        id: &RepoId,
+        rule: Option<&crate::base::BaseBranchRule>,
+    ) -> Result<RegisteredRepo> {
+        let path = self.require(id)?.path.clone();
+        let resolved = match rule {
+            Some(rule) => {
+                let clean = crate::base::clean_rule(rule)?;
+                let (res, _) = crate::base::resolve_rule(&Repo::open(&path)?, &clean)?;
+                let pick = res.pick.ok_or(Error::BaseRuleNoMatch)?;
+                let tracking = format!("refs/remotes/{}/{pick}", clean.remote);
+                Some((clean, tracking))
+            }
+            None => None,
+        };
+        let r = self.require_mut(id)?;
+        match resolved {
+            Some((clean, tracking)) => {
+                r.base_branch_rule = Some(clean);
+                r.rule_resolved = Some(tracking);
+                r.base_branch = None;
+            }
+            None => {
+                r.base_branch_rule = None;
+                r.rule_resolved = None;
+            }
+        }
+        let r = r.clone();
+        self.save()?;
+        Ok(r)
+    }
+
+    /// Record what creating a worktree learned: a rule's new pick, a legacy short fixed base's
+    /// full ref. Saves when something changed.
+    pub fn record_plan(
+        &mut self,
+        id: &RepoId,
+        rule_resolved: Option<&str>,
+        fixed_upgrade: Option<&str>,
+    ) -> Result<()> {
+        let Ok(r) = self.require_mut(id) else {
+            return Ok(());
+        };
+        let mut changed = false;
+        if let Some(t) = rule_resolved
+            && r.base_branch_rule.is_some()
+            && r.rule_resolved.as_deref() != Some(t)
+        {
+            r.rule_resolved = Some(t.to_owned());
+            changed = true;
+        }
+        if let Some(f) = fixed_upgrade
+            && r.base_branch.is_some()
+            && r.base_branch.as_deref() != Some(f)
+        {
+            r.base_branch = Some(f.to_owned());
+            changed = true;
+        }
+        if changed { self.save() } else { Ok(()) }
     }
 
     /// Remove a registration (files untouched). The caller checks that no session uses it.
@@ -347,21 +367,34 @@ mod tests {
         std::fs::create_dir_all(a.join("sub")).unwrap();
         let mut store = RepoStore::open(&paths).unwrap();
         assert!(!RepoStore::exists(&paths));
-        let r = store.register(&a.join("sub")).unwrap();
+        let r = store.register(&a.join("sub"), false).unwrap();
         assert_eq!(r.name, "레포 a");
         assert!(same_path(&r.path, &a));
         // Same repo again (also from a linked worktree): the existing entry.
-        assert_eq!(store.register(&a).unwrap().id, r.id);
+        assert_eq!(store.register(&a, false).unwrap().id, r.id);
         let id = crate::session::SessionId::new();
         let wt = Repo::open(&a)
             .unwrap()
             .create_worktree(&paths, &id, None)
             .unwrap();
-        assert_eq!(store.register(&wt.path).unwrap().id, r.id);
+        assert_eq!(store.register(&wt.path, false).unwrap().id, r.id);
         assert!(matches!(
-            store.register(&t.0.join("missing")),
-            Err(Error::NotAGitRepo { .. })
+            store.register(&t.0.join("missing"), false),
+            Err(Error::FolderNotFound(_))
         ));
+        // A plain folder: refused without init, git-initialised (branch main) with it.
+        let plain = t.0.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("f.txt"), "x").unwrap();
+        assert!(matches!(
+            store.register(&plain, false),
+            Err(Error::NotAGitFolder(_))
+        ));
+        assert!(!plain.join(".git").exists());
+        let p = store.register(&plain, true).unwrap();
+        assert_eq!(p.name, "plain");
+        assert_eq!(detect_base(&Repo::open(&plain).unwrap(), None).unwrap().name, "main");
+        store.unregister(&p.id).unwrap();
         let reopened = RepoStore::open(&paths).unwrap();
         assert_eq!(reopened.list(), store.list());
         store.unregister(&r.id).unwrap();
@@ -402,6 +435,26 @@ mod tests {
         let b = detect_base(&repo, Some("release")).unwrap();
         assert_eq!((b.name.as_str(), b.start.as_deref()), ("release", Some("refs/heads/release")));
         assert!(detect_base(&repo, Some("nope")).is_err());
+        // Fixed base saved as the full ref; a rule needs a remote.
+        let paths = Paths::new(t.0.join("data"));
+        let mut store = RepoStore::open(&paths).unwrap();
+        let ra = store.register(&a, false).unwrap();
+        let r = store.set_base_branch(&ra.id, Some("release")).unwrap();
+        assert_eq!(r.base_branch.as_deref(), Some("refs/heads/release"));
+        assert!(matches!(
+            store.set_base_branch(&ra.id, Some("nope")),
+            Err(Error::InvalidBaseBranch(_))
+        ));
+        let rule = crate::base::BaseBranchRule {
+            remote: "origin".into(),
+            pattern: "release/*".into(),
+            matches: None,
+        };
+        assert!(matches!(
+            store.set_base_rule(&ra.id, Some(&rule)),
+            Err(Error::RemoteNotFound(_))
+        ));
+        assert!(store.set_base_branch(&ra.id, None).unwrap().base_branch.is_none());
         // Unborn repository: no start.
         let u = t.0.join("u");
         std::fs::create_dir_all(&u).unwrap();

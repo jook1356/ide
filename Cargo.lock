@@ -1734,6 +1734,7 @@ name = "ide-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "fancy-regex 0.14.0",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

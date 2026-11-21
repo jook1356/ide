@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{
-    AccountInfo, AccountState, ConfigurationInfo, ProviderInfo, RepoInfo, SessionKind, SessionMode,
-    SessionRepo,
+    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, ProviderInfo,
+    RepoInfo, SessionKind, SessionMode, SessionRepo,
 };
 use crate::error::ProtoError;
 use crate::files::{
@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -118,6 +118,13 @@ pub struct NewSession {
     pub repos: Vec<String>,
     /// Original-repo mode: run in this registered repo's checkout (no workspace).
     pub original_repo: Option<String>,
+    /// 기준 브랜치 최신화: fetch each base from its remote before creating the worktree (a
+    /// failed fetch fails that repo).
+    #[serde(default)]
+    pub refresh_base: bool,
+    /// Base picked per repo id (one of origin's branches); missing = the repo's default.
+    #[serde(default)]
+    pub bases: std::collections::BTreeMap<String, String>,
     /// Title; empty = derived.
     pub title: String,
     /// Start the process right away.
@@ -207,10 +214,42 @@ pub enum Request {
     },
     /// Registered repositories.
     RepoList,
-    /// Register the git repository containing `path` (absolute server path; `not-a-git-repo`
-    /// otherwise). An already registered repository is returned as is.
+    /// Register the git repository containing `path` (absolute server path). A plain folder
+    /// fails with `not-a-git-folder` unless `init` (then `git init` + first commit). An already
+    /// registered repository is returned as is.
     RepoRegister {
         path: String,
+        #[serde(default)]
+        init: bool,
+    },
+    /// Fixed base branch of a repo (full ref from `repo.branches`; `None` = automatic).
+    RepoSetBaseBranch {
+        id: String,
+        base: Option<String>,
+    },
+    /// Save (checked against the remote) or remove (`None`) a repo's base branch rule.
+    RepoSetBaseRule {
+        id: String,
+        rule: Option<BaseRuleInfo>,
+    },
+    /// What a rule would pick right now (`git ls-remote`); saves nothing.
+    RepoPreviewBaseRule {
+        id: String,
+        rule: BaseRuleInfo,
+    },
+    /// Local and remote-tracking branch refs of a repo (fixed-base picker).
+    RepoBranches {
+        id: String,
+    },
+    /// origin's branches of a repo as of its last fetch (base pickers).
+    RepoOriginBranches {
+        id: String,
+    },
+    /// A session's own base branch for one repo (`None` = the repo's default).
+    SessionSetBase {
+        id: String,
+        repo: String,
+        base: Option<String>,
     },
     /// Unregister (files kept); `repo-in-use` while sessions have it attached.
     RepoUnregister {
@@ -222,6 +261,9 @@ pub enum Request {
     SessionAttachRepo {
         id: String,
         repo: String,
+        /// Base branch for the new worktree (origin's branch; `None` = the repo's default).
+        #[serde(default)]
+        base: Option<String>,
     },
     /// Remove a repo's worktree from a workspace session (uncommitted changes are discarded;
     /// the branch is kept).
@@ -413,6 +455,12 @@ impl Request {
             Request::RepoList => "repo.list",
             Request::RepoRegister { .. } => "repo.register",
             Request::RepoUnregister { .. } => "repo.unregister",
+            Request::RepoSetBaseBranch { .. } => "repo.set_base_branch",
+            Request::RepoSetBaseRule { .. } => "repo.set_base_rule",
+            Request::RepoPreviewBaseRule { .. } => "repo.preview_base_rule",
+            Request::RepoBranches { .. } => "repo.branches",
+            Request::RepoOriginBranches { .. } => "repo.origin_branches",
+            Request::SessionSetBase { .. } => "session.set_base",
             Request::SessionList => "session.list",
             Request::SessionCreate(_) => "session.create",
             Request::SessionAttachRepo { .. } => "session.attach_repo",
@@ -468,6 +516,17 @@ pub enum Response {
     SessionCreated {
         session: SessionInfo,
         failures: Vec<RepoFailureInfo>,
+        /// Rule picks that changed ("name: origin/old → origin/new", Desk's "기준 브랜치가
+        /// 규칙에 따라 바뀌었습니다").
+        #[serde(default)]
+        base_changes: Vec<String>,
+    },
+    /// `repo.preview_base_rule`.
+    BaseRulePreview(BaseRulePreview),
+    /// `repo.branches`: current branch and refs; `repo.origin_branches`: names (no current).
+    Branches {
+        current: Option<String>,
+        branches: Vec<String>,
     },
     Repos(Vec<RepoInfo>),
     Repo(RepoInfo),

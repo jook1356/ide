@@ -179,6 +179,11 @@ pub struct Session {
     /// Attached repositories.
     #[serde(default)]
     pub worktrees: Vec<SessionWorktree>,
+    /// The session's own base branch per repository (Desk `SessionWorkspace.bases`): set to the
+    /// worktree's base on creation, changed in the session repos dialog; what the session is
+    /// measured against. Missing = the repository's default ([`Session::base_of`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bases: std::collections::BTreeMap<crate::registry::RepoId, String>,
     /// Creation time, Unix seconds.
     pub created_at: u64,
     /// Last activity, Unix seconds.
@@ -220,6 +225,7 @@ impl Session {
             mode,
             root,
             worktrees: Vec::new(),
+            bases: Default::default(),
             created_at: now,
             last_active: now,
             legacy_profile: None,
@@ -233,6 +239,20 @@ impl Session {
     /// The worktree of `repo`, if attached.
     pub fn worktree(&self, repo: &crate::registry::RepoId) -> Option<&SessionWorktree> {
         self.worktrees.iter().find(|w| &w.repo == repo)
+    }
+
+    /// Desk `resolveBaseBranch`: the session's own base for `wt`'s repository, else the
+    /// repository's default (rule pick or fixed setting), else the branch the worktree was cut
+    /// from. Empty for original-repo worktrees (no base).
+    pub fn base_of(&self, r: Option<&crate::registry::RegisteredRepo>, wt: &SessionWorktree) -> String {
+        if let Some(own) = self.bases.get(&wt.repo).filter(|b| !b.is_empty()) {
+            return crate::base::short_branch(own);
+        }
+        if !self.is_workspace() {
+            return wt.base.clone();
+        }
+        r.and_then(crate::base::repo_default_base)
+            .unwrap_or_else(|| crate::base::short_branch(&wt.base))
     }
 
     /// Whether this session has its own workspace folder (attach/detach are possible).

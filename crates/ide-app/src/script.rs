@@ -275,6 +275,31 @@ enum Step {
     ExpectOpen(ItemKey),
     /// Write raw bytes to the phase 2 session terminal.
     WriteP2(&'static str),
+    /// The "Git 저장소가 아니에요" (init) dialog is shown for the plain folder.
+    ExpectInitDialog(u64),
+    /// The plain folder has (or not) a `.git` (initialised: branch main, "Initial commit").
+    ExpectPlainInitialised(bool),
+    /// The test repo gets a local bare `origin` (`<data>/script-origin.git`) with `main`,
+    /// `release/2026.9.0` and `release/2026.19.0`.
+    EnsureOrigin,
+    /// Point the test repo's origin at a missing folder (`true`) or back (`false`).
+    SetOriginUrl(bool),
+    /// Show a repo on the repos page.
+    SelectRepo(Repo),
+    /// The repos page base editor listed the refs.
+    WaitBaseRefs(u64),
+    /// The rule preview picked this branch.
+    WaitBasePreview(&'static str, u64),
+    /// The repo's default base for new sessions (`None` = automatic).
+    WaitRepoDefault(Repo, Option<&'static str>, u64),
+    /// 기준 브랜치 최신화 in the new-session dialog.
+    ExpectNewRefresh(bool),
+    /// The phase 2 session's base of the test repo.
+    WaitP2Base(&'static str, u64),
+    /// Open the phase 2 session's repos dialog and pick this base for the test repo.
+    SessionBaseP2(&'static str),
+    /// The app banner contains the needle.
+    ExpectBanner(&'static str, u64),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -474,9 +499,11 @@ fn steps(claude: bool) -> Vec<Step> {
         Log("--- repos page: register the test repo (error path: not a git repo)"),
         GoPage(Page::Repos),
         RegisterTyped(Repo::PlainFolder),
-        ExpectReposError("not a git repository", 15_000),
+        ExpectInitDialog(15_000),
         Wait(300),
         Shot("02_register_not_a_repo"),
+        CloseModal,
+        ExpectPlainInitialised(false),
         RegisterTyped(Repo::Test),
         WaitRepoRegistered(Repo::Test, 15_000),
         GoPage(Page::Work),
@@ -666,11 +693,19 @@ fn steps(claude: bool) -> Vec<Step> {
         Pause("ko_new_session_dialog"),
         CloseModal,
         GoPage(Page::Repos),
+        Log("--- plain folder: Desk's git init question, then init + register"),
         RegisterTyped(Repo::PlainFolder),
-        ExpectReposError("git 저장소가 아니에요", 15_000),
+        ExpectInitDialog(15_000),
         Wait(300),
-        Shot("ko_03_register_error"),
-        Pause("ko_register_error"),
+        Shot("ko_03_init_repo_dialog"),
+        Pause("ko_init_repo_dialog"),
+        App(Message::RepoInitConfirm),
+        WaitRepoRegistered(Repo::PlainFolder, 20_000),
+        ExpectPlainInitialised(true),
+        Wait(300),
+        Shot("ko_03b_plain_folder_registered"),
+        Unregister(Repo::PlainFolder),
+        WaitRepoGone(Repo::PlainFolder, 10_000),
         GoPage(Page::Work),
         Log("--- Korean pages of the navigation rail"),
         ExpectServerTooltip("서버: 로컬 · 연결됨 · "),
@@ -1161,6 +1196,7 @@ fn phase2() -> Vec<Step> {
     ]
     .into_iter()
     .chain(multi_repo())
+    .chain(base_branches())
     .chain([
         SetLang(LanguagePref::Fixed(Lang::En)),
         ExpectLang(Lang::En, "New session"),
@@ -1195,6 +1231,7 @@ fn multi_repo() -> Vec<Step> {
         GoPage(Page::Work),
         Log("--- multi-repo: new session pre-checks the configuration's default repos"),
         App(Message::OpenNew),
+        App(Message::NewRefreshBase(false)),
         App(Message::NewProvider("shell".into())),
         App(Message::NewConfiguration("multi".into())),
         App(Message::NewTitle("멀티 레포".into())),
@@ -1253,6 +1290,95 @@ fn multi_repo() -> Vec<Step> {
         WaitRepoGone(Repo::Second, 10_000),
         GoPage(Page::Work),
     ]
+}
+
+/// Hermes Desk's base branches (in Korean), against a local bare origin of the test repo:
+/// fixed base on the repos page, a rule with its preview, a new session with 기준 브랜치
+/// 최신화 from the rule's pick, the session's own base, then an unreachable origin (that repo
+/// fails with 최신화; without it the session starts from the local state).
+fn base_branches() -> Vec<Step> {
+    use Step::*;
+    let delete_p2 = || [AskDelete(P2), ConfirmDelete, WaitDeleted(P2, 20_000)];
+    let mut v = vec![
+        Log("--- base branches: fixed and rule base on the repos page"),
+        EnsureOrigin,
+        GoPage(Page::Repos),
+        SelectRepo(Repo::Test),
+        WaitBaseRefs(10_000),
+        Wait(300),
+        Shot("ko_30_repo_base_fixed"),
+        Pause("ko_repo_base_fixed"),
+        App(Message::BaseFixed(Some("refs/remotes/origin/main".into()))),
+        App(Message::BaseFixedSave),
+        WaitRepoDefault(Repo::Test, Some("main"), 10_000),
+        App(Message::BaseMode(true)),
+        WaitBasePreview("release/2026.19.0", 15_000),
+        Wait(300),
+        Shot("ko_31_repo_base_rule"),
+        Pause("ko_repo_base_rule"),
+        App(Message::BaseRuleSave),
+        WaitRepoDefault(Repo::Test, Some("release/2026.19.0"), 15_000),
+        GoPage(Page::Work),
+        Log("--- base branches: new session with 기준 브랜치 최신화 from the rule's pick"),
+        FillNew {
+            repo: Repo::Test,
+            provider: "shell",
+            title: "기준 브랜치",
+        },
+        App(Message::NewRefreshBase(true)),
+        ExpectNewRefresh(true),
+        Wait(300),
+        Shot("ko_32_new_session_base"),
+        Pause("ko_new_session_base"),
+        Submit,
+        WaitCreated(30_000),
+        MarkP2,
+        WaitP2Base("release/2026.19.0", 15_000),
+        SessionBaseP2("main"),
+        Wait(300),
+        Shot("ko_33_session_repos_base"),
+        Pause("ko_session_repos_base"),
+        App(Message::SessionReposSave),
+        WaitP2Base("main", 15_000),
+    ];
+    v.extend(delete_p2());
+    v.extend([
+        Log("--- base branches: unreachable origin"),
+        GoPage(Page::Repos),
+        SelectRepo(Repo::Test),
+        App(Message::BaseRuleClear),
+        WaitRepoDefault(Repo::Test, None, 15_000),
+        SetOriginUrl(true),
+        GoPage(Page::Work),
+        FillNew {
+            repo: Repo::Test,
+            provider: "shell",
+            title: "오프라인",
+        },
+        App(Message::NewRefreshBase(true)),
+        Submit,
+        WaitCreated(30_000),
+        MarkP2,
+        ExpectBanner("기준 브랜치 최신화 실패", 15_000),
+        Wait(300),
+        Shot("ko_34_offline_refresh_failed"),
+        Pause("ko_offline_refresh_failed"),
+    ]);
+    v.extend(delete_p2());
+    v.extend([
+        FillNew {
+            repo: Repo::Test,
+            provider: "shell",
+            title: "오프라인 로컬",
+        },
+        Submit,
+        WaitCreated(30_000),
+        MarkP2,
+        WaitSessionRepos(1, 15_000),
+    ]);
+    v.extend(delete_p2());
+    v.push(SetOriginUrl(false));
+    v
 }
 
 /// A command without a console window (the app is a GUI process).
@@ -1770,6 +1896,153 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             }
             true
         }
+        Step::ExpectInitDialog(ms) => {
+            let path = match &app.modal {
+                Some(Modal::InitRepo(f)) => Some(f.path.clone()),
+                _ => None,
+            };
+            let want = sc.repo_path(Repo::PlainFolder);
+            wait!(
+                path.as_deref()
+                    .is_some_and(|p| crate::app::same_path(p, &want.display().to_string())),
+                ms,
+                format!("init dialog for the plain folder: {path:?}")
+            )
+        }
+        Step::ExpectPlainInitialised(want) => {
+            let d = sc.repo_path(Repo::PlainFolder);
+            let has = d.join(".git").exists();
+            let detail = if has {
+                format!(
+                    "branch {:?}, log {:?}",
+                    git(&d, &["branch", "--show-current"]),
+                    git(&d, &["log", "--format=%s"])
+                )
+            } else {
+                String::new()
+            };
+            let ok = has == want
+                && (!want
+                    || (detail.contains("\"main\"") && detail.contains("Initial commit")));
+            sc.check(ok, &format!("plain folder initialised = {has} (want {want}) {detail}"));
+            true
+        }
+        Step::EnsureOrigin => {
+            let repo = sc.repo.clone();
+            let bare = sc.data.join("script-origin.git");
+            let r = (|| -> Result<(), String> {
+                if git(&repo, &["remote"])?.lines().any(|l| l.trim() == "origin") {
+                    return Ok(());
+                }
+                if !bare.exists() {
+                    git(&sc.data, &["init", "-q", "--bare", "-b", "main", "script-origin.git"])?;
+                }
+                git(&repo, &["remote", "add", "origin", &bare.display().to_string()])?;
+                git(
+                    &repo,
+                    &[
+                        "push",
+                        "-q",
+                        "origin",
+                        "HEAD:refs/heads/main",
+                        "HEAD:refs/heads/release/2026.9.0",
+                        "HEAD:refs/heads/release/2026.19.0",
+                    ],
+                )?;
+                git(&repo, &["fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
+                Ok(())
+            })();
+            sc.check(r.is_ok(), &format!("local bare origin {} {r:?}", bare.display()));
+            true
+        }
+        Step::SetOriginUrl(offline) => {
+            let url = if offline {
+                sc.data.join("gone-origin.git")
+            } else {
+                sc.data.join("script-origin.git")
+            };
+            let r = git(&sc.repo, &["remote", "set-url", "origin", &url.display().to_string()]);
+            sc.check(r.is_ok(), &format!("origin url -> {} {r:?}", url.display()));
+            true
+        }
+        Step::SelectRepo(r) => {
+            match registered(sc, app, r) {
+                Some(id) => task = app.update(Message::RepoSelect(id)),
+                None => sc.check(false, &format!("{r:?} is not registered")),
+            }
+            true
+        }
+        Step::WaitBaseRefs(ms) => {
+            let refs = app.settings.base.as_ref().and_then(|b| b.refs.clone());
+            wait!(
+                refs.as_ref()
+                    .is_some_and(|r| r.iter().any(|x| x == "refs/remotes/origin/main")),
+                ms,
+                format!("repos page base refs {refs:?}")
+            )
+        }
+        Step::WaitBasePreview(pick, ms) => {
+            let got = app
+                .settings
+                .base
+                .as_ref()
+                .and_then(|b| b.preview.as_ref())
+                .map(|p| (p.pick.clone(), p.matched.clone()));
+            wait!(
+                got.as_ref().is_some_and(|(p, _)| p.as_deref() == Some(pick)),
+                ms,
+                format!("base rule preview {got:?}")
+            )
+        }
+        Step::WaitRepoDefault(r, want, ms) => {
+            let id = registered(sc, app, r);
+            let got = app
+                .repos
+                .iter()
+                .find(|x| Some(&x.id) == id.as_ref())
+                .map(|x| (x.default_base.clone(), x.base.clone()));
+            let busy = app.settings.base.as_ref().is_some_and(|b| b.busy);
+            wait!(
+                !busy && got.as_ref().is_some_and(|(d, _)| d.as_deref() == want),
+                ms,
+                format!("{r:?} default base {got:?} (want {want:?}), error {:?}", app.settings.repos_error)
+            )
+        }
+        Step::ExpectNewRefresh(want) => {
+            let got = match &app.modal {
+                Some(Modal::NewSession(f)) => Some(f.refresh_base),
+                _ => None,
+            };
+            sc.check(got == Some(want), &format!("기준 브랜치 최신화 = {got:?} (want {want})"));
+            true
+        }
+        Step::WaitP2Base(want, ms) => {
+            let id = registered(sc, app, Repo::Test).unwrap_or_default();
+            let got = app
+                .live(&sid)
+                .and_then(|l| l.info.repos.iter().find(|r| r.repo == id).map(|r| r.base.clone()));
+            wait!(
+                got.as_deref() == Some(want),
+                ms,
+                format!("session base of the test repo {got:?} (want {want})")
+            )
+        }
+        Step::SessionBaseP2(b) => {
+            let id = registered(sc, app, Repo::Test).unwrap_or_default();
+            task = Task::batch([
+                app.update(Message::SessionRepos(sid.clone())),
+                app.update(Message::SessionRepoBase(id, b.into())),
+            ]);
+            true
+        }
+        Step::ExpectBanner(needle, ms) => {
+            let b = app.banner.clone();
+            wait!(
+                b.as_deref().is_some_and(|x| x.contains(needle)),
+                ms,
+                format!("banner {b:?} (want {needle:?})")
+            )
+        }
         Step::MarkP2 => {
             sc.p2 = sc.ids.len().checked_sub(1);
             log(&format!("phase 2 session: {:?}", sc.id(P2)));
@@ -2205,6 +2478,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 }
                 tasks.push(app.update(Message::NewProvider(provider.into())));
                 tasks.push(app.update(Message::NewTitle(title.into())));
+                // Desk: 기준 브랜치 최신화 is on when the dialog opens. These sessions start
+                // from the local base (fixture commits are local only); base_branches() turns
+                // it back on.
+                let on = matches!(&app.modal, Some(Modal::NewSession(f)) if f.refresh_base);
+                sc.check(on, "기준 브랜치 최신화 is on when the dialog opens");
+                tasks.push(app.update(Message::NewRefreshBase(false)));
             }
             Step::NewConfiguration(slug) => {
                 tasks.push(app.update(Message::NewConfiguration(slug.into())));
@@ -2247,7 +2526,9 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     sc.started = None;
                     continue;
                 };
-                let found = visible(app, &sid).iter().any(|l| l.contains(needle));
+                // Long paths soft-wrap in a narrow terminal: also match across lines.
+                let lines = visible(app, &sid);
+                let found = lines.iter().any(|l| l.contains(needle)) || lines.concat().contains(needle);
                 if found {
                     log(&format!("session #{i} shows {needle:?}"));
                 } else if timeout(ms) {
@@ -2278,7 +2559,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::ExpectText(i, needle) => {
                 let text = sc.id(i).map(|sid| visible(app, &sid)).unwrap_or_default();
-                let ok = text.iter().any(|l| l.contains(needle));
+                let ok = text.iter().any(|l| l.contains(needle)) || text.concat().contains(needle);
                 sc.check(ok, &format!("session #{i} shows {needle:?}"));
                 if !ok {
                     log(&format!("grid: {text:#?}"));
@@ -3053,7 +3334,19 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             | Step::ExpectSavedDetail(_)
             | Step::ExpectDeleteModal
             | Step::ExpectOpen(_)
-            | Step::WriteP2(_)) => {
+            | Step::WriteP2(_)
+            | Step::ExpectInitDialog(_)
+            | Step::ExpectPlainInitialised(_)
+            | Step::EnsureOrigin
+            | Step::SetOriginUrl(_)
+            | Step::SelectRepo(_)
+            | Step::WaitBaseRefs(_)
+            | Step::WaitBasePreview(..)
+            | Step::WaitRepoDefault(..)
+            | Step::ExpectNewRefresh(_)
+            | Step::WaitP2Base(..)
+            | Step::SessionBaseP2(_)
+            | Step::ExpectBanner(..)) => {
                 let (n, t) = step_p2(sc, app, st, el);
                 next = n;
                 tasks.push(t);

@@ -10,3 +10,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 directories.workspace = true
+fancy-regex = "0.14"

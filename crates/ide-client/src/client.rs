@@ -10,7 +10,7 @@ use ide_proto::{
     AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
     GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
-    ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
+    BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
     SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -473,18 +473,59 @@ impl Client {
         &self,
         req: NewSession,
     ) -> Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError> {
+        self.create_session_full(req).await.map(|(s, f, _)| (s, f))
+    }
+
+    /// [`Client::create_session`] plus the rule picks that changed (Desk's notice "기준
+    /// 브랜치가 규칙에 따라 바뀌었습니다", one "name: old → new" line per repo).
+    pub async fn create_session_full(
+        &self,
+        req: NewSession,
+    ) -> Result<(SessionInfo, Vec<RepoFailureInfo>, Vec<String>), ProtoError> {
         expect(self.call(Request::SessionCreate(req)).await, |r| match r {
-            Response::SessionCreated { session, failures } => Some((session, failures)),
+            Response::SessionCreated {
+                session,
+                failures,
+                base_changes,
+            } => Some((session, failures, base_changes)),
             _ => None,
         })
     }
 
     /// `session.attach_repo`: give a workspace session a worktree of a registered repo.
     pub async fn attach_repo(&self, id: &str, repo: &str) -> Result<SessionInfo, ProtoError> {
+        self.attach_repo_base(id, repo, None).await
+    }
+
+    /// `session.attach_repo` with a base branch for the new worktree (origin's branch).
+    pub async fn attach_repo_base(
+        &self,
+        id: &str,
+        repo: &str,
+        base: Option<&str>,
+    ) -> Result<SessionInfo, ProtoError> {
         expect_session(
             self.call(Request::SessionAttachRepo {
                 id: id.into(),
                 repo: repo.into(),
+                base: base.map(Into::into),
+            })
+            .await,
+        )
+    }
+
+    /// `session.set_base`: the session's own base branch for one repo (`None` = repo default).
+    pub async fn set_session_base(
+        &self,
+        id: &str,
+        repo: &str,
+        base: Option<&str>,
+    ) -> Result<SessionInfo, ProtoError> {
+        expect_session(
+            self.call(Request::SessionSetBase {
+                id: id.into(),
+                repo: repo.into(),
+                base: base.map(Into::into),
             })
             .await,
         )
@@ -516,11 +557,85 @@ impl Client {
 
     /// `repo.register`: register the git repository containing `path` (server path).
     pub async fn register_repo(&self, path: &str) -> Result<RepoInfo, ProtoError> {
+        self.register_repo_init(path, false).await
+    }
+
+    /// `repo.register` with `init`: a plain folder (`not-a-git-folder` otherwise) is
+    /// git-initialised (branch `main`, one "Initial commit") and registered.
+    pub async fn register_repo_init(&self, path: &str, init: bool) -> Result<RepoInfo, ProtoError> {
+        expect_repo(
+            self.call(Request::RepoRegister {
+                path: path.into(),
+                init,
+            })
+            .await,
+        )
+    }
+
+    /// `repo.set_base_branch`: fixed base (full ref from [`Client::repo_branches`]) or `None`
+    /// = automatic; replaces a rule.
+    pub async fn set_repo_base_branch(
+        &self,
+        id: &str,
+        base: Option<&str>,
+    ) -> Result<RepoInfo, ProtoError> {
+        expect_repo(
+            self.call(Request::RepoSetBaseBranch {
+                id: id.into(),
+                base: base.map(Into::into),
+            })
+            .await,
+        )
+    }
+
+    /// `repo.set_base_rule`: save (checked against the remote) or remove a base branch rule.
+    pub async fn set_repo_base_rule(
+        &self,
+        id: &str,
+        rule: Option<BaseRuleInfo>,
+    ) -> Result<RepoInfo, ProtoError> {
+        expect_repo(
+            self.call(Request::RepoSetBaseRule {
+                id: id.into(),
+                rule,
+            })
+            .await,
+        )
+    }
+
+    /// `repo.preview_base_rule`: what a rule picks from the remote right now.
+    pub async fn preview_repo_base_rule(
+        &self,
+        id: &str,
+        rule: BaseRuleInfo,
+    ) -> Result<BaseRulePreview, ProtoError> {
         expect(
-            self.call(Request::RepoRegister { path: path.into() })
-                .await,
+            self.call(Request::RepoPreviewBaseRule {
+                id: id.into(),
+                rule,
+            })
+            .await,
             |r| match r {
-                Response::Repo(r) => Some(r),
+                Response::BaseRulePreview(p) => Some(p),
+                _ => None,
+            },
+        )
+    }
+
+    /// `repo.branches`: (current branch, local + remote-tracking refs).
+    pub async fn repo_branches(&self, id: &str) -> Result<(Option<String>, Vec<String>), ProtoError> {
+        expect(self.call(Request::RepoBranches { id: id.into() }).await, |r| match r {
+            Response::Branches { current, branches } => Some((current, branches)),
+            _ => None,
+        })
+    }
+
+    /// `repo.origin_branches`: origin's branch names as of the last fetch.
+    pub async fn repo_origin_branches(&self, id: &str) -> Result<Vec<String>, ProtoError> {
+        expect(
+            self.call(Request::RepoOriginBranches { id: id.into() }).await,
+            |r| match r {
+                Response::Branches { branches, .. } => Some(branches),
                 _ => None,
             },
         )
@@ -1099,6 +1214,13 @@ fn expect<T>(
     f: impl FnOnce(Response) -> Option<T>,
 ) -> Result<T, ProtoError> {
     f(r?).ok_or_else(|| ProtoError::new("bad-message").arg("detail", "unexpected response"))
+}
+
+fn expect_repo(r: Result<Response, ProtoError>) -> Result<RepoInfo, ProtoError> {
+    expect(r, |r| match r {
+        Response::Repo(r) => Some(r),
+        _ => None,
+    })
 }
 
 fn expect_unit(r: Result<Response, ProtoError>) -> Result<(), ProtoError> {

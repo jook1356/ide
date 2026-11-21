@@ -242,6 +242,71 @@ pub enum Error {
     /// The operation needs a session workspace (not an original-repo or login session).
     #[error("session {0} has no workspace")]
     NotAWorkspaceSession(String),
+
+    /// A plain folder (no git repository): registering needs `init` (Desk `NotGitRepoError`).
+    #[error("{0} is not a git repository (register with init to git-initialise it)")]
+    NotAGitFolder(PathBuf),
+
+    /// The folder does not exist.
+    #[error("folder not found: {0}")]
+    FolderNotFound(PathBuf),
+
+    /// `git init` refused: a broken `.git` is in the way.
+    #[error("a broken .git exists, not initialising: {0}")]
+    CorruptGitDir(PathBuf),
+
+    /// A network git command was stopped after its time limit.
+    #[error("git {command} stopped after {secs} s")]
+    GitTimeout {
+        /// git subcommand (`fetch`, `ls-remote`).
+        command: String,
+        /// Time limit in seconds.
+        secs: u64,
+    },
+
+    /// 기준 브랜치 최신화 (fetch of the base before creating a worktree) failed.
+    #[error("refreshing the base branch failed: {0}")]
+    BaseRefreshFailed(String),
+
+    /// 기준 브랜치 최신화 needs a remote, and the base has none.
+    #[error("the base branch has no remote; turn off refreshing or set an upstream")]
+    BaseNoRemote,
+
+    /// The base start point is not a branch (nothing to refresh).
+    #[error("choose a base branch to refresh")]
+    BaseNotBranch,
+
+    /// Fetching a rule's / session's base branch failed.
+    #[error("could not fetch the base branch: {0}")]
+    BaseFetchFailed(String),
+
+    /// No remote branch matches the repository's base branch rule.
+    #[error("no remote branch matches the base branch rule")]
+    BaseRuleNoMatch,
+
+    /// The base branch rule is invalid; `field` = `remote`, `pattern` or `match`.
+    #[error("invalid base branch rule ({0})")]
+    InvalidBaseRule(&'static str),
+
+    /// The repository has no remote of this name.
+    #[error("no such remote: {0}")]
+    RemoteNotFound(String),
+
+    /// `git ls-remote` failed.
+    #[error("could not list the remote branches: {0}")]
+    RemoteListFailed(String),
+
+    /// A fixed base branch is invalid or does not exist locally.
+    #[error("base branch is invalid or not present locally: {0}")]
+    InvalidBaseBranch(String),
+
+    /// A base picked for a new session is not in origin's last-fetched branches.
+    #[error("origin has no branch {0} (turn on refreshing the base branch)")]
+    OriginBranchMissing(String),
+
+    /// A session base must be one of origin's branches.
+    #[error("origin has no branch {0} (fetch and try again)")]
+    OriginBranchUnknown(String),
 }
 
 /// A language-agnostic description of an [`Error`] for UIs: one variant per message, holding
@@ -329,6 +394,46 @@ pub enum ErrorMessage<'a> {
     NotAWorkspaceSession {
         id: &'a str,
     },
+    NotAGitFolder {
+        path: &'a Path,
+    },
+    FolderNotFound {
+        path: &'a Path,
+    },
+    CorruptGitDir {
+        path: &'a Path,
+    },
+    GitTimeout {
+        command: &'a str,
+        secs: u64,
+    },
+    BaseRefreshFailed {
+        detail: &'a str,
+    },
+    BaseNoRemote,
+    BaseNotBranch,
+    BaseFetchFailed {
+        detail: &'a str,
+    },
+    BaseRuleNoMatch,
+    InvalidBaseRule {
+        field: &'static str,
+    },
+    RemoteNotFound {
+        remote: &'a str,
+    },
+    RemoteListFailed {
+        detail: &'a str,
+    },
+    InvalidBaseBranch {
+        branch: &'a str,
+    },
+    OriginBranchMissing {
+        branch: &'a str,
+    },
+    OriginBranchUnknown {
+        branch: &'a str,
+    },
 }
 
 impl ErrorMessage<'_> {
@@ -358,6 +463,21 @@ impl ErrorMessage<'_> {
             ErrorMessage::RepoInUse { .. } => "repo-in-use",
             ErrorMessage::RepoNotAttached { .. } => "repo-not-attached",
             ErrorMessage::NotAWorkspaceSession { .. } => "not-a-workspace-session",
+            ErrorMessage::NotAGitFolder { .. } => "not-a-git-folder",
+            ErrorMessage::FolderNotFound { .. } => "folder-not-found",
+            ErrorMessage::CorruptGitDir { .. } => "corrupt-git-dir",
+            ErrorMessage::GitTimeout { .. } => "git-timeout",
+            ErrorMessage::BaseRefreshFailed { .. } => "base-refresh-failed",
+            ErrorMessage::BaseNoRemote => "base-no-remote",
+            ErrorMessage::BaseNotBranch => "base-not-branch",
+            ErrorMessage::BaseFetchFailed { .. } => "base-fetch-failed",
+            ErrorMessage::BaseRuleNoMatch => "base-rule-no-match",
+            ErrorMessage::InvalidBaseRule { .. } => "invalid-base-rule",
+            ErrorMessage::RemoteNotFound { .. } => "remote-not-found",
+            ErrorMessage::RemoteListFailed { .. } => "remote-list-failed",
+            ErrorMessage::InvalidBaseBranch { .. } => "invalid-base-branch",
+            ErrorMessage::OriginBranchMissing { .. } => "origin-branch-missing",
+            ErrorMessage::OriginBranchUnknown { .. } => "origin-branch-unknown",
         }
     }
 }
@@ -436,6 +556,24 @@ impl Error {
             },
             Error::RepoNotAttached { name } => ErrorMessage::RepoNotAttached { name },
             Error::NotAWorkspaceSession(id) => ErrorMessage::NotAWorkspaceSession { id },
+            Error::NotAGitFolder(path) => ErrorMessage::NotAGitFolder { path },
+            Error::FolderNotFound(path) => ErrorMessage::FolderNotFound { path },
+            Error::CorruptGitDir(path) => ErrorMessage::CorruptGitDir { path },
+            Error::GitTimeout { command, secs } => ErrorMessage::GitTimeout {
+                command,
+                secs: *secs,
+            },
+            Error::BaseRefreshFailed(detail) => ErrorMessage::BaseRefreshFailed { detail },
+            Error::BaseNoRemote => ErrorMessage::BaseNoRemote,
+            Error::BaseNotBranch => ErrorMessage::BaseNotBranch,
+            Error::BaseFetchFailed(detail) => ErrorMessage::BaseFetchFailed { detail },
+            Error::BaseRuleNoMatch => ErrorMessage::BaseRuleNoMatch,
+            Error::InvalidBaseRule(field) => ErrorMessage::InvalidBaseRule { field },
+            Error::RemoteNotFound(remote) => ErrorMessage::RemoteNotFound { remote },
+            Error::RemoteListFailed(detail) => ErrorMessage::RemoteListFailed { detail },
+            Error::InvalidBaseBranch(branch) => ErrorMessage::InvalidBaseBranch { branch },
+            Error::OriginBranchMissing(branch) => ErrorMessage::OriginBranchMissing { branch },
+            Error::OriginBranchUnknown(branch) => ErrorMessage::OriginBranchUnknown { branch },
         }
     }
 }

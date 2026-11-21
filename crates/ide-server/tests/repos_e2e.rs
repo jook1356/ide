@@ -22,6 +22,18 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+fn git_ok(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
 fn branch_exists(repo: &Path, branch: &str) -> bool {
     !git_out(repo, &["branch", "--list", branch]).is_empty()
 }
@@ -33,6 +45,8 @@ fn shell(repos: Vec<String>) -> NewSession {
         configuration: "default".into(),
         repos,
         original_repo: None,
+        refresh_base: false,
+        bases: Default::default(),
         title: String::new(),
         start: false,
         cols: 80,
@@ -161,6 +175,8 @@ async fn registry_workspaces_attach_detach_delete() {
     let (o, _) = c
         .create_session(NewSession {
             original_repo: Some(rx.id.clone()),
+            refresh_base: false,
+            bases: Default::default(),
             ..shell(Vec::new())
         })
         .await
@@ -253,6 +269,177 @@ async fn single_repo_session_migration() {
     c.delete_session("old1", true).await.unwrap();
     assert!(!wt.exists());
     assert!(!branch_exists(&repo, "ide/old1"));
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hermes Desk's base-branch behaviour through the RPCs, against a local bare `origin`:
+/// 기준 브랜치 최신화 (fetch before the worktree; local branch unmoved), a base picked per
+/// session, fixed and rule bases on the repo, the session's own base, an unreachable origin
+/// (that repo fails with 최신화, works without), and registering a plain folder (git init).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn base_branches_fetch_offline_and_plain_folder_init() {
+    let dir = tmp_dir("repos-base");
+    let seed = dir.join("seed");
+    init_repo(&seed);
+    let seed_s = seed.display().to_string();
+    git_ok(&dir, &["clone", "-q", "--bare", &seed_s, "origin.git"]);
+    let origin = dir.join("origin.git").display().to_string();
+    git_ok(&dir, &["clone", "-q", &origin, "app"]);
+    git_ok(&dir, &["clone", "-q", &origin, "pusher"]);
+    let app = dir.join("app");
+    let pusher = dir.join("pusher");
+    let old = git_ok(&app, &["rev-parse", "main"]);
+    git_ok(&pusher, &["commit", "-q", "--allow-empty", "-m", "remote work"]);
+    git_ok(&pusher, &["branch", "release/2026.9.0"]);
+    git_ok(&pusher, &["branch", "release/2026.19.0"]);
+    git_ok(&pusher, &["push", "-q", "origin", "main", "release/2026.9.0", "release/2026.19.0"]);
+    let new = git_ok(&pusher, &["rev-parse", "main"]);
+
+    let server = server(&dir.join("data"));
+    let c = Client::connect(memory(&server), ClientOptions::default())
+        .await
+        .unwrap();
+    let ra = c.register_repo(&app.display().to_string()).await.unwrap();
+    assert_eq!((ra.base.as_str(), ra.default_base.as_deref()), ("main", None));
+    let head = |p: &str| git_ok(Path::new(p), &["rev-parse", "HEAD"]);
+    let req = |refresh: bool, pick: Option<&str>| NewSession {
+        refresh_base: refresh,
+        bases: pick
+            .map(|p| [(ra.id.clone(), p.to_owned())].into_iter().collect())
+            .unwrap_or_default(),
+        ..shell(vec![ra.id.clone()])
+    };
+    let mut made = Vec::new();
+
+    // Without 최신화 the last-fetched origin/main; with it origin's latest, local main unmoved.
+    let (s, f) = c.create_session(req(false, None)).await.unwrap();
+    assert!(f.is_empty());
+    assert_eq!(head(&s.repos[0].path), old);
+    made.push(s.id.clone());
+    let (s, f) = c.create_session(req(true, None)).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(head(&s.repos[0].path), new);
+    assert_eq!(git_ok(&app, &["rev-parse", "main"]), old);
+    made.push(s.id.clone());
+
+    // origin's branches (base pickers) and a base picked for one session.
+    let names = c.repo_origin_branches(&ra.id).await.unwrap();
+    assert!(names.contains(&"main".to_owned()), "{names:?}");
+    let (s, f) = c.create_session(req(false, Some("release/2026.19.0"))).await.unwrap();
+    assert_eq!(f[0].error.id, "origin-branch-missing");
+    assert!(s.repos.is_empty());
+    made.push(s.id.clone());
+    let (s, f) = c.create_session(req(true, Some("release/2026.19.0"))).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(s.repos[0].base, "release/2026.19.0");
+    made.push(s.id.clone());
+
+    // Fixed base: chosen from the refs, stored as the full ref.
+    let (cur, refs) = c.repo_branches(&ra.id).await.unwrap();
+    assert_eq!(cur.as_deref(), Some("main"));
+    // Only the picked branch was fetched (Desk fetches one branch, not the whole remote).
+    assert!(refs.contains(&"refs/remotes/origin/release/2026.19.0".to_owned()), "{refs:?}");
+    assert!(!refs.contains(&"refs/remotes/origin/release/2026.9.0".to_owned()), "{refs:?}");
+    let r = c
+        .set_repo_base_branch(&ra.id, Some("refs/remotes/origin/release/2026.19.0"))
+        .await
+        .unwrap();
+    assert_eq!(r.default_base.as_deref(), Some("release/2026.19.0"));
+    let (s, f) = c.create_session(req(false, None)).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(s.repos[0].base, "release/2026.19.0");
+    made.push(s.id.clone());
+    assert_eq!(
+        c.set_repo_base_branch(&ra.id, Some("nope")).await.unwrap_err().id,
+        "invalid-base-branch"
+    );
+
+    // Rule: preview (live ls-remote), save (replaces the fixed base), session from the pick.
+    let rule = ide_client::BaseRuleInfo {
+        remote: "origin".into(),
+        pattern: "release/*".into(),
+        matches: None,
+    };
+    let pv = c.preview_repo_base_rule(&ra.id, rule.clone()).await.unwrap();
+    assert_eq!(pv.pick.as_deref(), Some("release/2026.19.0"));
+    assert_eq!(pv.matched, ["release/2026.19.0", "release/2026.9.0"]);
+    let bad = ide_client::BaseRuleInfo {
+        pattern: "nothing/*".into(),
+        ..rule.clone()
+    };
+    assert_eq!(
+        c.set_repo_base_rule(&ra.id, Some(bad)).await.unwrap_err().id,
+        "base-rule-no-match"
+    );
+    let r = c.set_repo_base_rule(&ra.id, Some(rule.clone())).await.unwrap();
+    assert_eq!(r.base_branch, None);
+    assert_eq!(r.base_rule.as_ref(), Some(&rule));
+    assert_eq!(r.base, "release/2026.19.0");
+    let (s, f) = c.create_session(req(false, None)).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(s.repos[0].base, "release/2026.19.0");
+    made.push(s.id.clone());
+    // A newer release pushed later is picked up by the next session and reported.
+    git_ok(&pusher, &["branch", "release/2026.20.0"]);
+    git_ok(&pusher, &["push", "-q", "origin", "release/2026.20.0"]);
+    let (s, f, changes) = c.create_session_full(req(false, None)).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(s.repos[0].base, "release/2026.20.0");
+    assert_eq!(changes, ["app: origin/release/2026.19.0 → origin/release/2026.20.0"]);
+    made.push(s.id.clone());
+
+    // The session's own base: origin branches only; None = back to the repo default.
+    assert_eq!(
+        c.set_session_base(&s.id, &ra.id, Some("nope")).await.unwrap_err().id,
+        "origin-branch-unknown"
+    );
+    let s2 = c.set_session_base(&s.id, &ra.id, Some("main")).await.unwrap();
+    assert_eq!(s2.repos[0].base, "main");
+    c.set_repo_base_rule(&ra.id, None).await.unwrap();
+    let s3 = c.set_session_base(&s.id, &ra.id, None).await.unwrap();
+    assert_eq!(s3.repos[0].base, "release/2026.20.0"); // the worktree's own base
+
+    // Unreachable origin: 최신화 fails that repo (the session stays); without it, local state.
+    git_ok(&app, &["remote", "set-url", "origin", &dir.join("gone.git").display().to_string()]);
+    let (s, f) = c.create_session(req(true, None)).await.unwrap();
+    assert_eq!(f[0].error.id, "base-refresh-failed");
+    assert!(s.repos.is_empty());
+    made.push(s.id.clone());
+    let (s, f) = c.create_session(req(false, None)).await.unwrap();
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(head(&s.repos[0].path), new);
+    made.push(s.id.clone());
+    assert_eq!(
+        c.preview_repo_base_rule(&ra.id, rule).await.unwrap_err().id,
+        "remote-list-failed"
+    );
+
+    // A plain folder: refused without init, git-initialised (main, "Initial commit") with it.
+    let plain = dir.join("일반 폴더");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("notes.txt"), "x").unwrap();
+    let ps = plain.display().to_string();
+    assert_eq!(c.register_repo(&ps).await.unwrap_err().id, "not-a-git-folder");
+    assert!(!plain.join(".git").exists());
+    let rp = c.register_repo_init(&ps, true).await.unwrap();
+    assert_eq!((rp.name.as_str(), rp.base.as_str()), ("일반 폴더", "main"));
+    assert_eq!(git_out(&plain, &["log", "--format=%s"]), "Initial commit");
+    assert_eq!(git_out(&plain, &["ls-files"]), "notes.txt");
+    // With 최신화 a repo without a remote fails with base-no-remote (as Desk).
+    let (s, f) = c
+        .create_session(NewSession {
+            refresh_base: true,
+            ..shell(vec![rp.id.clone()])
+        })
+        .await
+        .unwrap();
+    assert_eq!(f[0].error.id, "base-no-remote");
+    made.push(s.id.clone());
+
+    for id in made {
+        c.delete_session(&id, true).await.unwrap();
+    }
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -16,7 +16,7 @@ pub mod term;
 
 pub use agents::{
     AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
-    ProviderDetection, ProviderInfo, RepoInfo, SessionKind, SessionMode, SessionRepo, Support,
+    ProviderDetection, ProviderInfo, RepoInfo, BaseRuleInfo, BaseRulePreview, SessionKind, SessionMode, SessionRepo, Support,
 };
 pub use error::ProtoError;
 pub use files::{

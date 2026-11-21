@@ -76,6 +76,8 @@ async fn real_cli_launch() {
                 configuration: cfg.slug.clone(),
                 repos: vec![repo_id.clone()],
                 original_repo: None,
+                refresh_base: false,
+                bases: Default::default(),
                 title: format!("{provider} launch probe"),
                 start: true,
                 cols: 120,

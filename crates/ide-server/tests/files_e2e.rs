@@ -89,6 +89,8 @@ async fn new_session(c: &Client, repo: &Path) -> (SessionInfo, String) {
             configuration: "default".into(),
             repos: vec![r.id.clone()],
             original_repo: None,
+            refresh_base: false,
+            bases: Default::default(),
             title: "files".into(),
             start: false,
             cols: 80,
@@ -145,8 +147,8 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         c.browse_pick_list(Some("relative")).await.unwrap_err().id,
         "path-invalid"
     );
-    // Only git repositories can be registered; sessions only take registered repos.
-    assert_eq!(c.register_repo(&outside).await.unwrap_err().id, "not-a-git-repo");
+    // A plain folder needs `init` (the app asks first); sessions only take registered repos.
+    assert_eq!(c.register_repo(&outside).await.unwrap_err().id, "not-a-git-folder");
     let bad = c
         .create_session(NewSession {
             provider: "shell".into(),
@@ -154,6 +156,8 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
             configuration: "default".into(),
             repos: vec!["0badc0de".into()],
             original_repo: None,
+            refresh_base: false,
+            bases: Default::default(),
             title: String::new(),
             start: false,
             cols: 0,

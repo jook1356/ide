@@ -15,7 +15,8 @@ use ide_core::{
 };
 use ide_proto::{
     AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, NewSession, Notify,
-    ProtoError, ProviderCaps, ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, Request,
+    BaseRuleInfo, BaseRulePreview, ProtoError, ProviderCaps, ProviderDetection, ProviderInfo,
+    RepoFailureInfo, RepoInfo, Request,
     Response, SessionInfo, SessionRepo, SessionState, Support, TextSearch, UserInfo,
 };
 use tokio::sync::broadcast;
@@ -280,6 +281,10 @@ impl UserCtx {
                 &format!("repos={} sessions={}", m.repos, m.sessions),
             );
         }
+        // Desk: sessions made before per-session bases get today's base pinned.
+        if ide_core::pin_session_bases(&mut sessions, &repos) {
+            sessions.persist().map_err(|e| core_error(&e))?;
+        }
         let providers = Providers::load(&paths.providers_dir());
         Ok(UserCtx {
             user,
@@ -493,7 +498,7 @@ impl UserCtx {
                     folder: w.name.clone(),
                     path: w.path.display().to_string(),
                     branch: w.branch.clone(),
-                    base: w.base.clone(),
+                    base: s.base_of(repos.get(&w.repo), w),
                 })
                 .collect(),
             created_at: s.created_at,
@@ -505,17 +510,42 @@ impl UserCtx {
     }
 
     fn repo_info(&self, r: &RegisteredRepo, sessions: &SessionStore) -> RepoInfo {
-        let base = ide_core::Repo::open(&r.path)
-            .and_then(|repo| ide_core::detect_base(&repo, r.base_branch.as_deref()))
-            .map(|b| b.name)
-            .unwrap_or_default();
+        let default_base = ide_core::repo_default_base(r);
+        let base = match &default_base {
+            Some(b) => b.clone(),
+            None => ide_core::Repo::open(&r.path)
+                .and_then(|repo| ide_core::detect_base(&repo, None))
+                .map(|b| b.name)
+                .unwrap_or_default(),
+        };
         RepoInfo {
             id: r.id.to_string(),
             name: r.name.clone(),
             path: r.path.display().to_string(),
             base,
             sessions: sessions.count_using_repo(&r.id) as u32,
+            base_branch: r.base_branch.clone(),
+            base_rule: r.base_branch_rule.as_ref().map(|x| BaseRuleInfo {
+                remote: x.remote.clone(),
+                pattern: x.pattern.clone(),
+                matches: x.matches.clone(),
+            }),
+            default_base,
         }
+    }
+
+    /// The registered repo `id` (cloned) and its opened git repository.
+    fn repo_git(&self, id: &str) -> Result<(RegisteredRepo, ide_core::Repo), ProtoError> {
+        let rid = self.parse_repo(id)?;
+        let r = self
+            .repos
+            .lock()
+            .unwrap()
+            .require(&rid)
+            .map_err(|e| core_error(&e))?
+            .clone();
+        let repo = ide_core::Repo::open(&r.path).map_err(|e| core_error(&e))?;
+        Ok((r, repo))
     }
 
     fn parse_repo(&self, id: &str) -> Result<RepoId, ProtoError> {
@@ -533,14 +563,18 @@ impl UserCtx {
                     list.iter().map(|r| self.repo_info(r, &sessions)).collect(),
                 ))
             }
-            Request::RepoRegister { path } => {
-                // Any folder the user picks (the folder picker is not limited); it must be a
-                // git repository. Its main checkout is registered.
+            Request::RepoRegister { path, init } => {
+                // Any folder the user picks (the folder picker is not limited). A git
+                // repository's main checkout is registered; a plain folder only with `init`
+                // (Desk: "초기화하고 추가" -> git init + first commit).
                 let p = crate::jail::canonicalize(std::path::Path::new(path.trim())).map_err(|_| {
                     ProtoError::new("fs-not-found").arg("path", path.clone())
                 })?;
-                let r = self.repos.lock().unwrap().register(&p).map_err(core)?;
-                self.audit("repo.register", &format!("{} {}", r.id, r.path.display()));
+                let r = self.repos.lock().unwrap().register(&p, init).map_err(core)?;
+                self.audit(
+                    "repo.register",
+                    &format!("{} {}{}", r.id, r.path.display(), if init { " init" } else { "" }),
+                );
                 self.notify(Notify::ReposChanged);
                 let sessions = self.sessions.lock().unwrap();
                 Ok(Response::Repo(self.repo_info(&r, &sessions)))
@@ -560,12 +594,105 @@ impl UserCtx {
                 self.notify(Notify::ReposChanged);
                 Ok(Response::Unit)
             }
-            Request::SessionAttachRepo { id, repo } => {
+            Request::RepoSetBaseBranch { id, base } => {
+                let rid = self.parse_repo(&id)?;
+                let r = self
+                    .repos
+                    .lock()
+                    .unwrap()
+                    .set_base_branch(&rid, base.as_deref())
+                    .map_err(core)?;
+                self.audit("repo.set_base_branch", &format!("{id} {}", base.as_deref().unwrap_or("-")));
+                self.notify(Notify::ReposChanged);
+                let sessions = self.sessions.lock().unwrap();
+                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+            }
+            Request::RepoSetBaseRule { id, rule } => {
+                let rid = self.parse_repo(&id)?;
+                let rule = rule.map(|x| ide_core::BaseBranchRule {
+                    remote: x.remote,
+                    pattern: x.pattern,
+                    matches: x.matches,
+                });
+                // Validated against the remote's live branches (`git ls-remote`, up to 60 s)
+                // outside the registry lock, then saved.
+                if let Some(rule) = &rule {
+                    let (_, repo) = self.repo_git(&id)?;
+                    let (res, _) = ide_core::base::resolve_rule(&repo, rule).map_err(core)?;
+                    res.pick.ok_or_else(|| core(ide_core::Error::BaseRuleNoMatch))?;
+                }
+                let r = self
+                    .repos
+                    .lock()
+                    .unwrap()
+                    .set_base_rule(&rid, rule.as_ref())
+                    .map_err(core)?;
+                self.audit(
+                    "repo.set_base_rule",
+                    &format!("{id} {}", rule.as_ref().map_or("-", |x| x.pattern.as_str())),
+                );
+                self.notify(Notify::ReposChanged);
+                let sessions = self.sessions.lock().unwrap();
+                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+            }
+            Request::RepoPreviewBaseRule { id, rule } => {
+                let (_, repo) = self.repo_git(&id)?;
+                let rule = ide_core::BaseBranchRule {
+                    remote: rule.remote,
+                    pattern: rule.pattern,
+                    matches: rule.matches,
+                };
+                let (res, branches) = ide_core::base::resolve_rule(&repo, &rule).map_err(core)?;
+                Ok(Response::BaseRulePreview(BaseRulePreview {
+                    matched: res.matched,
+                    excluded: res.excluded,
+                    pick: res.pick,
+                    branches,
+                }))
+            }
+            Request::RepoBranches { id } => {
+                let (_, repo) = self.repo_git(&id)?;
+                let (current, branches) = ide_core::base::branch_refs(&repo).map_err(core)?;
+                Ok(Response::Branches { current, branches })
+            }
+            Request::RepoOriginBranches { id } => {
+                let (_, repo) = self.repo_git(&id)?;
+                let branches = ide_core::base::origin_branches(&repo).map_err(core)?;
+                Ok(Response::Branches {
+                    current: None,
+                    branches,
+                })
+            }
+            Request::SessionSetBase { id, repo, base } => {
                 let s = self.resolve_session(&id)?;
                 let rid = self.parse_repo(&repo)?;
                 let r = self.repos.lock().unwrap().require(&rid).map_err(core)?.clone();
                 let mut updated = s.clone();
-                ide_core::attach_repo(&mut updated, &r).map_err(core)?;
+                ide_core::set_session_base(&mut updated, &r, base.as_deref()).map_err(core)?;
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .upsert(updated.clone())
+                    .map_err(core)?;
+                self.refresh_root(&updated);
+                self.audit(
+                    "session.set_base",
+                    &format!("{id} {repo} {}", base.as_deref().unwrap_or("-")),
+                );
+                self.notify(Notify::SessionsChanged);
+                Ok(Response::Session(self.info(&updated)))
+            }
+            Request::SessionAttachRepo { id, repo, base } => {
+                let s = self.resolve_session(&id)?;
+                let rid = self.parse_repo(&repo)?;
+                let r = self.repos.lock().unwrap().require(&rid).map_err(core)?.clone();
+                let mut updated = s.clone();
+                let plan = ide_core::attach_repo(&mut updated, &r, base.as_deref()).map_err(core)?;
+                let _ = self.repos.lock().unwrap().record_plan(
+                    &rid,
+                    plan.rule_resolved.as_deref(),
+                    plan.fixed_upgrade.as_deref(),
+                );
                 self.sessions
                     .lock()
                     .unwrap()
@@ -1088,9 +1215,12 @@ impl UserCtx {
                 repo,
                 base,
             } => {
-                let (_, wt, j) = self.worktree_root(&session, &repo)?;
+                let (s, wt, j) = self.worktree_root(&session, &repo)?;
                 let main = self.repo_path_of(&wt);
-                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
+                let base = base.or_else(|| {
+                    let b = s.base_of(self.repos.lock().unwrap().get(&wt.repo), &wt);
+                    (!b.is_empty()).then_some(b)
+                });
                 git::status(j.root(), main.as_deref(), base.as_deref()).map(Response::GitStatus)
             }
             Request::GitDiff {
@@ -1100,7 +1230,7 @@ impl UserCtx {
                 against,
                 base,
             } => {
-                let (_, wt, j) = self.worktree_root(&session, &repo)?;
+                let (s, wt, j) = self.worktree_root(&session, &repo)?;
                 let path = match path {
                     Some(p) => {
                         let n = normalize_rel(&p)?;
@@ -1110,7 +1240,10 @@ impl UserCtx {
                     None => None,
                 };
                 let main = self.repo_path_of(&wt);
-                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
+                let base = base.or_else(|| {
+                    let b = s.base_of(self.repos.lock().unwrap().get(&wt.repo), &wt);
+                    (!b.is_empty()).then_some(b)
+                });
                 git::diff(
                     j.root(),
                     main.as_deref(),
@@ -1127,14 +1260,17 @@ impl UserCtx {
                 rev,
                 base,
             } => {
-                let (_, wt, j) = self.worktree_root(&session, &repo)?;
+                let (s, wt, j) = self.worktree_root(&session, &repo)?;
                 let rel = normalize_rel(&path)?;
                 if rel.is_empty() {
                     return Err(ProtoError::new("fs-is-a-dir").arg("path", ""));
                 }
                 j.resolve(&rel)?;
                 let main = self.repo_path_of(&wt);
-                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
+                let base = base.or_else(|| {
+                    let b = s.base_of(self.repos.lock().unwrap().get(&wt.repo), &wt);
+                    (!b.is_empty()).then_some(b)
+                });
                 let blob = git::file_at(j.root(), main.as_deref(), &rel, &rev, base.as_deref())?;
                 Ok(Response::FileAt(
                     blob.map(|b| fsops::content_from_bytes(&rel, &b, 0)),
@@ -1197,15 +1333,41 @@ impl UserCtx {
             provider_name: p.display_name().to_owned(),
             repos: repo_ids,
             original_repo: original,
+            refresh_base: req.refresh_base,
+            bases: req
+                .bases
+                .iter()
+                .filter_map(|(k, v)| RepoId::parse(k).ok().map(|k| (k, v.clone())))
+                .collect(),
         };
-        // The program must resolve before the folder and worktrees are created.
-        let (session, failures) = {
-            let repos = self.repos.lock().unwrap();
-            ide_core::create_session(&self.paths, &repos, &core_req, |_| {
+        // The program must resolve before the folder and worktrees are created. Worktrees
+        // (and 기준 브랜치 최신화 fetches) run on a snapshot of the registry, not under its lock.
+        let snapshot = self.repos.lock().unwrap().clone();
+        let (session, failures, plans) =
+            ide_core::create_session(&self.paths, &snapshot, &core_req, |_| {
                 p.program_path(&self.launch_env).map(drop)
             })
-            .map_err(core)?
-        };
+            .map_err(core)?;
+        // Desk: rule picks that changed are reported ("기준 브랜치가 규칙에 따라 바뀌었습니다").
+        let mut base_changes = Vec::new();
+        {
+            let mut repos = self.repos.lock().unwrap();
+            for (rid, plan) in &plans {
+                let before = repos.get(rid).and_then(|r| r.rule_resolved.clone());
+                let name = repos.get(rid).map(|r| r.name.clone()).unwrap_or_default();
+                if let (Some(b), Some(a)) = (&before, &plan.rule_resolved)
+                    && b != a
+                {
+                    let short = |x: &str| x.trim_start_matches("refs/remotes/").to_owned();
+                    base_changes.push(format!("{name}: {} → {}", short(b), short(a)));
+                }
+                let _ = repos.record_plan(
+                    rid,
+                    plan.rule_resolved.as_deref(),
+                    plan.fixed_upgrade.as_deref(),
+                );
+            }
+        }
         self.sessions
             .lock()
             .unwrap()
@@ -1257,6 +1419,7 @@ impl UserCtx {
             self.refresh_root(&session);
         }
         Ok(Response::SessionCreated {
+            base_changes,
             session: self.info(&session),
             failures: failures
                 .iter()
@@ -1455,6 +1618,21 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
         }
         ErrorMessage::RepoNotAttached { name } => p.arg("name", name),
         ErrorMessage::NotAWorkspaceSession { id } => p.arg("id", id),
+        ErrorMessage::NotAGitFolder { path }
+        | ErrorMessage::FolderNotFound { path }
+        | ErrorMessage::CorruptGitDir { path } => p.arg("path", path.display().to_string()),
+        ErrorMessage::GitTimeout { command, secs } => {
+            p.arg("command", command).arg("secs", secs.to_string())
+        }
+        ErrorMessage::BaseRefreshFailed { detail }
+        | ErrorMessage::BaseFetchFailed { detail }
+        | ErrorMessage::RemoteListFailed { detail } => p.arg("detail", detail),
+        ErrorMessage::BaseNoRemote | ErrorMessage::BaseNotBranch | ErrorMessage::BaseRuleNoMatch => p,
+        ErrorMessage::InvalidBaseRule { field } => p.arg("field", field),
+        ErrorMessage::RemoteNotFound { remote } => p.arg("remote", remote),
+        ErrorMessage::InvalidBaseBranch { branch }
+        | ErrorMessage::OriginBranchMissing { branch }
+        | ErrorMessage::OriginBranchUnknown { branch } => p.arg("branch", branch),
     }
 }
 

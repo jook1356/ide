@@ -69,6 +69,88 @@ pub fn git_raw<S: AsRef<OsStr>>(cwd: &Path, args: &[S], env: &[(&str, &str)]) ->
     })
 }
 
+/// Never let git (or Git Credential Manager) open a prompt from a network call (Desk's
+/// `NO_PROMPT`).
+pub(crate) const NO_PROMPT: [(&str, &str); 2] =
+    [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+
+/// Like [`git`] for network commands (`fetch`, `ls-remote`): no prompts ([`NO_PROMPT`]) and
+/// killed after `timeout` ([`Error::GitTimeout`], Desk's "시간 초과(N초)로 git ...을 중단했어요").
+/// On a timeout the output readers are left detached (helpers such as `ssh` may hold the pipes).
+pub(crate) fn git_timeout<S: AsRef<OsStr>>(
+    cwd: &Path,
+    args: &[S],
+    timeout: std::time::Duration,
+) -> Result<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(cwd)
+        .args(["-c", "core.quotepath=false"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in NO_PROMPT {
+        cmd.env(k, v);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(Error::GitSpawn)?;
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut b);
+        }
+        b
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut b);
+        }
+        b
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(Error::GitSpawn)? {
+            Some(st) => break st,
+            None if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let command = args
+                    .first()
+                    .map(|a| a.as_ref().to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                return Err(Error::GitTimeout {
+                    command,
+                    secs: timeout.as_secs(),
+                });
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    let out = GitOutput {
+        code: status.code(),
+        stdout: out_t.join().unwrap_or_default(),
+        stderr: err_t.join().unwrap_or_default(),
+    };
+    if out.code == Some(0) {
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_owned())
+    } else {
+        Err(out.error(args))
+    }
+}
+
 /// Run `git` with `args` in `cwd`; returns trimmed stdout or [`Error::Git`] with stderr.
 pub(crate) fn git<I, S>(cwd: &Path, args: I) -> Result<String>
 where

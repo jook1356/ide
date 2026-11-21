@@ -23,7 +23,7 @@ pub mod transport;
 
 pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, SearchStream};
 pub use ide_proto::{
-    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
+    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
     ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
     SessionRepo, Support,
 };

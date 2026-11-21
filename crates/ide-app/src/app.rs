@@ -163,6 +163,10 @@ pub struct NewForm {
     pub repos: Vec<String>,
     /// The repo of an original-repo session.
     pub original_repo: Option<String>,
+    /// Desk's "기준 브랜치 최신화" (on each time the dialog opens).
+    pub refresh_base: bool,
+    /// Base branch picked per repo id (origin's branch); missing = the repo's default.
+    pub bases: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     pub busy: bool,
 }
@@ -313,6 +317,9 @@ pub struct SessionReposForm {
     pub session: String,
     /// Registered repos checked to be attached on save.
     pub add: Vec<String>,
+    /// Base branch chosen per repo id (attached: the session's base, saved with
+    /// `session.set_base` when changed; added: the new worktree's base).
+    pub bases: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     pub busy: bool,
 }
@@ -357,6 +364,65 @@ pub struct SettingsForm {
     pub repo_confirm: bool,
     pub repos_error: Option<String>,
     pub repos_busy: bool,
+    /// Repos page: the selected repo's base branch editor (Desk `RepoBaseSettings`).
+    pub base: Option<BaseEdit>,
+}
+
+/// Desk's 레포 page "기준 브랜치" card: a fixed branch (`FixedBaseSettings`) or a rule
+/// (`BaseBranchRuleSettings`).
+#[derive(Default)]
+pub struct BaseEdit {
+    pub repo: String,
+    /// "규칙으로 자동 선택" shown (else "고정 브랜치").
+    pub rule_mode: bool,
+    /// Local and remote-tracking refs (`repo.branches`); `None` while loading.
+    pub refs: Option<Vec<String>>,
+    /// Fixed branch being edited (`None` = automatic).
+    pub fixed: Option<String>,
+    pub remote: String,
+    pub pattern: String,
+    pub matches: String,
+    pub preview: Option<ide_client::BaseRulePreview>,
+    pub preview_loading: bool,
+    pub preview_error: Option<String>,
+    pub saved: bool,
+    pub busy: bool,
+}
+
+impl BaseEdit {
+    /// The editor for `r` as saved (Desk's default rule: origin, release/*).
+    pub fn new(r: &RepoInfo) -> Self {
+        let rule = r.base_rule.clone().unwrap_or_else(|| ide_client::BaseRuleInfo {
+            remote: "origin".into(),
+            pattern: "release/*".into(),
+            matches: None,
+        });
+        BaseEdit {
+            repo: r.id.clone(),
+            rule_mode: r.base_rule.is_some(),
+            fixed: r.base_branch.clone(),
+            remote: rule.remote,
+            pattern: rule.pattern,
+            matches: rule.matches.unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    /// The rule as edited.
+    pub fn rule(&self) -> ide_client::BaseRuleInfo {
+        ide_client::BaseRuleInfo {
+            remote: self.remote.trim().to_owned(),
+            pattern: self.pattern.clone(),
+            matches: (!self.matches.is_empty()).then(|| self.matches.clone()),
+        }
+    }
+}
+
+/// Desk's "Git 저장소가 아니에요" question when a plain folder is registered.
+pub struct InitRepoForm {
+    pub path: String,
+    pub error: Option<String>,
+    pub busy: bool,
 }
 
 impl SettingsForm {
@@ -421,6 +487,8 @@ pub enum Modal {
     PickRoot(PickRootForm),
     /// The session's repos (attach / detach).
     SessionRepos(SessionReposForm),
+    /// Register a plain folder: `git init` it first?
+    InitRepo(InitRepoForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -579,7 +647,7 @@ pub enum Message {
     NewConfiguration(String),
     NewTitle(String),
     NewSubmit,
-    NewCreated(Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError>),
+    NewCreated(Result<(SessionInfo, Vec<RepoFailureInfo>, Vec<String>), ProtoError>),
     CloseModal,
 
     /// Sidebar: show the sessions of this configuration.
@@ -678,6 +746,31 @@ pub enum Message {
     RepoConfirm(bool),
     RepoUnregister(String),
     RepoUnregistered(String, Result<(), ProtoError>),
+    /// "초기화하고 추가": register the plain folder with `git init`.
+    RepoInitConfirm,
+    /// origin's branches of a repo (base pickers).
+    OriginBranches(String, Result<Vec<String>, ProtoError>),
+    /// New-session dialog: 기준 브랜치 최신화.
+    NewRefreshBase(bool),
+    /// New-session dialog: base branch of a repo.
+    NewBase(String, String),
+    /// Session repos dialog: base branch of a repo.
+    SessionRepoBase(String, String),
+    /// Repos page base editor.
+    BaseRefs(String, Result<(Option<String>, Vec<String>), ProtoError>),
+    BaseMode(bool),
+    /// Fixed base picked (`None` = automatic).
+    BaseFixed(Option<String>),
+    BaseCancel,
+    BaseFixedSave,
+    BaseRuleRemote(String),
+    BaseRulePattern(String),
+    BaseRuleMatch(String),
+    BaseRuleCheck,
+    BaseRulePreviewed(String, Result<ide_client::BaseRulePreview, ProtoError>),
+    BaseRuleSave,
+    BaseRuleClear,
+    BaseSaved(Result<RepoInfo, ProtoError>),
     /// Open the session's repos dialog.
     SessionRepos(String),
     SessionRepoAdd(String, bool),
@@ -825,6 +918,8 @@ pub struct App {
     pub configs: Vec<ConfigurationInfo>,
     /// Registered repositories (Hermes Desk's `ws.repos`).
     pub repos: Vec<RepoInfo>,
+    /// origin's branches per repo id, as of the last fetch (base pickers).
+    pub origin_branches: std::collections::HashMap<String, Vec<String>>,
     pub sessions: Vec<Live>,
     pub selected: Option<String>,
     pub ui: UiState,
@@ -886,6 +981,7 @@ impl App {
             accounts: Vec::new(),
             configs: Vec::new(),
             repos: Vec::new(),
+            origin_branches: Default::default(),
             sessions: Vec::new(),
             selected: None,
             ui,
@@ -1653,11 +1749,17 @@ impl App {
                     use_worktrees: true,
                     repos,
                     original_repo,
+                    refresh_base: true,
+                    bases: Default::default(),
                     error: None,
                     busy: false,
                 }));
                 self.open_items = false;
-                Task::batch([operation::focus(NEW_TITLE_ID), self.load_repos()])
+                Task::batch([
+                    operation::focus(NEW_TITLE_ID),
+                    self.load_repos(),
+                    self.load_origin_branches(),
+                ])
             }
             Message::NewUseWorktrees(v) => self.with_new(|f| f.use_worktrees = v),
             Message::NewRepoChecked(id, on) => {
@@ -1673,6 +1775,188 @@ impl App {
                 })
             }
             Message::NewOriginalRepo(id) => self.with_new(|f| f.original_repo = Some(id)),
+            Message::NewRefreshBase(v) => self.with_new(|f| f.refresh_base = v),
+            Message::NewBase(repo, b) => self.with_new(|f| {
+                f.bases.insert(repo, b);
+            }),
+            Message::OriginBranches(repo, r) => {
+                match r {
+                    Ok(list) => {
+                        self.origin_branches.insert(repo, list);
+                    }
+                    Err(e) => crate::script::log(&format!("origin branches {repo}: {e}")),
+                }
+                Task::none()
+            }
+            Message::SessionRepoBase(repo, b) => {
+                if let Some(Modal::SessionRepos(f)) = &mut self.modal {
+                    f.bases.insert(repo, b);
+                }
+                Task::none()
+            }
+            Message::RepoInitConfirm => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(Modal::InitRepo(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                if f.busy {
+                    return Task::none();
+                }
+                f.busy = true;
+                f.error = None;
+                let path = f.path.clone();
+                crate::script::log(&format!("repo init+register {path:?}"));
+                Task::perform(
+                    async move { c.register_repo_init(&path, true).await },
+                    Message::RepoRegistered,
+                )
+            }
+            Message::BaseRefs(repo, r) => {
+                if let Some(b) = self.settings.base.as_mut().filter(|b| b.repo == repo) {
+                    match r {
+                        Ok((_, refs)) => b.refs = Some(refs),
+                        Err(e) => {
+                            b.refs = Some(Vec::new());
+                            self.settings.repos_error = Some(i18n::proto_error(&e));
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::BaseMode(rule) => {
+                let Some(b) = self.settings.base.as_mut() else {
+                    return Task::none();
+                };
+                b.rule_mode = rule;
+                b.saved = false;
+                if rule && b.preview.is_none() && !b.preview_loading {
+                    return self.update(Message::BaseRuleCheck);
+                }
+                Task::none()
+            }
+            Message::BaseFixed(v) => {
+                if let Some(b) = self.settings.base.as_mut() {
+                    b.fixed = v;
+                    b.saved = false;
+                }
+                Task::none()
+            }
+            Message::BaseCancel => {
+                self.settings.repos_error = None;
+                self.open_base_edit(true)
+            }
+            Message::BaseRuleRemote(v) => self.with_base(|b| b.remote = v),
+            Message::BaseRulePattern(v) => self.with_base(|b| b.pattern = v),
+            Message::BaseRuleMatch(v) => self.with_base(|b| b.matches = v),
+            Message::BaseRuleCheck => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(b) = self.settings.base.as_mut() else {
+                    return Task::none();
+                };
+                b.preview_loading = true;
+                b.preview_error = None;
+                let (repo, rule) = (b.repo.clone(), b.rule());
+                Task::perform(
+                    {
+                        let repo = repo.clone();
+                        async move { c.preview_repo_base_rule(&repo, rule).await }
+                    },
+                    move |r| Message::BaseRulePreviewed(repo.clone(), r),
+                )
+            }
+            Message::BaseRulePreviewed(repo, r) => {
+                if let Some(b) = self.settings.base.as_mut().filter(|b| b.repo == repo) {
+                    b.preview_loading = false;
+                    match r {
+                        Ok(p) => {
+                            crate::script::log(&format!(
+                                "base rule preview {repo}: pick={:?} matched={:?} excluded={:?}",
+                                p.pick, p.matched, p.excluded
+                            ));
+                            b.preview = Some(p);
+                        }
+                        Err(e) => {
+                            b.preview = None;
+                            b.preview_error = Some(i18n::proto_error(&e));
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::BaseFixedSave | Message::BaseRuleSave | Message::BaseRuleClear => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(b) = self.settings.base.as_mut() else {
+                    return Task::none();
+                };
+                if b.busy {
+                    return Task::none();
+                }
+                b.busy = true;
+                b.saved = false;
+                self.settings.repos_error = None;
+                let repo = b.repo.clone();
+                crate::script::log(&format!(
+                    "base save {repo}: fixed={:?} rule={:?} clear={}",
+                    b.fixed,
+                    matches!(message, Message::BaseRuleSave).then(|| b.rule()),
+                    matches!(message, Message::BaseRuleClear)
+                ));
+                match message {
+                    Message::BaseFixedSave => {
+                        let fixed = b.fixed.clone();
+                        Task::perform(
+                            async move { c.set_repo_base_branch(&repo, fixed.as_deref()).await },
+                            Message::BaseSaved,
+                        )
+                    }
+                    Message::BaseRuleSave => {
+                        let rule = b.rule();
+                        Task::perform(
+                            async move { c.set_repo_base_rule(&repo, Some(rule)).await },
+                            Message::BaseSaved,
+                        )
+                    }
+                    _ => Task::perform(
+                        async move { c.set_repo_base_rule(&repo, None).await },
+                        Message::BaseSaved,
+                    ),
+                }
+            }
+            Message::BaseSaved(r) => {
+                if let Some(b) = self.settings.base.as_mut() {
+                    b.busy = false;
+                }
+                match r {
+                    Ok(info) => {
+                        crate::script::log(&format!(
+                            "base saved {}: base={} fixed={:?} rule={:?}",
+                            info.name, info.base, info.base_branch, info.base_rule
+                        ));
+                        if let Some(x) = self.repos.iter_mut().find(|x| x.id == info.id) {
+                            *x = info.clone();
+                        }
+                        if let Some(b) = self.settings.base.as_mut().filter(|b| b.repo == info.id) {
+                            // Desk: the mode follows whether a rule is saved.
+                            let (refs, preview) = (b.refs.take(), b.preview.take());
+                            *b = BaseEdit::new(&info);
+                            b.refs = refs;
+                            b.preview = preview;
+                            b.saved = true;
+                        }
+                    }
+                    Err(e) => {
+                        crate::script::log(&format!("base save refused: {e}"));
+                        self.settings.repos_error = Some(i18n::proto_error(&e));
+                    }
+                }
+                Task::none()
+            }
             Message::NewProvider(p) => {
                 let account = self.default_account(&p);
                 self.with_new(|f| {
@@ -1790,6 +2074,11 @@ impl App {
                             f.repo_confirm = false;
                         }
                         self.repos = list;
+                        let mut tasks = vec![self.open_base_edit(false)];
+                        if matches!(self.modal, Some(Modal::NewSession(_) | Modal::SessionRepos(_))) {
+                            tasks.push(self.load_origin_branches());
+                        }
+                        return Task::batch(tasks);
                     }
                     Err(e) => {
                         if e.id != "disconnected" {
@@ -1819,8 +2108,31 @@ impl App {
             Message::RepoRegistered(r) => {
                 let f = &mut self.settings;
                 f.repos_busy = false;
+                let init_open = matches!(self.modal, Some(Modal::InitRepo(_)));
                 match r {
+                    Err(e) if init_open => {
+                        crate::script::log(&format!("repo init refused: {e}"));
+                        if let Some(Modal::InitRepo(m)) = &mut self.modal {
+                            m.busy = false;
+                            m.error = Some(i18n::proto_error(&e));
+                        }
+                        Task::none()
+                    }
+                    Err(e) if e.id == "not-a-git-folder" => {
+                        // Desk: a plain folder -> "Git 저장소가 아니에요 ... 초기화해서 추가할까요?"
+                        let path = e.get("path").map_or_else(|| f.repo_input.clone(), str::to_owned);
+                        crate::script::log(&format!("repo register: plain folder {path:?}, asking to init"));
+                        self.modal = Some(Modal::InitRepo(InitRepoForm {
+                            path,
+                            error: None,
+                            busy: false,
+                        }));
+                        Task::none()
+                    }
                     Ok(repo) => {
+                        if init_open {
+                            self.modal = None;
+                        }
                         crate::script::log(&format!(
                             "repo registered: {} {} (base {:?})",
                             repo.name, repo.path, repo.base
@@ -1840,11 +2152,13 @@ impl App {
                     }
                 }
             }
-            Message::RepoSelect(id) => self.with_settings(|f| {
+            Message::RepoSelect(id) => {
+                let f = &mut self.settings;
                 f.repo_selected = Some(id);
                 f.repo_confirm = false;
                 f.repos_error = None;
-            }),
+                self.open_base_edit(false)
+            }
             Message::RepoConfirm(v) => self.with_settings(|f| f.repo_confirm = v),
             Message::RepoUnregister(id) => {
                 let Some(c) = self.online() else {
@@ -1885,10 +2199,11 @@ impl App {
                 self.modal = Some(Modal::SessionRepos(SessionReposForm {
                     session: sid,
                     add: Vec::new(),
+                    bases: Default::default(),
                     error: None,
                     busy: false,
                 }));
-                self.load_repos()
+                Task::batch([self.load_repos(), self.load_origin_branches()])
             }
             Message::SessionRepoAdd(id, on) => {
                 if let Some(Modal::SessionRepos(f)) = &mut self.modal {
@@ -1903,6 +2218,20 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
+                // The attached repos' current (session) bases, to save only changed ones.
+                let current: Vec<(String, String)> = match &self.modal {
+                    Some(Modal::SessionRepos(f)) => self
+                        .live(&f.session)
+                        .map(|l| {
+                            l.info
+                                .repos
+                                .iter()
+                                .map(|r| (r.repo.clone(), r.base.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
                 let Some(Modal::SessionRepos(f)) = &mut self.modal else {
                     return Task::none();
                 };
@@ -1910,6 +2239,15 @@ impl App {
                     return Task::none();
                 }
                 let sid = f.session.clone();
+                let changes: Vec<(String, String)> = current
+                    .iter()
+                    .filter_map(|(r, cur)| {
+                        f.bases
+                            .get(r)
+                            .filter(|b| *b != cur)
+                            .map(|b| (r.clone(), b.clone()))
+                    })
+                    .collect();
                 match message {
                     Message::SessionRepoDetach(repo) => {
                         f.busy = true;
@@ -1919,23 +2257,35 @@ impl App {
                             Message::SessionReposDone(false, r)
                         })
                     }
-                    _ if f.add.is_empty() => {
+                    _ if f.add.is_empty() && changes.is_empty() => {
                         self.modal = None;
                         self.after_select()
                     }
                     _ => {
                         f.busy = true;
                         f.error = None;
-                        let add = std::mem::take(&mut f.add);
-                        crate::script::log(&format!("attach {add:?} to {sid}"));
-                        // One worktree after the other, like Desk's `wsAddRepoToSessions` loop.
+                        let add: Vec<(String, Option<String>)> = std::mem::take(&mut f.add)
+                            .into_iter()
+                            .map(|r| {
+                                let b = f.bases.get(&r).cloned();
+                                (r, b)
+                            })
+                            .collect();
+                        crate::script::log(&format!(
+                            "session repos save {sid}: bases {changes:?}, attach {add:?}"
+                        ));
+                        // Desk: `wsSetSessionBase` for changed bases, then one worktree after
+                        // the other (`wsAddRepoToSessions` with the picked base).
                         Task::perform(
                             async move {
                                 let mut last = None;
-                                for r in add {
-                                    last = Some(c.attach_repo(&sid, &r).await?);
+                                for (r, b) in changes {
+                                    last = Some(c.set_session_base(&sid, &r, Some(&b)).await?);
                                 }
-                                Ok(last.expect("repos to add"))
+                                for (r, b) in add {
+                                    last = Some(c.attach_repo_base(&sid, &r, b.as_deref()).await?);
+                                }
+                                Ok(last.expect("something to save"))
                             },
                             |r| Message::SessionReposDone(true, r),
                         )
@@ -2133,7 +2483,7 @@ impl App {
                     ));
                     // Shown like a new session, on the work page.
                     self.settings.busy = false;
-                    self.on_created(Ok((info, Vec::new())))
+                    self.on_created(Ok((info, Vec::new(), Vec::new())))
                 }
                 Err(e) => {
                     crate::script::log(&format!("login error: {e}"));
@@ -2726,6 +3076,70 @@ impl App {
         )
     }
 
+    fn with_base(&mut self, f: impl FnOnce(&mut BaseEdit)) -> Task<Message> {
+        if let Some(b) = self.settings.base.as_mut() {
+            f(b);
+            b.saved = false;
+        }
+        Task::none()
+    }
+
+    /// The repos page's base editor for the selected repo, as saved (`force`: also when it
+    /// already shows that repo). Loads the refs (fixed picker) and, for a rule, its preview.
+    pub(crate) fn open_base_edit(&mut self, force: bool) -> Task<Message> {
+        let Some(r) = self
+            .settings
+            .repo_selected
+            .as_deref()
+            .and_then(|id| self.repos.iter().find(|r| r.id == id))
+            .cloned()
+        else {
+            self.settings.base = None;
+            return Task::none();
+        };
+        if !force && self.settings.base.as_ref().is_some_and(|b| b.repo == r.id) {
+            return Task::none();
+        }
+        self.settings.base = Some(BaseEdit::new(&r));
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let id = r.id.clone();
+        let refs = Task::perform(
+            {
+                let (c, id) = (c.clone(), id.clone());
+                async move { c.repo_branches(&id).await }
+            },
+            {
+                let id = id.clone();
+                move |res| Message::BaseRefs(id.clone(), res)
+            },
+        );
+        if r.base_rule.is_some() {
+            Task::batch([refs, self.update(Message::BaseRuleCheck)])
+        } else {
+            refs
+        }
+    }
+
+    /// origin's branches of every registered repo (base pickers of the new-session and session
+    /// repos dialogs).
+    pub(crate) fn load_origin_branches(&self) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        Task::batch(self.repos.iter().map(|r| {
+            let (c, id) = (c.clone(), r.id.clone());
+            Task::perform(
+                {
+                    let id = id.clone();
+                    async move { c.repo_origin_branches(&id).await }
+                },
+                move |res| Message::OriginBranches(id.clone(), res),
+            )
+        }))
+    }
+
     fn with_new(&mut self, f: impl FnOnce(&mut NewForm)) -> Task<Message> {
         if let Some(Modal::NewSession(form)) = &mut self.modal {
             f(form);
@@ -2767,10 +3181,27 @@ impl App {
         };
         f.busy = true;
         f.error = None;
+        // Desk: only bases that differ from the repo default (the default keeps following the
+        // repo's rule).
+        let bases = f
+            .bases
+            .iter()
+            .filter(|(id, b)| {
+                repos.contains(id)
+                    && self
+                        .repos
+                        .iter()
+                        .find(|r| &r.id == *id)
+                        .is_none_or(|r| r.default_base.as_deref() != Some(b.as_str()))
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let req = NewSession {
             provider: f.provider.clone(),
             account: f.account.clone(),
             configuration: f.configuration.clone(),
+            refresh_base: f.refresh_base && original_repo.is_none(),
+            bases,
             repos,
             original_repo: original_repo.clone(),
             title: f.title.clone(),
@@ -2783,16 +3214,16 @@ impl App {
         }
         // git runs on the server.
         Task::perform(
-            async move { c.create_session(req).await },
+            async move { c.create_session_full(req).await },
             Message::NewCreated,
         )
     }
 
     fn on_created(
         &mut self,
-        result: Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError>,
+        result: Result<(SessionInfo, Vec<RepoFailureInfo>, Vec<String>), ProtoError>,
     ) -> Task<Message> {
-        let (info, failures) = match result {
+        let (info, failures, base_changes) = match result {
             Ok(v) => v,
             Err(e) => {
                 crate::script::log(&format!("new session error: {e}"));
@@ -2824,6 +3255,16 @@ impl App {
                 .join("\n");
             crate::script::log(&format!("worktree failures: {detail}"));
             self.banner = Some(tr::err_some_worktrees_failed(&detail));
+        }
+        // Desk: "기준 브랜치가 규칙에 따라 바뀌었습니다" (one line per repo).
+        if !base_changes.is_empty() {
+            let detail = base_changes.join("\n");
+            crate::script::log(&format!("base changes: {detail}"));
+            let note = tr::base_changed_by_rule(&detail);
+            self.banner = Some(match self.banner.take() {
+                Some(b) if !failures.is_empty() => format!("{b}\n{note}"),
+                _ => note,
+            });
         }
         let id = info.id.clone();
         let configuration = (info.kind == SessionKind::Agent).then(|| info.configuration.clone());
