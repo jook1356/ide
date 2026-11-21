@@ -29,5 +29,7 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# History: commit dates in local time (`UtcOffset::current_local_offset`).
+time = { version = "0.3", features = ["local-offset"] }
 # In-app screenshots written by the IDE_APP_SCRIPT test mode.
 png = "0.18"

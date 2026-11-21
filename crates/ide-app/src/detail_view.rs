@@ -1,9 +1,10 @@
 //! Drawing of the detail area: header (document identity or web navigation, "open items",
-//! collapse), the shown item, and the side panel (Changes / Explore; Explore's search on top).
+//! collapse), the shown item, and the side panel (Changes / History / Explore; Explore's search
+//! on top).
 
 use iced::widget::{
-    Column, button, column, container, pick_list, popover, row, scrollable, space, stack, text,
-    text_input,
+    Column, button, column, container, hover, pick_list, popover, row, scrollable, space, stack,
+    text, text_input,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _};
 use ide_views::icons;
@@ -13,7 +14,9 @@ use crate::app::{App, Choice, Live, Message, URL_ID};
 use crate::detail::{
     DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SIDE_W, SideTab, file_name, parent,
 };
+use crate::history::{self, CommitFiles};
 use crate::i18n::{self, tr};
+use crate::icons::Icon;
 use crate::style;
 use crate::view::{icon_button, tip};
 
@@ -64,9 +67,41 @@ fn vline<'a>() -> El<'a> {
         .boxed()
 }
 
+/// The commit of a commit item: remembered when it was opened, else from History.
+fn commit_info<'a>(key: &ItemKey, live: &'a Live) -> Option<&'a ide_client::CommitInfo> {
+    let ItemKey::Commit { sha, .. } = key else {
+        return None;
+    };
+    match live.detail.item(key) {
+        Some(Item::Diff(x)) if x.commit.is_some() => x.commit.as_ref(),
+        _ => live.detail.history.commit(sha),
+    }
+}
+
 /// Title and folder of an item (header, open items list).
 fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
     match key {
+        // Desk's `tabLabel` / `docSubtitle`: `file @short` under `short subject`, or
+        // `short subject` under `author · date`.
+        ItemKey::Commit { sha, path, .. } => {
+            let info = commit_info(key, live);
+            let short = info.map_or_else(
+                || sha.chars().take(7).collect::<String>(),
+                |c| c.short.clone(),
+            );
+            let headline = match info {
+                Some(c) => format!("{short} {}", c.subject),
+                None => short.clone(),
+            };
+            match path {
+                Some(p) => (format!("{} @{short}", file_name(p)), headline),
+                None => (
+                    headline,
+                    info.map(|c| format!("{} · {}", c.author, history::full_date(c.date)))
+                        .unwrap_or_default(),
+                ),
+            }
+        }
         ItemKey::Web => {
             let t = if live.web_title.trim().is_empty() {
                 tr::tab_web()
@@ -106,6 +141,7 @@ fn item_kind(key: &ItemKey) -> String {
         ItemKey::Diff { staged: true, .. } => tr::kind_staged(),
         ItemKey::Diff { staged: false, .. } => tr::kind_changed(),
         ItemKey::Compare(_) => tr::kind_compare(),
+        ItemKey::Commit { .. } => tr::kind_commit(),
     }
 }
 
@@ -120,6 +156,15 @@ fn item_icon<'a>(key: &ItemKey) -> El<'a> {
         .spacing(1)
         .align_y(Alignment::Center)
         .boxed(),
+        // Desk's `TabIcon`: the file with a commit badge, or the commit icon.
+        ItemKey::Commit { path: Some(p), .. } => row![
+            icons::file_icon(file_name(p)),
+            crate::icons::icon(Icon::GitCommit, 11.0, style::DIM),
+        ]
+        .spacing(1)
+        .align_y(Alignment::Center)
+        .boxed(),
+        ItemKey::Commit { path: None, .. } => crate::icons::icon(Icon::GitCommit, 14.0, style::DIM),
     }
 }
 
@@ -374,11 +419,12 @@ impl App {
             let sid = live.info.id.clone();
             let mut list = Column::new().spacing(2);
             type Group = (String, fn(&ItemKey) -> bool);
-            let groups: [Group; 3] = [
+            let groups: [Group; 4] = [
                 (tr::group_browser(), |k| matches!(k, ItemKey::Web)),
                 (tr::side_changes(), |k| {
                     matches!(k, ItemKey::Diff { .. } | ItemKey::Compare(_))
                 }),
+                (tr::side_history(), |k| matches!(k, ItemKey::Commit { .. })),
                 (tr::side_explore(), |k| matches!(k, ItemKey::File(_))),
             ];
             for (label, is) in groups {
@@ -462,26 +508,29 @@ impl App {
     fn side_panel<'a>(&'a self, live: &'a Live) -> El<'a> {
         let d = &live.detail;
         let sid = live.info.id.clone();
-        let tab = |t: SideTab, label: String, count: Option<usize>| -> El<'a> {
+        // `badge`: the count badge's text and its tooltip.
+        let tab = |t: SideTab, label: String, badge: Option<(String, Option<String>)>| -> El<'a> {
             let active = d.side == t;
             let mut r = row![text(label).size(12)]
                 .spacing(5)
                 .align_y(Alignment::Center);
-            if let Some(n) = count.filter(|n| *n > 0) {
-                r = r.push(
-                    container(text(n.to_string()).size(10).font(style::BOLD))
-                        .padding([0, 5])
-                        .style(|_| container::Style {
-                            background: Some(style::BORDER.into()),
-                            text_color: Some(style::TEXT),
-                            border: iced::Border {
-                                radius: 8.0.into(),
-                                ..Default::default()
-                            },
+            if let Some((n, tooltip)) = badge {
+                let b = container(text(n).size(10).font(style::BOLD))
+                    .padding([0, 5])
+                    .style(|_| container::Style {
+                        background: Some(style::BORDER.into()),
+                        text_color: Some(style::TEXT),
+                        border: iced::Border {
+                            radius: 8.0.into(),
                             ..Default::default()
-                        })
-                        .boxed(),
-                );
+                        },
+                        ..Default::default()
+                    })
+                    .boxed();
+                r = r.push(match tooltip {
+                    Some(t) => tip(b, t),
+                    None => b,
+                });
             }
             column![
                 button(container(r).center_x(Fill))
@@ -501,19 +550,30 @@ impl App {
             .width(Fill)
             .boxed()
         };
-        // Hermes Desk order: Changes | History | Explore (History: its tab goes between these
-        // two, with a content arm below).
+        // Hermes Desk order: Changes | History | Explore. History's badge: commits not pushed
+        // to a remote yet.
+        let changed = d.changes.total();
         let tabs = container(row![
             tab(
                 SideTab::Changes,
                 tr::side_changes(),
-                Some(d.changes.total())
+                (changed > 0).then(|| (changed.to_string(), None))
+            ),
+            tab(
+                SideTab::History,
+                tr::side_history(),
+                d.history.badge().map(|b| (
+                    b,
+                    Some(tr::history_unpushed_count(i18n::count(
+                        d.history.unpushed.len()
+                    )))
+                ))
             ),
             tab(SideTab::Explore, tr::side_explore(), None),
         ])
         .style(style::bg(style::HEADER));
         let content: El<'a> = match d.side {
-            SideTab::Changes | SideTab::Explore if live.info.repos.is_empty() => column![
+            _ if live.info.repos.is_empty() => column![
                 self.repo_selector(live),
                 message_body(tr::no_repos_in_session(), false),
             ]
@@ -543,6 +603,7 @@ impl App {
                 ]
                 .boxed()
             }
+            SideTab::History => column![self.repo_selector(live), self.history_list(live)].boxed(),
             SideTab::Explore => column![
                 self.repo_selector(live),
                 self.explore_search_input(live),
@@ -890,6 +951,309 @@ impl App {
             .height(Fill)
             .boxed()
     }
+
+    /// Hermes Desk's History list: commits newest first, each unfolding into its files, and
+    /// "더 보기" at the end (also loaded when scrolled to the end).
+    fn history_list<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let d = &live.detail;
+        let h = &d.history;
+        let sid = live.info.id.clone();
+        if !h.loaded {
+            return container(text(tr::tree_loading()).size(12).color(style::DIM))
+                .padding(10)
+                .width(Fill)
+                .height(Fill)
+                .style(style::bg(style::PANEL))
+                .boxed();
+        }
+        let now = history::now_secs();
+        let m = |x: DetailMsg| Message::Detail(sid.clone(), x);
+        let commit_key = |sha: &str, path: Option<&str>| ItemKey::Commit {
+            repo: d.repo.clone(),
+            sha: sha.to_owned(),
+            path: path.map(str::to_owned),
+        };
+        let mut list = Column::new();
+        if h.commits.is_empty() {
+            list = list.push(
+                container(text(tr::history_empty()).size(12).color(style::DIM))
+                    .padding(10)
+                    .boxed(),
+            );
+        }
+        for c in &h.commits {
+            let expanded = h.expanded.contains(&c.sha);
+            list = list.push(commit_row(
+                c,
+                h.unpushed.contains(&c.sha),
+                expanded,
+                d.active == commit_key(&c.sha, None),
+                now,
+                m(DetailMsg::OpenCommit(c.sha.clone(), None)),
+                m(DetailMsg::ToggleCommit(c.sha.clone())),
+            ));
+            if !expanded {
+                continue;
+            }
+            match h.files.get(&c.sha) {
+                Some(CommitFiles::Loaded(files)) => {
+                    for f in files {
+                        list = list.push(commit_file_row(
+                            f,
+                            d.active == commit_key(&c.sha, Some(&f.path)),
+                            m(DetailMsg::OpenCommit(c.sha.clone(), Some(f.path.clone()))),
+                        ));
+                    }
+                }
+                status => {
+                    let (t, color) = match status {
+                        Some(CommitFiles::Failed(e)) => (e.clone(), style::RED),
+                        _ => (tr::tree_loading(), style::DIM),
+                    };
+                    list = list.push(
+                        container(text(t).size(12).color(color))
+                            .padding([4, 10])
+                            .width(Fill)
+                            .style(style::bg(COMMIT_FILES_BG))
+                            .boxed(),
+                    );
+                }
+            }
+            // The band of files ends with a gap (Desk: `margin-bottom: 6px`).
+            list = list.push(space().height(6).boxed());
+        }
+        if h.has_more {
+            let more: El<'a> = if h.loading_more {
+                text(tr::tree_loading()).size(12).color(style::DIM).boxed()
+            } else {
+                button(text(tr::history_more()).size(12).color(style::DIM))
+                    .padding([2, 8])
+                    .style(style::icon)
+                    .on_press(m(DetailMsg::HistoryMore))
+                    .boxed()
+            };
+            list = list.push(container(more).center_x(Fill).padding([8, 0]).boxed());
+        }
+        let s = sid.clone();
+        // A gap under the picker, like Desk's `marginTop: 8`.
+        container(
+            scrollable(list)
+                .height(Fill)
+                .on_scroll(move |v| {
+                    Message::Detail(
+                        s.clone(),
+                        DetailMsg::HistoryScrolled(v.viewport.distance_to_end().y),
+                    )
+                }),
+        )
+        .padding(Padding {
+            top: 8.0,
+            ..Padding::ZERO
+        })
+        .width(Fill)
+        .height(Fill)
+        .style(style::bg(style::PANEL))
+        .boxed()
+    }
+}
+
+/// Desk's `.commit-files-list` band under an unfolded commit (`rgb(0 0 0 / 12%)`).
+const COMMIT_FILES_BG: Color = ide_views::theme::over(Color::BLACK, 0.12, style::PANEL);
+/// Desk's `.unpushed-mark`: violet-2 on `rgb(132 94 247 / 25%)`.
+const UNPUSHED_FG: Color = Color::from_rgb(0xd0 as f32 / 255.0, 0xbf as f32 / 255.0, 1.0);
+const UNPUSHED_BG: Color = ide_views::theme::over(
+    Color::from_rgb(132.0 / 255.0, 94.0 / 255.0, 247.0 / 255.0),
+    0.25,
+    style::PANEL,
+);
+
+/// A 16 px circle (avatar, unpushed mark).
+fn circle(c: Color) -> impl Fn(&iced::Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(c.into()),
+        border: iced::Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Desk's `CommitRow`: bold subject (+ ↑ when not pushed), avatar and `author · time ago`;
+/// the chevron (shown on hover, kept while unfolded) folds the files; the row opens the commit.
+fn commit_row<'a>(
+    c: &'a ide_client::CommitInfo,
+    unpushed: bool,
+    expanded: bool,
+    active: bool,
+    now: i64,
+    open: Message,
+    toggle: Message,
+) -> El<'a> {
+    let mut top = row![
+        text(c.subject.as_str())
+            .size(12)
+            .font(style::BOLD)
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End)
+            .width(Fill)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    if unpushed {
+        top = top.push(tip(
+            container(crate::icons::icon(Icon::ArrowUp, 10.0, UNPUSHED_FG))
+                .center(16)
+                .style(circle(UNPUSHED_BG))
+                .boxed(),
+            tr::history_unpushed_mark(),
+        ));
+    }
+    let avatar = container(
+        text(history::initials(&c.author))
+            .size(8)
+            .font(style::BOLD)
+            .color(Color::WHITE)
+            .line_height(1.0),
+    )
+    .center(16)
+    .style(circle(history::avatar_color(&c.author, &c.email)))
+    .boxed();
+    let who = if c.email.is_empty() {
+        c.author.clone()
+    } else {
+        format!("{} <{}>", c.author, c.email)
+    };
+    let meta = row![
+        tip(avatar, who),
+        tip(
+            text(format!(
+                "{} · {}",
+                c.author,
+                history::relative_time(c.date, now)
+            ))
+            .size(12)
+            .color(style::DIM)
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End)
+            .boxed(),
+            format!("{} · {}", c.short, history::full_date(c.date)),
+        ),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let chevron = tip(
+        button(crate::icons::icon(
+            if expanded {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            },
+            14.0,
+            style::DIM,
+        ))
+        .padding(4)
+        .style(style::icon)
+        .on_press(toggle)
+        .boxed(),
+        if expanded {
+            tr::history_hide_files()
+        } else {
+            tr::history_show_files()
+        },
+    );
+    const TOGGLE_W: f32 = 22.0;
+    let body = column![top, meta].spacing(2).width(Fill);
+    let main = |toggle: El<'a>| {
+        button(row![body, toggle].spacing(8).align_y(Alignment::Center))
+            .padding([6, 12])
+            .width(Fill)
+            .style(style::row(active))
+            .on_press(open)
+            .boxed()
+    };
+    let row_el = if expanded {
+        main(chevron)
+    } else {
+        hover(
+            main(space().width(TOGGLE_W).boxed()),
+            container(chevron)
+                .padding(Padding {
+                    right: 12.0,
+                    ..Padding::ZERO
+                })
+                .width(Fill)
+                .height(Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Center),
+        )
+        .boxed()
+    };
+    column![row_el, hline()].boxed()
+}
+
+/// Desk's `CommitFileRow`: file icon, path (cut from the start), change kind; opens the file's
+/// diff in the commit.
+fn commit_file_row<'a>(f: &'a ide_client::GitChange, active: bool, open: Message) -> El<'a> {
+    let st = crate::detail::view_status(f.kind);
+    let kind = tip(
+        container(
+            text(st.letter().to_string())
+                .size(10)
+                .font(ide_views::theme::MONO_BOLD)
+                .line_height(1.0),
+        )
+        .center(16)
+        .style(ide_views::theme::status_box(st.color()))
+        .boxed(),
+        st.label(),
+    );
+    let title = match &f.orig_path {
+        Some(o) => format!("{o} → {}", f.path),
+        None => f.path.clone(),
+    };
+    let line = row![
+        icons::file_icon(file_name(&f.path)),
+        tip(
+            text(f.path.as_str())
+                .size(12)
+                .color(if st == ide_views::GitStatus::Deleted {
+                    style::DIM
+                } else {
+                    style::TEXT
+                })
+                .wrapping(text::Wrapping::None)
+                .ellipsis(text::Ellipsis::Start)
+                .width(Fill)
+                .boxed(),
+            title,
+        ),
+        kind,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    let b = button(line)
+        .padding(Padding {
+            top: 6.0,
+            right: 12.0,
+            bottom: 6.0,
+            left: 22.0,
+        })
+        .width(Fill)
+        .style(move |_, status| {
+            let bg = match (active, status) {
+                (true, _) => style::SELECTED,
+                (false, button::Status::Hovered | button::Status::Pressed) => style::HOVER,
+                _ => COMMIT_FILES_BG,
+            };
+            button::Style {
+                background: Some(bg.into()),
+                text_color: style::TEXT,
+                ..Default::default()
+            }
+        })
+        .on_press(open);
+    column![b, hline()].boxed()
 }
 
 /// A search hit's line with the matches highlighted (leading whitespace trimmed).

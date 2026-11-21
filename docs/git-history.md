@@ -1,4 +1,4 @@
-# Git history (History tab backend)
+# Git history (History tab)
 
 Port of the backend behind Hermes Desk's Changes panel **History** tab (`powered_ide`:
 `src/main/changes.ts` `commitLog` / `commitFiles` / `commitDiff`, `src/main/github.ts`
@@ -47,6 +47,16 @@ Client (`ide-client`): `git_log`, `git_unpushed`, `git_commit_files`, `git_commi
 - **Kinds:** `T` -> `TypeChanged`, `C` -> `Copied` (Desk folds them into modified / renamed).
 - **`path` of `git.commit_diff`** is only syntax-checked (`normalize_rel`), not resolved in the
   worktree: the file may no longer exist there.
+
+## UI (ide-app)
+
+The History tab itself (rows, refresh triggers, commit items, deviations) is described in
+`docs/side-panel.md`, "History". In short: `detail.rs` loads `git.log` (refresh: every shown
+commit, at least `GIT_LOG_PAGE`) and `git.unpushed` when the repo is first shown, after a
+`GitChanged` notification and when the tab is opened; "more" pages use `skip`; unfolding a commit
+calls `git.commit_files`; a commit row opens `ItemKey::Commit { path: None }` and a file row
+`ItemKey::Commit { path: Some(..) }`, both loaded with `git.commit_diff` into the existing diff
+view. `date` (seconds) is shown as Desk's relative time and a local `YYYY-MM-DD HH:MM` tooltip.
 
 ## Errors
 

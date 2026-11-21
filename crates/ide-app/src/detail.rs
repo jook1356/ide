@@ -1,7 +1,7 @@
 //! The per-session detail area (Hermes Desk `DetailTabs` + `ChangesPanel`): open items (the
 //! session's web page, files, diffs) shown one at a time under a header with an "open items"
-//! switcher, and a side panel with Changes / Explore (Explore has the file-name and text search
-//! on top of its tree).
+//! switcher, and a side panel with Changes / History / Explore (Explore has the file-name and
+//! text search on top of its tree; History is in [`crate::history`]).
 //!
 //! All state lives in [`Detail`], one per session ([`crate::app::Live::detail`]); switching
 //! sessions switches the detail area. Everything on disk is reached through the server
@@ -9,12 +9,14 @@
 //! refreshed from `FsChanged` / `GitChanged`.
 
 use std::collections::{BTreeSet, HashSet};
+
+use crate::history::{CommitFiles, HistoryState};
 use std::time::{Duration, Instant};
 
 use iced::Task;
 use ide_client::{
-    ChangeKind, Client, DefResult, DiffAgainst, EntryKind, FileContent, FileMatch, FsEntry,
-    ProtoError, SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
+    ChangeKind, Client, CommitInfo, DefResult, DiffAgainst, EntryKind, FileContent, FileMatch,
+    FsEntry, GitChange, GitLog, ProtoError, SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
 };
 use ide_views::{
     ChangeEntry, ChangeGroup, ChangesEvent, ChangesList, ChangesMessage, CodeEvent, CodeMessage,
@@ -26,7 +28,7 @@ use crate::app::{App, Message, Modal};
 use crate::i18n::{self, tr};
 use crate::ui_state::DetailUi;
 
-/// Width of the side panel (Changes / Explore).
+/// Width of the side panel (Changes / History / Explore).
 pub const SIDE_W: f32 = 290.0;
 /// How long a transient message stays.
 pub const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -42,12 +44,13 @@ const SEARCH_DELAY: Duration = Duration::from_millis(250);
 /// Largest file the editor opens (bytes; bigger files show the first part read-only).
 const READ_MAX: u64 = 4 * 1024 * 1024;
 
-/// Side panel tab, in tab-bar order (Hermes Desk: Changes | History | Explore; History is not
-/// built yet). A new tab: add the variant here in Desk order, its `code` / `parse` arm (the
-/// `ui.json` value), and its `tab(..)` + content arm in `detail_view.rs::side_panel`.
+/// Side panel tab, in tab-bar order (Hermes Desk: Changes | History | Explore). A new tab: add
+/// the variant here in Desk order, its `code` / `parse` arm (the `ui.json` value), and its
+/// `tab(..)` + content arm in `detail_view.rs::side_panel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideTab {
     Changes,
+    History,
     Explore,
 }
 
@@ -55,6 +58,7 @@ impl SideTab {
     pub fn code(self) -> &'static str {
         match self {
             SideTab::Changes => "changes",
+            SideTab::History => "history",
             SideTab::Explore => "explore",
         }
     }
@@ -63,6 +67,7 @@ impl SideTab {
     fn parse(s: &str) -> Self {
         match s {
             "changes" => SideTab::Changes,
+            "history" => SideTab::History,
             _ => SideTab::Explore,
         }
     }
@@ -80,6 +85,13 @@ pub enum ItemKey {
     Diff { staged: bool, path: String },
     /// A file on disk compared with the unsaved buffer (save conflict; [`qualify`]d path).
     Compare(String),
+    /// A commit of `repo` (History) compared with its first parent: the whole commit, or one
+    /// root-relative `path` of it.
+    Commit {
+        repo: String,
+        sha: String,
+        path: Option<String>,
+    },
 }
 
 impl ItemKey {
@@ -94,12 +106,26 @@ impl ItemKey {
                 path,
             } => format!("diff:w:{path}"),
             ItemKey::Compare(_) => return None,
+            ItemKey::Commit { repo, sha, path } => {
+                format!("commit:{repo}:{sha}:{}", path.as_deref().unwrap_or_default())
+            }
         })
     }
 
     pub fn decode(s: &str) -> Option<Self> {
         if s == "web" {
             return Some(ItemKey::Web);
+        }
+        if let Some(rest) = s.strip_prefix("commit:") {
+            // `commit:<repo>:<sha>:<path>` (empty path = the whole commit).
+            let (repo, rest) = rest.split_once(':')?;
+            let (sha, path) = rest.split_once(':')?;
+            let hex = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_hexdigit());
+            return (hex(repo) && hex(sha)).then(|| ItemKey::Commit {
+                repo: repo.into(),
+                sha: sha.into(),
+                path: (!path.is_empty()).then(|| path.into()),
+            });
         }
         if let Some(p) = s.strip_prefix("file:") {
             return (!p.is_empty()).then(|| ItemKey::File(p.into()));
@@ -133,6 +159,7 @@ impl ItemKey {
                 path: q(path)?,
             },
             ItemKey::Compare(p) => ItemKey::Compare(q(p)?),
+            k @ ItemKey::Commit { .. } => k,
         })
     }
 
@@ -143,6 +170,7 @@ impl ItemKey {
             ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
                 Some(split_q(p).0)
             }
+            ItemKey::Commit { repo, .. } => Some(repo),
         }
     }
 }
@@ -207,6 +235,22 @@ pub struct DiffItem {
     pub view: Option<DiffView>,
     pub loading: bool,
     pub error: Option<String>,
+    /// The commit of an [`ItemKey::Commit`] (title / subtitle), when known.
+    pub commit: Option<CommitInfo>,
+    /// Script mode only: the added lines of the loaded diff (checked by the app script).
+    pub script_adds: Vec<String>,
+}
+
+impl DiffItem {
+    fn empty() -> Self {
+        Self {
+            view: None,
+            loading: false,
+            error: None,
+            commit: None,
+            script_adds: Vec::new(),
+        }
+    }
 }
 
 // A handful of items per session: boxing the file variant would only add indirection.
@@ -314,6 +358,8 @@ pub struct Detail {
     pub status_loaded: bool,
     pub status_error: Option<String>,
     pub search: SearchState,
+    /// History of the picked repo.
+    pub history: HistoryState,
     pub diff_mode: DiffMode,
     /// Repos with `fs.watch` requested on the current client.
     pub watched: BTreeSet<String>,
@@ -338,11 +384,7 @@ impl Detail {
                 let item = match &k {
                     ItemKey::Web | ItemKey::Compare(_) => continue,
                     ItemKey::File(p) => Item::File(FileItem::new(p)),
-                    ItemKey::Diff { .. } => Item::Diff(DiffItem {
-                        view: None,
-                        loading: false,
-                        error: None,
-                    }),
+                    ItemKey::Diff { .. } | ItemKey::Commit { .. } => Item::Diff(DiffItem::empty()),
                 };
                 items.push((k, item));
             }
@@ -366,6 +408,7 @@ impl Detail {
             status_loaded: false,
             status_error: None,
             search: SearchState::default(),
+            history: HistoryState::default(),
             diff_mode: DiffMode::Unified,
             watched: BTreeSet::new(),
             stale: false,
@@ -423,6 +466,7 @@ impl Detail {
         self.changes = ChangesList::new();
         self.status_loaded = false;
         self.status_error = None;
+        self.history = HistoryState::default();
     }
 
     /// Show a message for a few seconds.
@@ -506,6 +550,20 @@ pub enum DetailMsg {
     /// A definition lookup in repo `.0` answered.
     Def(String, Result<DefResult, ProtoError>),
     Watched(String, Result<(), ProtoError>),
+    /// History's first page(s) of repo `.0` for refresh `.1` (+ the unpushed marks).
+    HistoryLoaded(String, u64, Result<GitLog, ProtoError>),
+    Unpushed(String, u64, Result<Vec<String>, ProtoError>),
+    /// History's "more" (button or scrolled to the end).
+    HistoryMore,
+    /// History was scrolled: pixels left to its end.
+    HistoryScrolled(f32),
+    HistoryMoreLoaded(String, u64, Result<GitLog, ProtoError>),
+    /// Fold / unfold a commit's files.
+    ToggleCommit(String),
+    /// Files of commit `.1` in repo `.0`.
+    CommitFilesLoaded(String, String, Result<Vec<GitChange>, ProtoError>),
+    /// Open a commit's diff (whole commit, or one of its files).
+    OpenCommit(String, Option<String>),
 }
 
 // ---------------------------------------------------------------------------------- helpers
@@ -550,7 +608,7 @@ fn under(path: &str, prefix: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
-fn view_status(k: ChangeKind) -> ide_views::GitStatus {
+pub(crate) fn view_status(k: ChangeKind) -> ide_views::GitStatus {
     use ide_views::GitStatus as V;
     match k {
         ChangeKind::Modified | ChangeKind::TypeChanged => V::Modified,
@@ -786,12 +844,69 @@ impl App {
             d.status_loaded = true;
             tasks.push(self.load_status(&sid));
         }
+        let d = self.detail_mut(&sid).expect("session");
+        // History (also for the tab's unpushed badge while another tab is shown, like Desk).
+        if !d.repo.is_empty() && (!d.history.requested || stale) {
+            tasks.push(self.load_history(&sid));
+        }
         if stale {
             tasks.push(self.check_files(&sid, None));
             tasks.push(self.reload_diffs(&sid, None));
         }
         tasks.push(self.ensure_active_loaded(&sid));
         Task::batch(tasks)
+    }
+
+    /// (Re)load History of the picked repo: every commit shown so far (at least a page) and
+    /// the unpushed marks (Desk's `loadRepositoryHistory`).
+    fn load_history(&mut self, sid: &str) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(d) = self.detail_mut(sid).filter(|d| !d.repo.is_empty()) else {
+            return Task::none();
+        };
+        let h = &mut d.history;
+        h.requested = true;
+        h.seq += 1;
+        // A refresh replaces the pages: a "more" in flight is outdated.
+        h.loading_more = false;
+        let (seq, limit, repo) = (h.seq, h.refresh_limit(), d.repo.clone());
+        let log = {
+            let (c, s, r) = (c.clone(), sid.to_owned(), repo.clone());
+            let (sid, repo) = (sid.to_owned(), repo.clone());
+            Task::perform(async move { c.git_log(&s, &r, 0, limit).await }, move |res| {
+                msg(&sid, DetailMsg::HistoryLoaded(repo.clone(), seq, res))
+            })
+        };
+        let marks = {
+            let (s, r) = (sid.to_owned(), repo.clone());
+            let sid = sid.to_owned();
+            Task::perform(async move { c.git_unpushed(&s, &r).await }, move |res| {
+                msg(&sid, DetailMsg::Unpushed(repo.clone(), seq, res))
+            })
+        };
+        Task::batch([log, marks])
+    }
+
+    /// The next page of History.
+    fn load_more_history(&mut self, sid: &str) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(d) = self.detail_mut(sid).filter(|d| !d.repo.is_empty()) else {
+            return Task::none();
+        };
+        let h = &mut d.history;
+        if !h.loaded || !h.has_more || h.loading_more {
+            return Task::none();
+        }
+        h.loading_more = true;
+        let (seq, skip, repo) = (h.seq, h.commits.len() as u32, d.repo.clone());
+        let (s, r, sid) = (sid.to_owned(), repo.clone(), sid.to_owned());
+        Task::perform(async move { c.git_log(&s, &r, skip, 0).await }, move |res| {
+            msg(&sid, DetailMsg::HistoryMoreLoaded(repo.clone(), seq, res))
+        })
     }
 
     /// List folders of the picked repo's tree.
@@ -887,6 +1002,31 @@ impl App {
         let Some(c) = self.online() else {
             return Task::none();
         };
+        if let ItemKey::Commit { repo, sha, path } = key.clone() {
+            if let Some(Item::Diff(x)) = self.detail_mut(sid).and_then(|d| d.item_mut(&key)) {
+                x.loading = true;
+            }
+            let s = sid.to_owned();
+            let sid = sid.to_owned();
+            return Task::perform(
+                async move {
+                    let files = c.git_commit_diff(&s, &repo, &sha, path.clone()).await?;
+                    // One file: its whole new side lets the view expand unchanged regions.
+                    let new_text = match &path {
+                        Some(p) => c
+                            .git_file_at(&s, &repo, p, ide_client::GitRev::Rev(sha.clone()), None)
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(|f| !f.binary)
+                            .map(|f| f.text),
+                        None => None,
+                    };
+                    Ok((files, new_text))
+                },
+                move |r| msg(&sid, DetailMsg::DiffLoaded(key.clone(), r)),
+            );
+        }
         let ItemKey::Diff { staged, path } = key.clone() else {
             return Task::none();
         };
@@ -958,11 +1098,9 @@ impl App {
             let item = match &key {
                 ItemKey::Web => Item::Web,
                 ItemKey::File(p) => Item::File(FileItem::new(p)),
-                ItemKey::Diff { .. } | ItemKey::Compare(_) => Item::Diff(DiffItem {
-                    view: None,
-                    loading: false,
-                    error: None,
-                }),
+                ItemKey::Diff { .. } | ItemKey::Compare(_) | ItemKey::Commit { .. } => {
+                    Item::Diff(DiffItem::empty())
+                }
             };
             d.items.push((key.clone(), item));
         }
@@ -1128,7 +1266,8 @@ impl App {
         Task::batch([
             self.list_dirs(sid, dirs),
             if shown {
-                self.load_status(sid)
+                // Commits, checkouts, pushes: History follows the git state like Changes.
+                Task::batch([self.load_status(sid), self.load_history(sid)])
             } else {
                 Task::none()
             },
@@ -1182,9 +1321,15 @@ impl App {
             }
             DetailMsg::Side(tab) => {
                 let d = self.detail_mut(sid).expect("session");
+                let opened = d.side != tab && tab == SideTab::History;
                 d.side = tab;
                 self.persist_detail(sid);
-                Task::none()
+                // Opening History shows the current commits.
+                if opened && self.detail(sid).is_some_and(|d| d.history.requested) {
+                    self.load_history(sid)
+                } else {
+                    Task::none()
+                }
             }
             DetailMsg::Tree(tm) => {
                 let d = self.detail_mut(sid).expect("session");
@@ -1342,6 +1487,15 @@ impl App {
                     x.loading = false;
                     match r {
                         Ok((files, new_text)) => {
+                            if crate::script::enabled() {
+                                x.script_adds = files
+                                    .iter()
+                                    .flat_map(|f| &f.hunks)
+                                    .flat_map(|h| &h.lines)
+                                    .filter(|l| l.kind == ide_client::LineKind::Add)
+                                    .map(|l| l.text.clone())
+                                    .collect();
+                            }
                             let files: Vec<_> = files
                                 .iter()
                                 .map(|f| view_diff(f, new_text.as_deref()))
@@ -1499,6 +1653,119 @@ impl App {
                     }
                 }
                 Task::none()
+            }
+            DetailMsg::HistoryLoaded(repo, seq, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo || d.history.seq != seq {
+                    return Task::none();
+                }
+                let h = &mut d.history;
+                h.loaded = true;
+                match r {
+                    Ok(log) => {
+                        crate::script::log(&format!(
+                            "history {repo}: {} commit(s), more {}",
+                            log.commits.len(),
+                            log.has_more
+                        ));
+                        h.commits = log.commits;
+                        h.has_more = log.has_more;
+                    }
+                    Err(e) => {
+                        let text = tr::history_load_failed(&i18n::proto_error(&e));
+                        d.toast(text);
+                    }
+                }
+                Task::none()
+            }
+            DetailMsg::Unpushed(repo, seq, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo || d.history.seq != seq {
+                    return Task::none();
+                }
+                // Desk: a failed query marks nothing.
+                let shas = r.unwrap_or_default();
+                crate::script::log(&format!("history {repo}: {} unpushed", shas.len()));
+                d.history.unpushed = shas.into_iter().collect();
+                Task::none()
+            }
+            DetailMsg::HistoryMore => self.load_more_history(sid),
+            DetailMsg::HistoryScrolled(left) => {
+                // Desk's `onBottomReached`.
+                if left < 24.0 {
+                    self.load_more_history(sid)
+                } else {
+                    Task::none()
+                }
+            }
+            DetailMsg::HistoryMoreLoaded(repo, seq, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo || d.history.seq != seq {
+                    return Task::none();
+                }
+                d.history.loading_more = false;
+                match r {
+                    Ok(log) => d.history.append(log.commits, log.has_more),
+                    Err(e) => {
+                        let text = tr::history_load_failed(&i18n::proto_error(&e));
+                        d.toast(text);
+                    }
+                }
+                Task::none()
+            }
+            DetailMsg::ToggleCommit(sha) => {
+                let d = self.detail_mut(sid).expect("session");
+                if !d.history.toggle(&sha) {
+                    return Task::none();
+                }
+                let Some(c) = self.online() else {
+                    let d = self.detail_mut(sid).expect("session");
+                    d.history
+                        .files
+                        .insert(sha, CommitFiles::Failed(tr::err_disconnected()));
+                    return Task::none();
+                };
+                let repo = self.detail(sid).expect("session").repo.clone();
+                let (s, r, h) = (sid.to_owned(), repo.clone(), sha.clone());
+                let sid = sid.to_owned();
+                Task::perform(async move { c.git_commit_files(&s, &r, &h).await }, move |res| {
+                    msg(
+                        &sid,
+                        DetailMsg::CommitFilesLoaded(repo.clone(), sha.clone(), res),
+                    )
+                })
+            }
+            DetailMsg::CommitFilesLoaded(repo, sha, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo {
+                    return Task::none();
+                }
+                let files = match r {
+                    Ok(f) => {
+                        crate::script::log(&format!("commit {sha}: {} file(s)", f.len()));
+                        CommitFiles::Loaded(f)
+                    }
+                    Err(e) => CommitFiles::Failed(i18n::proto_error(&e)),
+                };
+                d.history.files.insert(sha, files);
+                Task::none()
+            }
+            DetailMsg::OpenCommit(sha, path) => {
+                let d = self.detail(sid).expect("session");
+                let info = d.history.commit(&sha).cloned();
+                let key = ItemKey::Commit {
+                    repo: d.repo.clone(),
+                    sha,
+                    path,
+                };
+                self.open_items = false;
+                let t = self.activate(sid, key.clone());
+                if let Some(Item::Diff(x)) = self.detail_mut(sid).and_then(|d| d.item_mut(&key))
+                    && info.is_some()
+                {
+                    x.commit = info;
+                }
+                t
             }
         }
     }
@@ -1829,8 +2096,7 @@ impl App {
                     v.set_mode(d.diff_mode);
                     let item = Item::Diff(DiffItem {
                         view: Some(v),
-                        loading: false,
-                        error: None,
+                        ..DiffItem::empty()
                     });
                     match d.items.iter_mut().find(|(k, _)| *k == key) {
                         Some((_, i)) => *i = item,
@@ -2093,12 +2359,38 @@ mod tests {
                 staged: false,
                 path: "c".into(),
             },
+            ItemKey::Commit {
+                repo: "0123abcd".into(),
+                sha: "89abcdef0123".into(),
+                path: None,
+            },
+            ItemKey::Commit {
+                repo: "0123abcd".into(),
+                sha: "89abcdef0123".into(),
+                path: Some("src/a:b 한글.ts".into()),
+            },
         ] {
             assert_eq!(ItemKey::decode(&k.encode().unwrap()), Some(k));
         }
+        assert_eq!(
+            ItemKey::Commit {
+                repo: "0123abcd".into(),
+                sha: "89ab".into(),
+                path: Some("x/y.rs".into()),
+            }
+            .encode()
+            .as_deref(),
+            Some("commit:0123abcd:89ab:x/y.rs")
+        );
         assert_eq!(ItemKey::Compare("x".into()).encode(), None);
         assert_eq!(ItemKey::decode("file:"), None);
         assert_eq!(ItemKey::decode("diff:x:y"), None);
+        assert_eq!(ItemKey::decode("commit:0123abcd:zz:a"), None);
+        assert_eq!(ItemKey::decode("commit:0123abcd"), None);
+        // A restored commit item keeps its repo.
+        let k = ItemKey::decode("commit:0123abcd:89ab:").unwrap();
+        assert_eq!(k.repo(), Some("0123abcd"));
+        assert_eq!(k.clone().qualified(Some("ffffffff")), Some(k));
     }
 
     #[test]
@@ -2168,6 +2460,7 @@ mod tests {
             ("search", SideTab::Explore),
             ("explore", SideTab::Explore),
             ("changes", SideTab::Changes),
+            ("history", SideTab::History),
             ("", SideTab::Explore),
         ] {
             let ui = DetailUi {
@@ -2178,6 +2471,7 @@ mod tests {
         }
         assert_eq!(SideTab::parse(SideTab::Changes.code()), SideTab::Changes);
         assert_eq!(SideTab::parse(SideTab::Explore.code()), SideTab::Explore);
+        assert_eq!(SideTab::parse(SideTab::History.code()), SideTab::History);
     }
 
     #[test]

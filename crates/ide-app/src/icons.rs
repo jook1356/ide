@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use iced::widget::svg;
 use iced::{Color, Element, Widget as _};
 
-/// Icons used by the navigation rail.
+/// Icons used by the navigation rail and the side panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Messages,
@@ -21,9 +21,13 @@ pub enum Icon {
     FolderOpen,
     ArrowsSort,
     Search,
+    GitCommit,
+    ArrowUp,
+    ChevronRight,
+    ChevronDown,
 }
 
-const SOURCES: [&str; 11] = [
+const SOURCES: [&str; 15] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -35,16 +39,25 @@ const SOURCES: [&str; 11] = [
     include_str!("../assets/icons/folder-open.svg"),
     include_str!("../assets/icons/arrows-sort.svg"),
     include_str!("../assets/icons/search.svg"),
+    include_str!("../assets/icons/git-commit.svg"),
+    include_str!("../assets/icons/arrow-up.svg"),
+    include_str!("../assets/icons/chevron-right.svg"),
+    include_str!("../assets/icons/chevron-down.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
 const STROKE: &str = "1.5";
 
+/// History's unpushed mark: Desk draws its arrow with `stroke={2.5}`.
+const STROKE_BOLD: &str = "2.5";
+
 static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
     SOURCES
         .iter()
-        .map(|s| {
-            let s = s.replace("stroke-width=\"2\"", &format!("stroke-width=\"{STROKE}\""));
+        .enumerate()
+        .map(|(i, s)| {
+            let w = if i == Icon::ArrowUp as usize { STROKE_BOLD } else { STROKE };
+            let s = s.replace("stroke-width=\"2\"", &format!("stroke-width=\"{w}\""));
             svg::Handle::from_memory(s.into_bytes())
         })
         .collect()
@@ -73,6 +86,6 @@ mod tests {
             assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::Search as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::ChevronDown as usize + 1);
     }
 }

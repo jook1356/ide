@@ -46,6 +46,11 @@ const P2: usize = 99;
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 static T0: OnceLock<Instant> = OnceLock::new();
 
+/// Script mode is on (`IDE_APP_SCRIPT=1`).
+pub fn enabled() -> bool {
+    LOG.get().is_some()
+}
+
 /// Append a line to the script log (no-op outside script mode).
 pub fn log(s: &str) {
     let Some(f) = LOG.get() else { return };
@@ -307,6 +312,21 @@ enum Step {
     SessionBaseP2(&'static str),
     /// The app banner contains the needle.
     ExpectBanner(&'static str, u64),
+    /// Commit `(path, content)` with this subject in the phase 2 worktree (only that path).
+    CommitP2(&'static str, &'static str, &'static str),
+    /// History lists this subject first (newest first) with older commits below it.
+    WaitHistory(&'static str, u64),
+    /// History marks this many commits as not pushed (and the tab badge shows it).
+    WaitUnpushed(usize, u64),
+    /// Unfold the History commit with this subject.
+    ExpandCommit(&'static str),
+    /// The unfolded commit lists the file.
+    WaitCommitFiles(&'static str, &'static str, u64),
+    /// Open the commit with this subject (one of its files, or the whole commit).
+    OpenCommitP2(&'static str, Option<&'static str>),
+    /// The commit diff (of the file, or the whole commit) is shown with this added line and
+    /// remembered in `ui.json`.
+    WaitCommitDiff(Option<&'static str>, &'static str, u64),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -981,6 +1001,12 @@ fn steps_p2_only() -> Vec<Step> {
     s
 }
 
+/// History fixture: a commit made in the phase 2 worktree.
+const HIST_FILE: &str = "src/history.ts";
+const HIST_LINE: &str = "export const history = 'hist-line'\n";
+const HIST_ADDED: &str = "export const history = 'hist-line'";
+const HIST_SUBJECT: &str = "Add history fixture";
+
 /// Phase 2: browse roots, the server-side folder browser, the detail area (tree, editor,
 /// live refresh, save conflicts, changes + diffs, search, quick open, go to definition,
 /// rename / delete) and a Korean pass.
@@ -1186,9 +1212,38 @@ fn phase2() -> Vec<Step> {
         Wait(300),
         Shot("51_deleted"),
         ExpectSavedDetail("file:src/main.ts"),
+        Log("--- History: commits newest first, a commit's files, file and whole-commit diffs"),
+        D(DetailMsg::Side(SideTab::History)),
+        WaitHistory("init", 10_000),
+        // A commit in the worktree refreshes History (git change notification).
+        CommitP2(HIST_FILE, HIST_LINE, HIST_SUBJECT),
+        WaitHistory(HIST_SUBJECT, 15_000),
+        // No remote: nothing is marked as unpushed (Desk's history marks).
+        WaitUnpushed(0, 5000),
+        ExpandCommit(HIST_SUBJECT),
+        WaitCommitFiles(HIST_SUBJECT, HIST_FILE, 10_000),
+        Wait(300),
+        Shot("52_history_expanded"),
+        Pause("history"),
+        OpenCommitP2(HIST_SUBJECT, Some(HIST_FILE)),
+        WaitCommitDiff(Some(HIST_FILE), HIST_ADDED, 10_000),
+        Wait(300),
+        Shot("53_history_file_diff"),
+        Pause("history_file_diff"),
+        OpenCommitP2(HIST_SUBJECT, None),
+        WaitCommitDiff(None, HIST_ADDED, 10_000),
+        Wait(300),
+        Shot("54_history_commit_diff"),
         Log("--- phase 2 Korean pass"),
         SetLang(LanguagePref::Fixed(Lang::Ko)),
         ExpectLang(Lang::Ko, "새 세션"),
+        D(DetailMsg::Side(SideTab::History)),
+        WaitHistory(HIST_SUBJECT, 10_000),
+        OpenCommitP2(HIST_SUBJECT, Some(HIST_FILE)),
+        WaitCommitDiff(Some(HIST_FILE), HIST_ADDED, 10_000),
+        Wait(300),
+        Shot("ko_hist_01_history"),
+        Pause("ko_hist"),
         D(DetailMsg::Side(SideTab::Changes)),
         OpenChange(ChangeGroup::Unstaged, main),
         WaitDiff(10_000),
@@ -1400,6 +1455,18 @@ fn base_branches() -> Vec<Step> {
         Pause("ko_session_repos_base"),
         App(Message::SessionReposSave),
         WaitP2Base("main", 15_000),
+        Log("--- History: a local commit is marked as not pushed (local bare origin)"),
+        D(DetailMsg::Side(SideTab::History)),
+        WaitHistory("init", 10_000),
+        WaitUnpushed(0, 10_000),
+        CommitP2("history-local.txt", "local only\n", "로컬 커밋"),
+        WaitHistory("로컬 커밋", 15_000),
+        WaitUnpushed(1, 10_000),
+        ExpandCommit("로컬 커밋"),
+        WaitCommitFiles("로컬 커밋", "history-local.txt", 10_000),
+        Wait(300),
+        Shot("ko_hist_02_unpushed"),
+        Pause("ko_hist_unpushed"),
     ];
     v.extend(delete_p2());
     v.extend([
@@ -2265,6 +2332,134 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 got == Some(bar),
                 ms,
                 format!("{path} bar {got:?} (want {bar:?})")
+            )
+        }
+        Step::CommitP2(path, content, subject) => {
+            let wt = p2_worktree(sc, app);
+            let r = (|| -> Result<String, String> {
+                let file = wt.join(path);
+                if let Some(dir) = file.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&file, content).map_err(|e| e.to_string())?;
+                git(&wt, &["add", "--", path])?;
+                git(&wt, &["commit", "-q", "-m", subject, "--", path])?;
+                git(&wt, &["rev-parse", "--short", "HEAD"])
+            })();
+            sc.check(
+                r.is_ok(),
+                &format!("committed {path} as {subject:?} in {}: {r:?}", wt.display()),
+            );
+            true
+        }
+        Step::WaitHistory(subject, ms) => {
+            let h = p2_detail(sc, app).map(|d| &d.history);
+            let got: Vec<(String, i64)> = h
+                .map(|h| {
+                    h.commits
+                        .iter()
+                        .take(4)
+                        .map(|c| (c.subject.clone(), c.date))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let shown = p2_detail(sc, app).is_some_and(|d| d.side == SideTab::History);
+            // Newest first: the subject on top, dates not increasing below it.
+            let ok = shown
+                && got.first().is_some_and(|(s, _)| s == subject)
+                && (subject == "init" || got.len() >= 2)
+                && got.windows(2).all(|w| w[0].1 >= w[1].1);
+            wait!(ok, ms, format!("History lists (newest first) {got:?}"))
+        }
+        Step::WaitUnpushed(n, ms) => {
+            let h = p2_detail(sc, app).map(|d| &d.history);
+            let got = h.map(|h| (h.unpushed.len(), h.badge()));
+            let want_badge = (n > 0).then(|| n.to_string());
+            let ok = h.is_some_and(|h| h.loaded && h.unpushed.len() == n && h.badge() == want_badge)
+                && h.is_some_and(|h| {
+                    h.commits
+                        .iter()
+                        .take(n)
+                        .all(|c| h.unpushed.contains(&c.sha))
+                });
+            wait!(ok, ms, format!("History unpushed (count, badge) = {got:?}"))
+        }
+        Step::ExpandCommit(subject) => {
+            let sha = p2_detail(sc, app)
+                .and_then(|d| d.history.commits.iter().find(|c| c.subject == subject))
+                .map(|c| c.sha.clone());
+            match sha {
+                Some(sha) => {
+                    if !p2_detail(sc, app).is_some_and(|d| d.history.expanded.contains(&sha)) {
+                        task = app.update(Message::Detail(sid, DetailMsg::ToggleCommit(sha)));
+                    }
+                }
+                None => sc.check(false, &format!("History has no commit {subject:?}")),
+            }
+            true
+        }
+        Step::WaitCommitFiles(subject, path, ms) => {
+            let d = p2_detail(sc, app);
+            let files = d
+                .and_then(|d| {
+                    let c = d.history.commits.iter().find(|c| c.subject == subject)?;
+                    d.history.expanded.contains(&c.sha).then_some(())?;
+                    d.history.files.get(&c.sha)
+                })
+                .map(|f| match f {
+                    crate::history::CommitFiles::Loaded(v) => {
+                        Ok(v.iter().map(|x| x.path.clone()).collect::<Vec<_>>())
+                    }
+                    crate::history::CommitFiles::Loading => Err("loading".to_owned()),
+                    crate::history::CommitFiles::Failed(e) => Err(e.clone()),
+                });
+            let ok = matches!(&files, Some(Ok(v)) if v.iter().any(|p| p == path));
+            wait!(ok, ms, format!("commit {subject:?} files {files:?}"))
+        }
+        Step::OpenCommitP2(subject, path) => {
+            let sha = p2_detail(sc, app)
+                .and_then(|d| d.history.commits.iter().find(|c| c.subject == subject))
+                .map(|c| c.sha.clone());
+            match sha {
+                Some(sha) => {
+                    task = app.update(Message::Detail(
+                        sid,
+                        DetailMsg::OpenCommit(sha, path.map(str::to_owned)),
+                    ))
+                }
+                None => sc.check(false, &format!("History has no commit {subject:?}")),
+            }
+            true
+        }
+        Step::WaitCommitDiff(path, added, ms) => {
+            let d = p2_detail(sc, app);
+            let active = d.map(|d| d.active.clone());
+            let item = d.and_then(|d| match d.active_item() {
+                Some(Item::Diff(x)) => Some(x),
+                _ => None,
+            });
+            let is_commit = matches!(
+                &active,
+                Some(ItemKey::Commit { path: p, .. }) if p.as_deref() == path
+            );
+            let adds = item.map(|x| x.script_adds.clone()).unwrap_or_default();
+            let ok = is_commit
+                && item.is_some_and(|x| x.view.is_some() && x.commit.is_some())
+                && adds.iter().any(|l| l == added);
+            if ok {
+                let key = active.as_ref().and_then(ItemKey::encode).unwrap_or_default();
+                let saved = crate::ui_state::UiState::load(&app.data_dir);
+                let open = saved.detail.get(&sid).map(|d| d.open.clone());
+                sc.check(
+                    open.as_ref().is_some_and(|o| o.contains(&key)),
+                    &format!("ui.json remembers {key}: {open:?}"),
+                );
+            }
+            let rows = item.and_then(|x| x.view.as_ref().map(|v| v.row_count()));
+            wait!(
+                ok,
+                ms,
+                format!("commit diff {active:?} rows {rows:?} added {adds:?}")
             )
         }
         Step::WaitActive(key, ms) => {
@@ -3443,7 +3638,14 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             | Step::ExpectNewRefresh(_)
             | Step::WaitP2Base(..)
             | Step::SessionBaseP2(_)
-            | Step::ExpectBanner(..)) => {
+            | Step::ExpectBanner(..)
+            | Step::CommitP2(..)
+            | Step::WaitHistory(..)
+            | Step::WaitUnpushed(..)
+            | Step::ExpandCommit(_)
+            | Step::WaitCommitFiles(..)
+            | Step::OpenCommitP2(..)
+            | Step::WaitCommitDiff(..)) => {
                 let (n, t) = step_p2(sc, app, st, el);
                 next = n;
                 tasks.push(t);

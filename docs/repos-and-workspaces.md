@@ -64,7 +64,7 @@ what it does, and where ide does the same. Deviations are listed at the end.
   Desk's session settings only add repos ("repos can be added, not removed").
 - Guidance is not a fixed `HERMES.md`; each provider puts the same text where its CLI reads project
   context.
-- Text search (Search tab) searches every attached repo and groups results under a repo header;
+- Text search (in the Explore tab) searches every attached repo and groups results under a repo header;
   Desk has no repo-wide text search panel to mirror, so this follows the task spec. Quick open
   (Ctrl+P) also covers every repo.
 - Agent guidance per provider: Claude `CLAUDE.md`, Codex `AGENTS.md` in the session folder (the

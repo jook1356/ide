@@ -27,8 +27,9 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   (`worktrees/<repo-slug>/<session-id>`), so sessions never share a checkout.
 - **Agent kind**: `Claude` (`claude`), `Codex` (`codex`), `Shell` (cmd / pwsh / $SHELL).
   The agent's own TUI is the chat UI (no structured stream parsing in the MVP).
-- **Detail area**: per-session open items (the web page, files, diffs) shown one at a time under a
-  header with an "open items" switcher, plus a side panel (Changes / Explore / Search). Items
+- **Detail area**: per-session open items (the web page, files, diffs, commits) shown one at a
+  time under a header with an "open items" switcher, plus a side panel (Changes / History /
+  Explore, with the file and text search in Explore; see `docs/side-panel.md`). Items
   belong to a session, so switching sessions switches the detail area (see
   `docs/server-architecture.md`, "App integration (phase 2)").
 

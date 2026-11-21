@@ -248,6 +248,42 @@ kind-file = File
 kind-changed = Changed
 kind-staged = Staged
 kind-compare = Disk vs. unsaved edits
+side-history = History
+kind-commit = Commit
+history-empty = No commits.
+history-more = Show more
+history-unpushed-count = { $count ->
+    [one] 1 commit not pushed to a remote
+   *[other] { $count } commits not pushed to a remote
+}
+history-unpushed-mark = Not pushed to a remote yet
+history-show-files = Show changed files
+history-hide-files = Collapse file list
+history-load-failed = Couldn't load the commit list: { $error }
+time-just-now = just now
+time-minutes = { $count ->
+    [one] 1 minute ago
+   *[other] { $count } minutes ago
+}
+time-hours = { $count ->
+    [one] 1 hour ago
+   *[other] { $count } hours ago
+}
+time-yesterday = yesterday
+time-days = { $count ->
+    [one] 1 day ago
+   *[other] { $count } days ago
+}
+time-last-month = last month
+time-months = { $count ->
+    [one] 1 month ago
+   *[other] { $count } months ago
+}
+time-last-year = last year
+time-years = { $count ->
+    [one] 1 year ago
+   *[other] { $count } years ago
+}
 file-binary = Binary file ({ $size }): not shown.
 file-truncated = Large file ({ $size }): only the first part is shown, read-only.
 file-conflict = The file changed on disk since it was opened. Your edits were not saved.

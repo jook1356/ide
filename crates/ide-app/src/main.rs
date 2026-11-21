@@ -16,6 +16,7 @@
 mod app;
 mod detail;
 mod detail_view;
+mod history;
 mod i18n;
 mod icons;
 mod script;

@@ -208,8 +208,9 @@ Known gaps (phase 1):
   split; the divider shares the rest). The detail pane has one header row: the shown item's
   identity (file-type icon, name, dirty dot, "kind · folder") or, for the web page, its
   navigation (back / forward / reload / URL); then an "Open items" switcher (popover grouped
-  Browser / Changes / Explore with close buttons) and the collapse button. No tab strip.
-  The side panel has the tabs Changes (count badge) / Explore / Search.
+  Browser / Changes / History / Explore with close buttons) and the collapse button. No tab
+  strip. The side panel has the tabs Changes (count badge) / History (unpushed badge) / Explore
+  (file and text search on top of the tree); see `docs/side-panel.md`.
 - **Per session** ([`Detail`] in `Live`): open items (`Web` is always there; files in
   `CodeView`, diffs in `DiffView`, disk-vs-buffer comparisons), the tree, the changes list, the
   search. Open items, the shown item and the side tab are stored in `ui.json`
