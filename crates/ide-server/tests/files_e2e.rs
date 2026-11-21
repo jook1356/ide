@@ -1,5 +1,6 @@
-//! Phase 2 end to end through `ide_client::Client`: files, watch, browse, search, git and
-//! go-to-definition over the memory transport and a real `ide-server` child (`--no-daemon`).
+//! Phase 2 end to end through `ide_client::Client`: files, watch, folder picker, search, git
+//! and go-to-definition over the memory transport and a real `ide-server` child
+//! (`--no-daemon`), all scoped to `(session, repo)` worktrees.
 //! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
 
 mod common;
@@ -66,6 +67,7 @@ fn repo(dir: &Path) -> PathBuf {
 fn text_query(session: &str, q: &str) -> TextSearch {
     TextSearch {
         session: session.into(),
+        repo: None,
         query: q.into(),
         regex: false,
         case_sensitive: false,
@@ -76,20 +78,26 @@ fn text_query(session: &str, q: &str) -> TextSearch {
     }
 }
 
-async fn new_session(c: &Client, repo: &Path) -> SessionInfo {
-    c.create_session(NewSession {
-        provider: "shell".into(),
-        account: None,
-        configuration: "default".into(),
-        repo_path: repo.display().to_string(),
-        title: "files".into(),
-        base_ref: String::new(),
-        start: false,
-        cols: 80,
-        rows: 24,
-    })
-    .await
-    .expect("create session")
+/// Register `repo` and create a shell session with a worktree of it; returns the session and
+/// the repo id.
+async fn new_session(c: &Client, repo: &Path) -> (SessionInfo, String) {
+    let r = c.register_repo(&repo.display().to_string()).await.unwrap();
+    let (s, failures) = c
+        .create_session(NewSession {
+            provider: "shell".into(),
+            account: None,
+            configuration: "default".into(),
+            repos: vec![r.id.clone()],
+            original_repo: None,
+            title: "files".into(),
+            start: false,
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .expect("create session");
+    assert!(failures.is_empty(), "{failures:?}");
+    (s, r.id)
 }
 
 async fn wait_fs_changed(col: &Shared, session: &str, path: &str) -> bool {
@@ -99,6 +107,7 @@ async fn wait_fs_changed(col: &Shared, session: &str, path: &str) -> bool {
                 session: s,
                 paths,
                 rescan,
+                ..
             } => s == session && (*rescan || paths.iter().any(|p| p == path)),
             _ => false,
         })
@@ -110,20 +119,12 @@ async fn wait_fs_changed(col: &Shared, session: &str, path: &str) -> bool {
 async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     let col = collect(c, Arc::default());
     let caps = c.welcome().unwrap().capabilities;
-    for cap in ["files", "browse", "search", "git", "def"] {
+    for cap in ["files", "repos", "search", "git", "def"] {
         assert!(caps.iter().any(|x| x == cap), "{cap}");
     }
 
-    // Browse roots + repo picker; a repo outside the roots is refused.
-    let roots = c.browse_roots().await.unwrap();
-    assert_eq!(roots.len(), 1);
-    let l = c.browse_list("").await.unwrap();
-    let e = l.entries.iter().find(|e| e.name == "저장소 repo").unwrap();
-    assert!(e.is_git_repo);
-    assert_eq!(c.browse_list(&e.path).await.unwrap().entries[0].name, "src");
+    // The folder picker (for registering repos) is not jailed: start list, then any folder.
     let outside = root.parent().unwrap().display().to_string();
-    assert_eq!(c.browse_list(&outside).await.unwrap_err().id, "path-denied");
-    // The root picker is not jailed (OS permissions only): start list, then any folder.
     assert!(caps.iter().any(|x| x == "browse-pick"));
     let start = c.browse_pick_list(None).await.unwrap();
     assert_eq!(start.path, "");
@@ -144,29 +145,34 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         c.browse_pick_list(Some("relative")).await.unwrap_err().id,
         "path-invalid"
     );
+    // Only git repositories can be registered; sessions only take registered repos.
+    assert_eq!(c.register_repo(&outside).await.unwrap_err().id, "not-a-git-repo");
     let bad = c
         .create_session(NewSession {
             provider: "shell".into(),
             account: None,
             configuration: "default".into(),
-            repo_path: outside.clone(),
+            repos: vec!["0badc0de".into()],
+            original_repo: None,
             title: String::new(),
-            base_ref: String::new(),
             start: false,
             cols: 0,
             rows: 0,
         })
         .await
         .unwrap_err();
-    assert_eq!(bad.id, "path-denied");
+    assert_eq!(bad.id, "repo-not-found");
 
-    let s = new_session(c, repo).await;
+    let (s, rid) = new_session(c, repo).await;
     let sid = s.id.as_str();
+    let rp = rid.as_str();
+    let wt_path = s.repos[0].path.clone();
+    assert!(Path::new(&wt_path).starts_with(&s.root));
 
     // List (dirs first, .git hidden, ignored only on request) with git badges.
-    std::fs::create_dir_all(Path::new(&s.worktree_path).join("target")).unwrap();
-    std::fs::write(Path::new(&s.worktree_path).join("new.txt"), "n\n").unwrap();
-    let list = c.fs_list(sid, "", false).await.unwrap();
+    std::fs::create_dir_all(Path::new(&wt_path).join("target")).unwrap();
+    std::fs::write(Path::new(&wt_path).join("new.txt"), "n\n").unwrap();
+    let list = c.fs_list(sid, rp, "", false).await.unwrap();
     let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
@@ -177,17 +183,18 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         list.iter().find(|e| e.name == "new.txt").unwrap().git,
         Some(ChangeKind::Untracked)
     );
-    let all = c.fs_list(sid, "", true).await.unwrap();
+    let all = c.fs_list(sid, rp, "", true).await.unwrap();
     assert!(all.iter().any(|e| e.name == "target" && e.ignored));
-    assert_eq!(c.fs_list(sid, "src", false).await.unwrap().len(), 2);
+    assert_eq!(c.fs_list(sid, rp, "src", false).await.unwrap().len(), 2);
 
     // Read / write with versions and conflicts; Korean names.
-    let f = c.fs_read(sid, "한글.txt", 0).await.unwrap();
+    let f = c.fs_read(sid, rp, "한글.txt", 0).await.unwrap();
     assert_eq!(f.text, "첫 줄\n둘째 줄\n");
     assert_eq!(f.encoding.label, "UTF-8");
     let v2 = c
         .fs_write(
             sid,
+            rp,
             "한글.txt",
             "첫 줄\n바뀜\n",
             Some(&f.version),
@@ -196,7 +203,7 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         .await
         .unwrap();
     let e = c
-        .fs_write(sid, "한글.txt", "stale", Some(&f.version), None)
+        .fs_write(sid, rp, "한글.txt", "stale", Some(&f.version), None)
         .await
         .unwrap_err();
     assert_eq!(
@@ -204,29 +211,29 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         ("fs-conflict", Some(v2.as_str()))
     );
     assert_eq!(
-        c.fs_stat(sid, "한글.txt").await.unwrap().size,
+        c.fs_stat(sid, rp, "한글.txt").await.unwrap().size,
         "첫 줄\n바뀜\n".len() as u64
     );
-    c.fs_create_dir(sid, "docs/새 폴더").await.unwrap();
-    c.fs_create_file(sid, "docs/새 폴더/a.md", "# a\n")
+    c.fs_create_dir(sid, rp, "docs/새 폴더").await.unwrap();
+    c.fs_create_file(sid, rp, "docs/새 폴더/a.md", "# a\n")
         .await
         .unwrap();
     assert_eq!(
-        c.fs_create_file(sid, "docs/새 폴더/a.md", "")
+        c.fs_create_file(sid, rp, "docs/새 폴더/a.md", "")
             .await
             .unwrap_err()
             .id,
         "fs-exists"
     );
-    c.fs_rename(sid, "docs/새 폴더/a.md", "docs/b.md")
+    c.fs_rename(sid, rp, "docs/새 폴더/a.md", "docs/b.md")
         .await
         .unwrap();
     assert_eq!(
-        c.fs_delete(sid, "docs", false).await.unwrap_err().id,
+        c.fs_delete(sid, rp, "docs", false).await.unwrap_err().id,
         "fs-dir-not-empty"
     );
-    c.fs_delete(sid, "docs", true).await.unwrap();
-    assert_eq!(c.fs_stat(sid, "docs").await.unwrap_err().id, "fs-not-found");
+    c.fs_delete(sid, rp, "docs", true).await.unwrap();
+    assert_eq!(c.fs_stat(sid, rp, "docs").await.unwrap_err().id, "fs-not-found");
     // Jail.
     for (p, id) in [
         ("../x", "path-denied"),
@@ -235,30 +242,46 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         ("/etc/passwd", "path-invalid"),
         ("\\\\server\\share\\x", "path-invalid"),
     ] {
-        assert_eq!(c.fs_read(sid, p, 0).await.unwrap_err().id, id, "{p}");
+        assert_eq!(c.fs_read(sid, rp, p, 0).await.unwrap_err().id, id, "{p}");
     }
     assert_eq!(
-        c.fs_write(sid, ".git", "x", None, None)
+        c.fs_write(sid, rp, ".git", "x", None, None)
             .await
             .unwrap_err()
             .id,
         "path-denied"
     );
     assert_eq!(
-        c.fs_read("nope", "x", 0).await.unwrap_err().id,
+        c.fs_read("nope", rp, "x", 0).await.unwrap_err().id,
         "session-not-found"
+    );
+    // Jail scope = this session's worktree of this repo: another registered repo that is not
+    // attached, an unknown id, and the session folder itself are unreachable.
+    let other = root.join("other");
+    init_repo(&other);
+    let o = c.register_repo(&other.display().to_string()).await.unwrap();
+    for repo_id in [o.id.as_str(), "0badc0de", "", "../x"] {
+        assert_eq!(
+            c.fs_list(sid, repo_id, "", false).await.unwrap_err().id,
+            "repo-not-attached",
+            "{repo_id:?}"
+        );
+    }
+    assert_eq!(
+        c.git_status(sid, &o.id, None).await.unwrap_err().id,
+        "repo-not-attached"
     );
 
     // Watch: an external change arrives as FsChanged; unwatch stops it.
-    c.fs_watch(sid).await.unwrap();
-    c.fs_watch(sid).await.unwrap(); // idempotent
+    c.fs_watch(sid, rp).await.unwrap();
+    c.fs_watch(sid, rp).await.unwrap(); // idempotent
     tokio::time::sleep(Duration::from_millis(300)).await;
-    std::fs::write(Path::new(&s.worktree_path).join("watched.txt"), "w").unwrap();
+    std::fs::write(Path::new(&wt_path).join("watched.txt"), "w").unwrap();
     assert!(wait_fs_changed(&col, sid, "watched.txt").await, "FsChanged");
-    c.fs_unwatch(sid).await.unwrap();
+    c.fs_unwatch(sid, rp).await.unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
     col.lock().unwrap().notifies.clear();
-    std::fs::write(Path::new(&s.worktree_path).join("after.txt"), "a").unwrap();
+    std::fs::write(Path::new(&wt_path).join("after.txt"), "a").unwrap();
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(
         !col.lock()
@@ -278,14 +301,14 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         .await;
     let sum = sum.expect("done");
     assert_eq!((sum.matches, sum.files), (4, 2));
-    assert!(hits.iter().all(|h| h.path.starts_with("src/")));
+    assert!(hits.iter().all(|h| h.path.starts_with("src/") && h.repo == rid));
     let mut bad = text_query(sid, "(");
     bad.regex = true;
     assert_eq!(c.search_text(bad).await.unwrap_err().id, "search-bad-regex");
     // Cancel: many files, cancel right away.
     for i in 0..300 {
         std::fs::write(
-            Path::new(&s.worktree_path).join(format!("bulk{i}.txt")),
+            Path::new(&wt_path).join(format!("bulk{i}.txt")),
             "needle\n".repeat(50),
         )
         .unwrap();
@@ -302,44 +325,44 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     }
     let done = done.expect("done after cancel");
     assert!(done.cancelled || done.matches == 15_000, "{done:?}");
-    let fm = c.search_files(sid, "utiljs", 10).await.unwrap();
-    assert_eq!(fm[0].path, "src/util.js");
+    let fm = c.search_files(sid, None, "utiljs", 10).await.unwrap();
+    assert_eq!((fm[0].repo.as_str(), fm[0].path.as_str()), (rp, "src/util.js"));
 
     // Git.
     std::fs::write(
-        Path::new(&s.worktree_path).join("src/util.js"),
+        Path::new(&wt_path).join("src/util.js"),
         "function helper() {}\n",
     )
     .unwrap();
-    let st = c.git_status(sid, None).await.unwrap();
-    assert_eq!(st.branch.as_deref(), Some(s.branch.as_str()));
+    let st = c.git_status(sid, rp, None).await.unwrap();
+    assert_eq!(st.branch.as_deref(), Some(s.repos[0].branch.as_str()));
     assert_eq!(st.unstaged[0].path, "src/util.js");
     assert!(st.untracked.iter().any(|p| p == "new.txt"));
     assert_eq!(st.base.as_ref().unwrap().reference, "main");
     let d = c
-        .git_diff(sid, Some("src/util.js"), DiffAgainst::WorkingTree, None)
+        .git_diff(sid, rp, Some("src/util.js"), DiffAgainst::WorkingTree, None)
         .await
         .unwrap();
     assert_eq!(d[0].hunks[0].lines.last().unwrap().kind, LineKind::Del);
     let d = c
-        .git_diff(sid, Some("new.txt"), DiffAgainst::Head, None)
+        .git_diff(sid, rp, Some("new.txt"), DiffAgainst::Head, None)
         .await
         .unwrap();
     assert_eq!(d[0].kind, ChangeKind::Untracked);
     let old = c
-        .git_file_at(sid, "src/util.js", GitRev::Head, None)
+        .git_file_at(sid, rp, "src/util.js", GitRev::Head, None)
         .await
         .unwrap()
         .unwrap();
     assert!(old.text.contains("module.exports"));
     assert!(
-        c.git_file_at(sid, "new.txt", GitRev::Head, None)
+        c.git_file_at(sid, rp, "new.txt", GitRev::Head, None)
             .await
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        c.git_file_at(sid, "../x", GitRev::Head, None)
+        c.git_file_at(sid, rp, "../x", GitRev::Head, None)
             .await
             .unwrap_err()
             .id,
@@ -347,7 +370,7 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     );
 
     // Go to definition (file on disk, then unsaved editor text).
-    let r = c.def_lookup(sid, "src/main.js", 2, 2, None).await.unwrap();
+    let r = c.def_lookup(sid, rp, "src/main.js", 2, 2, None).await.unwrap();
     match r {
         DefResult::One(t) => assert_eq!((t.path.as_str(), t.line, t.col), ("src/util.js", 1, 10)),
         other => panic!("{other:?}"),
@@ -355,6 +378,7 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     let r = c
         .def_lookup(
             sid,
+            rp,
             "src/x.js",
             2,
             1,
@@ -364,16 +388,18 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         .unwrap();
     assert!(matches!(r, DefResult::One(_)), "{r:?}");
     let r = c
-        .def_lookup(sid, "src/x.js", 2, 1, Some("x\n한글()".into()))
+        .def_lookup(sid, rp, "src/x.js", 2, 1, Some("x\n한글()".into()))
         .await
         .unwrap();
     assert!(matches!(r, DefResult::None { reason } if reason.id == "def-not-found"));
-    match c.def_lookup(sid, "README.md", 1, 1, None).await.unwrap() {
+    match c.def_lookup(sid, rp, "README.md", 1, 1, None).await.unwrap() {
         DefResult::None { reason } => assert_eq!(reason.id, "def-unsupported-file"),
         other => panic!("{other:?}"),
     }
 
     c.delete_session(sid, true).await.unwrap();
+    assert!(!Path::new(&s.root).exists());
+    c.unregister_repo(&o.id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -382,106 +408,24 @@ async fn files_over_memory() {
     let root = dir.join("roots");
     std::fs::create_dir_all(&root).unwrap();
     let repo = repo(&root);
-    let mut cfg = ServerConfig::for_paths(Paths::new(dir.join("data")));
-    cfg.browse_roots = Some(vec![root.clone()]);
-    let server = Server::new(cfg);
+    let server = Server::new(ServerConfig::for_paths(Paths::new(dir.join("data"))));
     let c = Client::connect(memory(&server), opts()).await.unwrap();
     files_scenario(&c, &repo, &root).await;
     // A second connection's watch is released when it disconnects.
     let sessions = c.sessions().await.unwrap();
     assert!(sessions.is_empty());
     let c2 = Client::connect(memory(&server), opts()).await.unwrap();
-    let s = new_session(&c2, &repo).await;
-    c2.fs_watch(&s.id).await.unwrap();
+    let (s, r) = new_session(&c2, &repo).await;
+    c2.fs_watch(&s.id, &r).await.unwrap();
     let ctx = server.authorize(server.user()).unwrap();
-    assert_eq!(ctx.watching(&s.id), 1);
-    c.fs_watch(&s.id).await.unwrap();
-    assert_eq!(ctx.watching(&s.id), 2);
+    assert_eq!(ctx.watching(&s.id, &r), 1);
+    c.fs_watch(&s.id, &r).await.unwrap();
+    assert_eq!(ctx.watching(&s.id, &r), 2);
     drop(c2);
-    assert!(wait_until(Duration::from_secs(5), || ctx.watching(&s.id) == 1).await);
-    c.fs_unwatch(&s.id).await.unwrap();
-    assert_eq!(ctx.watching(&s.id), 0);
+    assert!(wait_until(Duration::from_secs(5), || ctx.watching(&s.id, &r) == 1).await);
+    c.fs_unwatch(&s.id, &r).await.unwrap();
+    assert_eq!(ctx.watching(&s.id, &r), 0);
     c.delete_session(&s.id, true).await.unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// `browse.set_roots` validates, persists `server.json` (keeping other keys) and the new roots
-/// take effect for `browse.*` and `session.create` right away.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn browse_set_roots() {
-    let dir = tmp_dir("p2roots");
-    let data = dir.join("data");
-    let extra = dir.join("extra");
-    std::fs::create_dir_all(extra.join("sub")).unwrap();
-    std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join(ide_server::SERVER_CONFIG_FILE),
-        r#"{ "other": 7 }"#,
-    )
-    .unwrap();
-    std::fs::write(extra.join("file.txt"), "x").unwrap();
-    let server = Server::new(ServerConfig::for_paths(Paths::new(data.clone())));
-    let c = Client::connect(memory(&server), opts()).await.unwrap();
-
-    let cfg = c.browse_config().await.unwrap();
-    assert!(cfg.roots.is_empty(), "{cfg:?}");
-    let extra_s = extra.display().to_string();
-    // Refused: relative, missing, a file, `..`, a drive root, control characters.
-    let missing = dir.join("missing").display().to_string();
-    let file = extra.join("file.txt").display().to_string();
-    let dotdot = format!(
-        "{}{}..{}extra",
-        extra_s,
-        std::path::MAIN_SEPARATOR,
-        std::path::MAIN_SEPARATOR
-    );
-    let drive_root = if cfg!(windows) {
-        "C:\\".to_owned()
-    } else {
-        "/".to_owned()
-    };
-    for (root, id) in [
-        ("relative/dir".to_owned(), "path-invalid"),
-        (String::new(), "path-invalid"),
-        (format!("{extra_s}\u{1}"), "path-invalid"),
-        (missing, "fs-not-found"),
-        (file, "fs-not-a-dir"),
-        (dotdot, "path-denied"),
-        (drive_root, "path-denied"),
-    ] {
-        let e = c.browse_set_roots(vec![root.clone()]).await.unwrap_err();
-        assert_eq!(e.id, id, "{root:?}: {e}");
-    }
-    assert!(c.browse_config().await.unwrap().roots.is_empty());
-
-    // Accepted (twice = deduplicated), canonical, stored, effective.
-    let cfg = c
-        .browse_set_roots(vec![
-            extra_s.clone(),
-            format!("{extra_s}{}", std::path::MAIN_SEPARATOR),
-        ])
-        .await
-        .unwrap();
-    assert_eq!(cfg.roots.len(), 1, "{cfg:?}");
-    let stored: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(data.join(ide_server::SERVER_CONFIG_FILE)).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(stored["other"], 7);
-    assert_eq!(
-        stored["browse_roots"][0].as_str(),
-        Some(cfg.roots[0].as_str())
-    );
-    let roots = c.browse_roots().await.unwrap();
-    assert!(roots.contains(&cfg.roots[0]), "{roots:?}");
-    let l = c.browse_list(&cfg.roots[0]).await.unwrap();
-    assert_eq!(l.entries.len(), 1);
-    assert_eq!(l.entries[0].name, "sub");
-
-    // Cleared again: the folder is no longer browsable (unless it is under the home dir).
-    let cfg = c.browse_set_roots(Vec::new()).await.unwrap();
-    assert!(cfg.roots.is_empty());
-    drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -498,14 +442,15 @@ async fn files_over_real_child() {
         serde_json::json!({ "browse_roots": [root.display().to_string()] }).to_string(),
     )
     .unwrap();
-    // The home dir is a browse root too; the scenario expects exactly one root, so point
-    // the child's home at the roots folder.
+    // Legacy browse roots: the migration registers the ones that are git repositories (the
+    // roots folder itself is none, the repo inside it is not a root).
     let t = LocalChild::new(env!("CARGO_BIN_EXE_ide-server"))
         .no_daemon()
         .env("IDE_DATA_DIR", data.display().to_string())
         .env("USERPROFILE", root.display().to_string())
         .env("HOME", root.display().to_string());
     let c = Client::connect(t, opts()).await.expect("connect child");
+    assert!(c.repos().await.unwrap().is_empty());
     files_scenario(&c, &repo, &root).await;
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);

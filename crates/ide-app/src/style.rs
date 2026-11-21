@@ -95,6 +95,20 @@ pub fn error_box(_: &Theme) -> container::Style {
     }
 }
 
+/// A warning (Desk's yellow `Alert`, e.g. "원본 레포에서 바로 작업해요").
+pub fn warn_box(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgba8(0xd2, 0x99, 0x22, 0.12).into()),
+        text_color: Some(color!(0xe3b341)),
+        border: Border {
+            color: Color::from_rgba8(0xd2, 0x99, 0x22, 0.5),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 fn flat(background: Option<Color>, text: Color) -> button::Style {
     button::Style {
         background: background.map(Background::Color),

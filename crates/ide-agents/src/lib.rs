@@ -5,8 +5,10 @@
 //! translates that into its own flags, env vars and generated files.
 //!
 //! Rules (see `docs/agent-providers.md`):
-//! - Never pollute the repo: inject through flags, env vars and the per-session scratch dir
-//!   `sessions/<id>/agent/` ([`LaunchPlan::scratch`]).
+//! - Never pollute a repository: inject through flags, env vars, the per-session scratch dir
+//!   `sessions/<id>/agent/` ([`LaunchPlan::scratch`]) and, for workspace sessions only, files in
+//!   the session folder ([`AgentProvider::prepare_root`]; the folder is the agent's cwd and lies
+//!   outside every repository).
 //! - Accounts are never written (only by the CLI's own login flow).
 //! - Unsupported capability -> documented fallback (skills become instructions) or a note in
 //!   [`Assembled::notes`]; never silently dropped.
@@ -21,7 +23,9 @@
 //! let claude = providers.require("claude")?;
 //! println!("{:?}", claude.detect(&env));
 //! # let (session, configuration): (ide_core::Session, ide_core::Configuration) = todo!();
-//! let input = SessionInput::for_session(&paths, &session, None, &configuration);
+//! # let repos = ide_core::RepoStore::open(&paths)?;
+//! let guidance = ide_core::session_guidance(&session, &repos);
+//! let input = SessionInput::for_session(&paths, &session, None, &configuration, &repos, guidance);
 //! let built = assemble(claude, &input, &env)?;
 //! // spawn built.spec in a PTY
 //! # Ok(()) }
@@ -40,6 +44,7 @@ mod skills;
 use std::path::{Path, PathBuf};
 
 use ide_core::{Account, Configuration, LaunchSpec, McpServer, Paths, Result, Session};
+pub use ide_core::SessionMode;
 use serde::{Deserialize, Serialize};
 
 pub use claude::Claude;
@@ -69,7 +74,19 @@ pub enum Support {
     Unsupported,
 }
 
-/// What a provider can do.
+/// Support of the configuration parts in one session mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeSupport {
+    /// Skills.
+    pub skills: Support,
+    /// MCP servers.
+    pub mcp: Support,
+    /// Instructions.
+    pub instructions: Support,
+}
+
+/// What a provider can do. `skills` / `mcp` / `instructions` are for workspace sessions;
+/// [`Caps::original_repo`] for original-repo sessions (nothing may be written into the cwd).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Caps {
     /// Sessions can use accounts of this provider.
@@ -88,9 +105,23 @@ pub struct Caps {
     pub resume: bool,
     /// The session title is passed as the CLI's session name.
     pub session_name: bool,
+    /// Support in original-repo sessions.
+    pub original_repo: ModeSupport,
 }
 
 impl Caps {
+    /// Support in a session mode.
+    pub fn mode(&self, mode: SessionMode) -> ModeSupport {
+        match mode {
+            SessionMode::Workspace => ModeSupport {
+                skills: self.skills,
+                mcp: self.mcp,
+                instructions: self.instructions,
+            },
+            SessionMode::OriginalRepo => self.original_repo,
+        }
+    }
+
     /// Nothing supported (a plain program).
     pub const NONE: Caps = Caps {
         accounts: false,
@@ -101,6 +132,11 @@ impl Caps {
         hooks: Support::Unsupported,
         resume: false,
         session_name: false,
+        original_repo: ModeSupport {
+            skills: Support::Unsupported,
+            mcp: Support::Unsupported,
+            instructions: Support::Unsupported,
+        },
     };
 }
 
@@ -172,7 +208,36 @@ pub trait AgentProvider: Send + Sync {
         AccountStatus::Unknown
     }
 
+    /// The config home the CLI uses for this session (default: the account dir). A provider
+    /// may return a per-session overlay here.
+    fn account_home(&self, acct: &AccountDir, _ctx: &SessionContext) -> Result<PathBuf> {
+        Ok(acct.dir.clone())
+    }
+    /// Called after the session's process exited or was stopped (e.g. to sync state of an
+    /// overlay back). Default: nothing.
+    fn after_exit(&self, _ctx: &SessionContext, _acct: Option<&AccountDir>) {}
+
     // ---- Session assembly ----
+
+    /// Materialize project-level files into the session folder (`ctx.root`), where the CLI
+    /// discovers them from its cwd, and report what this covered. Only called for workspace
+    /// sessions; must never write elsewhere (use [`LaunchPlan::write_root_file`], which refuses
+    /// original-repo sessions). Regenerated on every start. Default: nothing (skills and the
+    /// guidance go through [`AgentProvider::apply_skills`] / the instructions).
+    fn prepare_root(
+        &self,
+        _plan: &mut LaunchPlan,
+        _ctx: &SessionContext,
+        _config: &Configuration,
+        _skills: &[Skill],
+    ) -> Result<RootPrepared> {
+        Ok(RootPrepared::default())
+    }
+    /// Directories outside the cwd the agent must reach (worktrees kept outside the session
+    /// folder, the repositories' shared git dirs for commits). Default: nothing.
+    fn apply_dirs(&self, _plan: &mut LaunchPlan, _dirs: &[PathBuf]) -> Result<()> {
+        Ok(())
+    }
 
     /// Start a plan: base arguments and the account's env vars. Default: `program` +
     /// [`AgentProvider::account_env`].
@@ -207,6 +272,62 @@ pub trait AgentProvider: Send + Sync {
     }
 }
 
+/// One repository of a session as seen by providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoInfo {
+    /// Repository name.
+    pub name: String,
+    /// Its worktree (original-repo sessions: the repository itself).
+    pub path: PathBuf,
+    /// The repository's shared git dir (`<repo>/.git`), if known: commits in a worktree write
+    /// there.
+    pub git_dir: Option<PathBuf>,
+}
+
+/// Where and how a session runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionContext {
+    /// Workspace or original-repo session.
+    pub mode: SessionMode,
+    /// The agent's cwd (session folder or original repository).
+    pub root: PathBuf,
+    /// Attached repositories.
+    pub repos: Vec<RepoInfo>,
+    /// Scratch dir for generated files (`sessions/<id>/agent`); emptied by [`assemble`].
+    pub scratch: PathBuf,
+    /// Session guidance (workspace sessions; Desk's `HERMES.md` text).
+    pub guidance: Option<String>,
+}
+
+impl SessionContext {
+    /// Directories outside `root` the agent needs: worktrees not below it and every repo's git
+    /// dir (workspace sessions; an original-repo session's git dir is inside its root).
+    pub fn outside_dirs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut push = |p: &Path| {
+            if !p.starts_with(&self.root) && !out.iter().any(|o| ide_core::same_path(o, p)) {
+                out.push(p.to_path_buf());
+            }
+        };
+        for r in &self.repos {
+            push(&r.path);
+            if let Some(g) = &r.git_dir {
+                push(g);
+            }
+        }
+        out
+    }
+}
+
+/// What [`AgentProvider::prepare_root`] covered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RootPrepared {
+    /// Skills were written where the CLI discovers them.
+    pub skills: bool,
+    /// The guidance was written where the CLI reads project context.
+    pub guidance: bool,
+}
+
 /// Inputs of [`assemble`].
 #[derive(Debug, Clone)]
 pub struct SessionInput<'a> {
@@ -214,10 +335,8 @@ pub struct SessionInput<'a> {
     pub session_id: &'a str,
     /// Session title (session name for CLIs that support one).
     pub title: &'a str,
-    /// Process cwd (the worktree).
-    pub cwd: &'a Path,
-    /// Scratch dir for generated files (`sessions/<id>/agent`); emptied by [`assemble`].
-    pub scratch: PathBuf,
+    /// Where the session runs (cwd, repos, scratch dir).
+    pub ctx: SessionContext,
     /// The account, if the session uses one.
     pub account: Option<&'a AccountDir>,
     /// The configuration.
@@ -225,18 +344,39 @@ pub struct SessionInput<'a> {
 }
 
 impl<'a> SessionInput<'a> {
-    /// The input for a stored session (scratch dir from `paths`).
+    /// The input for a stored session (scratch dir from `paths`; `repos` resolves its
+    /// attached repositories to `(name, repository path)`; `guidance` from
+    /// [`ide_core::session_guidance`]).
     pub fn for_session(
         paths: &Paths,
         session: &'a Session,
         account: Option<&'a AccountDir>,
         configuration: &'a Configuration,
+        repos: &ide_core::RepoStore,
+        guidance: Option<String>,
     ) -> Self {
+        let repos = session
+            .worktrees
+            .iter()
+            .map(|w| {
+                let r = repos.get(&w.repo);
+                RepoInfo {
+                    name: r.map_or_else(|| w.name.clone(), |r| r.name.clone()),
+                    path: w.path.clone(),
+                    git_dir: r.map(|r| r.path.join(".git")).filter(|g| g.is_dir()),
+                }
+            })
+            .collect();
         SessionInput {
             session_id: session.id.as_str(),
             title: &session.title,
-            cwd: &session.worktree_path,
-            scratch: paths.session_agent_dir(session.id.as_str()),
+            ctx: SessionContext {
+                mode: session.mode,
+                root: session.root.clone(),
+                repos,
+                scratch: paths.session_agent_dir(session.id.as_str()),
+                guidance,
+            },
             account,
             configuration,
         }
@@ -252,37 +392,57 @@ pub struct Assembled {
     pub notes: Vec<String>,
 }
 
-/// Build the launch spec of a session: begin -> skills -> MCP -> instructions (configuration
-/// text + fallback text) -> hooks -> finish. Regenerates the scratch dir. `TERM` and
-/// `COLORTERM` are always set.
+/// Build the launch spec of a session: account home -> begin -> (workspace sessions)
+/// prepare_root -> skills (unless the root covered them) -> MCP -> instructions (configuration
+/// text + guidance unless the root covered it + fallback text) -> outside dirs -> hooks ->
+/// finish. Regenerates the scratch dir. `TERM` and `COLORTERM` are always set.
 pub fn assemble(
     provider: &dyn AgentProvider,
     input: &SessionInput<'_>,
     env: &HostEnv,
 ) -> Result<Assembled> {
-    match std::fs::remove_dir_all(&input.scratch) {
+    let ctx = &input.ctx;
+    match std::fs::remove_dir_all(&ctx.scratch) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             return Err(ide_core::Error::io(
                 ide_core::IoAction::Removing,
-                &input.scratch,
+                &ctx.scratch,
                 e,
             ));
         }
     }
     let mut plan = LaunchPlan::new(provider.program(), input);
-    provider.begin(&mut plan, input.account);
+    let account = match input.account {
+        Some(a) => {
+            let mut a = a.clone();
+            a.dir = provider.account_home(&a, ctx)?;
+            Some(a)
+        }
+        None => None,
+    };
+    provider.begin(&mut plan, account.as_ref());
     let cfg = input.configuration;
     let skills = skills::load(&cfg.skills, &mut plan.notes);
-    if !skills.is_empty() {
+    let prepared = if ctx.mode == SessionMode::Workspace {
+        provider.prepare_root(&mut plan, ctx, cfg, &skills)?
+    } else {
+        RootPrepared::default()
+    };
+    if !skills.is_empty() && !prepared.skills {
         provider.apply_skills(&mut plan, &skills)?;
     }
     if !cfg.mcp_servers.is_empty() {
         provider.apply_mcp(&mut plan, &cfg.mcp_servers)?;
     }
     let mut text = cfg.instructions.trim().to_owned();
-    for extra in std::mem::take(&mut plan.extra_instructions) {
+    let guidance = ctx.guidance.as_deref().filter(|_| !prepared.guidance);
+    for extra in guidance
+        .map(str::to_owned)
+        .into_iter()
+        .chain(std::mem::take(&mut plan.extra_instructions))
+    {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
@@ -290,6 +450,10 @@ pub fn assemble(
     }
     if !text.is_empty() {
         provider.apply_instructions(&mut plan, &text)?;
+    }
+    let dirs = ctx.outside_dirs();
+    if !dirs.is_empty() {
+        provider.apply_dirs(&mut plan, &dirs)?;
     }
     provider.apply_hooks(&mut plan, &HookTargets::default())?;
     plan.set_env("TERM", "xterm-256color");

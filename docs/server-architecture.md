@@ -238,22 +238,22 @@ Known gaps (phase 1):
 - **Go to definition**: `CodeEvent::Definition` -> `def.lookup` with the buffer text; `One` opens
   the target at line:col, `Many` shows a picker, `None` shows the translated reason as a
   transient message (5 s) at the bottom of the pane.
-- **New-session dialog**: the native folder picker (`rfd`) is gone; a folder icon opens a
-  server-side browser (`browse.roots` in a picker, `browse.list`, parent button, git repos marked
-  green; browsing into a repository fills the folder field). The text field stays.
+- **New-session dialog**: picks registered repositories (checkboxes, pre-checked from the
+  configuration's default repos) or one repo for an original-repo session; folders are chosen only
+  when registering a repo on the repos page (see `repos-and-workspaces.md`).
 
 ## Phase 2 backend (files, search, git, definitions)
 Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify` variants),
 `ide-server` (`jail`, `fsops`, `watch`, `search`, `git`, `def/`) and `ide-client` (typed methods,
-`SearchStream`). Capabilities in `Welcome`: `files`, `browse`, `search`, `git`, `def`.
+`SearchStream`). Capabilities in `Welcome`: `files`, `repos`, `browse-pick`, `search`, `git`, `def`.
 
 | Piece | Rule / state |
 |---|---|
-| Paths on the wire | Root-relative to the session worktree, `/`-separated (`""` = root) for every session RPC; absolute only for `browse.*` and `session.create.repo_path`. Lines 1-based, columns 1-based **chars**; search match ranges are byte offsets into `line_text`. |
-| Jail | `RootJail` per session (canonical worktree): rejects absolute/drive/UNC paths, `..`, `:` (ADS), control chars, `<>"|?*`, Windows device names, trailing dot/space; resolves the longest existing prefix (symlinks and junctions) and requires it inside the root. Delete/rename/stat act on the link itself (`resolve_entry`), never its target; recursive delete removes links without descending. Writes into `.git` are denied; `.git` is never listed. `PathJail` = browse roots: the home dir (`USERPROFILE`/`HOME`) plus `browse_roots` of `<data>/server.json` (`{ "browse_roots": ["D:/src"] }`, re-read per call), or `ServerConfig::browse_roots`. `session.create` requires the repo inside the browse roots (new: `path-denied` otherwise). |
+| Paths on the wire | Every file/git/search/def RPC names `(session, repo)` and a path relative to that repo's worktree in the session, `/`-separated (`""` = root); search requests take `repo: Option` (`None` = every attached repo, hits carry their repo). Absolute only for `browse.pick_list` and `repo.register`. Lines 1-based, columns 1-based **chars**; search match ranges are byte offsets into `line_text`. |
+| Jail | `RootJail` per `(session, repo)` worktree (canonical; `repo-not-attached` for a repo the session does not have): rejects absolute/drive/UNC paths, `..`, `:` (ADS), control chars, `<>"|?*`, Windows device names, trailing dot/space; resolves the longest existing prefix (symlinks and junctions) and requires it inside the root. Delete/rename/stat act on the link itself (`resolve_entry`), never its target; recursive delete removes links without descending. Writes into `.git` are denied; `.git` is never listed. The browse-roots `PathJail` is gone: the repository registry replaced it (sessions only get worktrees of registered repos; `server.json`'s `browse_roots` is read once for the migration). |
 | fs | list (dirs first; `ignored` from every `.gitignore` root..dir + `info/exclude` + global excludes, ignored parents propagate; git badge per entry, `Modified` for dirs with changes below), stat, read (default 2 MiB, max 8 MiB; BOM/UTF-16/UTF-8, else `chardetng` guess e.g. EUC-KR; binary = NUL in the first 8000 bytes; `truncated`), write (`expected_version` conflict check under a per-user write lock; encodes back to the read encoding), create_file/create_dir/rename/delete. Mutations are audited (`fs.write`, `fs.create_file`, `fs.create_dir`, `fs.rename`, `fs.delete`; target `<session> <path>`). |
 | Versions | `h<len>-<fnv1a64>` of the whole file (≤ 16 MiB), else `m<len>-<mtime ns>`; blobs from `git.file_at` use the content hash too. |
-| Watch | `fs.watch{session}` per connection (idempotent); one `notify` watcher per session shared by all watching connections, dropped with the last unwatch/disconnect/session delete. Debounce: 80 ms quiet, ≤ 400 ms delay; > 1000 paths -> `FsChanged{rescan: true}`; events under `.git` and the linked worktree's git dir -> `GitChanged`. Notifications go only to watching connections. The client re-watches after a reconnect (no replay of the gap). |
+| Watch | `fs.watch{session, repo}` per connection (idempotent); one `notify` watcher per `(session, repo)` worktree shared by all watching connections, dropped with the last unwatch/disconnect/session delete. Debounce: 80 ms quiet, ≤ 400 ms delay; > 1000 paths -> `FsChanged{rescan: true}`; events under `.git` and the linked worktree's git dir -> `GitChanged`. Notifications go only to watching connections. The client re-watches after a reconnect (no replay of the gap). |
 | Search | `search.text`: client-chosen `search` id, reply `Unit` first, then `Notify::SearchHits` batches (100 lines / 100 ms) and one `SearchDone` to that connection only; `search.cancel` or disconnect stops it. `ignore` walker (gitignore unless `include_ignored`, hidden files included, `.git` skipped, files > 8 MiB skipped, binary files skipped), `grep-regex` (literal unless `regex`, case, whole word), override globs. Default cap 2000 lines. `search.files`: `nucleo-matcher` path matching over non-ignored files (≤ 300k), smart case. |
 | Git | `git.status`: porcelain v2 (`--find-renames`, untracked files listed individually), upstream ahead/behind, base = request `base` or the branch checked out in the session's repo (else `main`/`master`), ahead/behind + merge base. `git.diff`: `WorkingTree` (index->worktree), `Index` (HEAD->index), `Head` (HEAD->worktree), `Base` (merge base->worktree); structured hunks with old/new line numbers, `no_newline`, binary flag, renames (the old path is added to the pathspec when asking for one renamed file), untracked files as all-added (`--no-index`). `git.file_at`: `Head`, `Index`, `Base`, `Rev(commit-ish)` -> `Option<FileContent>`. Revisions starting with `-` or containing `:`/`..`/whitespace -> `git-bad-rev`. All via `ide_core::git_raw` (`-c core.quotepath=false`, `GIT_TERMINAL_PROMPT=0`, stdin closed, `GIT_OPTIONAL_LOCKS=0`, no console window) — **not through `Runner` yet**; move it there when runners isolate users (containers). |
 | Definitions | `def.lookup{session, path, line, col, text?}`: port of Hermes Desk `definitions.ts` + langpacks (JS, TS + tsconfig `paths`/`baseUrl`/`extends`/solution `references`, Python, Vue SFC): import specifier -> module file; `ns.member` of a module import; parameters of the enclosing function win; nearest same-file declaration above; import bindings followed through re-exports (`export {a as b} from`, `export *`, `export default x`, Python `__init__` re-exports) up to 3 hops; external modules -> the import binding; finally `git grep -w --untracked` over the pack's globs, top-level declarations preferred, same directory first, ≤ 50 targets. Reads are jailed and ≤ 2 MiB. The TS unit tests are ported (`def/tests.rs`, `def/{js,py,ts,vue}.rs`). Deviation: identifiers may contain non-ASCII characters (Hermes Desk treated them as separators). |
@@ -270,16 +270,13 @@ Error ids added (args): `path-invalid` (`path`), `fs-not-found` / `fs-exists` / 
 Existing ids reused: `path-denied` (`path`), `session-not-found` (`id`), `git` / `git-spawn`,
 `message-too-large` (now also sent when a reply exceeds 16 MiB).
 
-Browse roots are editable from the app (the repos page of the navigation rail): `browse.config`
-(home dir + the `browse_roots` stored in `server.json`) and `browse.set_roots{roots}` (each root
-absolute, existing, a folder and not a filesystem root -> canonical, deduplicated, at most 64;
-`path-invalid` / `path-denied` / `fs-not-found` / `fs-not-a-dir`; other keys of `server.json`
-are kept; written atomically; audited as `browse.set_roots`).
+The browse-roots RPCs (`browse.config`, `browse.set_roots`, `browse.list`) were removed with the
+repository registry (`repo.list` / `repo.register` / `repo.unregister`, see
+`repos-and-workspaces.md`).
 
-New roots are chosen with a server-side folder picker (the repos page's folder button; works
+Repositories to register are chosen with a server-side folder picker (the repos page's "레포 추가"; works
 over SSH, never a local OS dialog): `browse.pick_list{abs_dir: Option<String>}` (capability
-`browse-pick`) lists folders **anywhere the server's OS user can read**, not only inside the
-browse roots, because a root that is not yet a root has to be reachable. `None`/`""` = the start
+`browse-pick`) lists folders **anywhere the server's OS user can read**, because a repository that is not yet registered has to be reachable. `None`/`""` = the start
 list (path `""`): the home dir, then the drives `A:\`..`Z:\` that exist (Windows) or `/` (Unix).
 A folder listing returns directories only (links/junctions followed when the target is a
 folder), skips dot names and Windows hidden/system folders, sorts case-insensitively, keeps at
@@ -288,7 +285,7 @@ root. Errors: `path-invalid` (relative, control chars), `path-denied` (`..`), `f
 `fs-permission`, `fs-not-a-dir`. This is safe under the per-user-server model: the server runs
 as the user, so it shows only what the user's OS account could list anyway, it returns names
 only (no file contents), and every other RPC stays jailed. Choosing a folder in the picker
-still goes through `browse.set_roots` (validated, audited as before).
+goes through `repo.register` (git top level required, audited).
 
 Known gaps (phase 2): no file-list cache for `search.files` (walks per call); text search is
 single-threaded; diff lines strip a trailing `\r` (CRLF is not shown); `fs.list` badges run one

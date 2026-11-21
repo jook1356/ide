@@ -126,3 +126,32 @@ pub fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Copy `skills` into `dir`, one folder each named after the skill folder (made unique with
+/// `-2`, `-3`...). Returns the folder names.
+pub fn copy_skills(skills: &[Skill], dir: &Path) -> Result<Vec<String>> {
+    let mut used: Vec<String> = Vec::new();
+    for s in skills {
+        let base = s
+            .dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.name.clone());
+        let mut folder = base.clone();
+        let mut n = 2;
+        while used.contains(&folder) {
+            folder = format!("{base}-{n}");
+            n += 1;
+        }
+        copy_dir(&s.dir, &dir.join(&folder))?;
+        used.push(folder);
+    }
+    Ok(used)
+}
+
+/// `--add-dir <dir>` per directory (Claude Code and Codex use the same flag).
+pub fn add_dirs(plan: &mut LaunchPlan, dirs: &[std::path::PathBuf]) {
+    for d in dirs {
+        plan.arg("--add-dir").arg(d.display().to_string());
+    }
+}

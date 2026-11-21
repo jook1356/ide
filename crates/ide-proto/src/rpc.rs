@@ -2,15 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::{AccountInfo, AccountState, ConfigurationInfo, ProviderInfo, SessionKind};
+use crate::agents::{
+    AccountInfo, AccountState, ConfigurationInfo, ProviderInfo, RepoInfo, SessionKind, SessionMode,
+    SessionRepo,
+};
 use crate::error::ProtoError;
 use crate::files::{
-    BrowseConfig, BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
+    BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
     FsStat, GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 2;
+pub const PROTO_VERSION: u32 = 3;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -83,12 +86,13 @@ pub struct SessionInfo {
     pub account: Option<String>,
     /// Configuration slug (empty for login sessions).
     pub configuration: String,
-    /// Repository root.
-    pub repo_path: String,
-    /// Session worktree.
-    pub worktree_path: String,
-    /// Branch (`ide/<id>`).
-    pub branch: String,
+    /// Workspace or original-repo session.
+    pub mode: SessionMode,
+    /// The agent's cwd: the session folder (workspace), the repository (original repo) or a
+    /// login session's empty dir.
+    pub root: String,
+    /// Attached repositories (worktrees), in attach order.
+    pub repos: Vec<SessionRepo>,
     /// Unix seconds.
     pub created_at: u64,
     /// Unix seconds.
@@ -110,18 +114,29 @@ pub struct NewSession {
     pub account: Option<String>,
     /// Configuration slug.
     pub configuration: String,
-    /// Any folder inside the repository (server path).
-    pub repo_path: String,
+    /// Registered repos to give worktrees (workspace mode; empty = an empty workspace).
+    pub repos: Vec<String>,
+    /// Original-repo mode: run in this registered repo's checkout (no workspace).
+    pub original_repo: Option<String>,
     /// Title; empty = derived.
     pub title: String,
-    /// Revision to branch from; empty = HEAD.
-    pub base_ref: String,
     /// Start the process right away.
     pub start: bool,
     /// Initial terminal size.
     pub cols: u16,
     /// Initial terminal size.
     pub rows: u16,
+}
+
+/// A repository whose worktree could not be created (`session.create` still succeeds).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoFailureInfo {
+    /// Repo id.
+    pub repo: String,
+    /// Repo name.
+    pub name: String,
+    /// Why.
+    pub error: ProtoError,
 }
 
 /// Result of `term.attach`.
@@ -190,8 +205,30 @@ pub enum Request {
     ConfigurationDelete {
         slug: String,
     },
+    /// Registered repositories.
+    RepoList,
+    /// Register the git repository containing `path` (absolute server path; `not-a-git-repo`
+    /// otherwise). An already registered repository is returned as is.
+    RepoRegister {
+        path: String,
+    },
+    /// Unregister (files kept); `repo-in-use` while sessions have it attached.
+    RepoUnregister {
+        id: String,
+    },
     SessionList,
     SessionCreate(NewSession),
+    /// Give a workspace session a worktree of a registered repo (no-op if attached).
+    SessionAttachRepo {
+        id: String,
+        repo: String,
+    },
+    /// Remove a repo's worktree from a workspace session (uncommitted changes are discarded;
+    /// the branch is kept).
+    SessionDetachRepo {
+        id: String,
+        repo: String,
+    },
     SessionStart {
         id: String,
     },
@@ -230,21 +267,24 @@ pub enum Request {
     /// Stop every session and exit the server process (daemon or `--no-daemon`).
     ServerShutdown,
 
-    // ---- Phase 2: files (paths root-relative to the session worktree) ----
+    // ---- Phase 2: files (paths root-relative to the worktree of `repo` in `session`) ----
     /// List a directory (`dir` = `""` for the root). `.git` is never listed; ignored entries
     /// only with `include_ignored`.
     FsList {
         session: String,
+        repo: String,
         dir: String,
         include_ignored: bool,
     },
     FsStat {
         session: String,
+        repo: String,
         path: String,
     },
     /// Read a file (`max_bytes` 0 = default 2 MiB).
     FsRead {
         session: String,
+        repo: String,
         path: String,
         max_bytes: u64,
     },
@@ -253,6 +293,7 @@ pub enum Request {
     /// `encoding` `None` = UTF-8 without BOM.
     FsWrite {
         session: String,
+        repo: String,
         path: String,
         content: String,
         expected_version: Option<String>,
@@ -261,52 +302,44 @@ pub enum Request {
     /// Create a new file (`fs-exists` if it exists); parent folders are created.
     FsCreateFile {
         session: String,
+        repo: String,
         path: String,
         content: String,
     },
     /// Create a folder (and missing parents); `fs-exists` if it exists.
     FsCreateDir {
         session: String,
+        repo: String,
         path: String,
     },
     /// Rename/move inside the session (`fs-exists` if `to` exists).
     FsRename {
         session: String,
+        repo: String,
         from: String,
         to: String,
     },
     /// Delete a file, symlink or folder (non-empty folders need `recursive`).
     FsDelete {
         session: String,
+        repo: String,
         path: String,
         recursive: bool,
     },
     /// Start sending `Notify::FsChanged`/`GitChanged` for the session to this connection.
     FsWatch {
         session: String,
+        repo: String,
     },
     FsUnwatch {
         session: String,
+        repo: String,
     },
-    /// The absolute roots repositories can be picked from.
-    BrowseRoots,
-    /// Sub-folders of an absolute folder inside a browse root (`""` = the first root).
-    BrowseList {
-        abs_dir: String,
-    },
-    /// Folders anywhere the server's OS user can read, only for choosing a new browse root
-    /// (not limited to the browse roots). `None` = the start list: the drives (Windows) or
+    /// Folders anywhere the server's OS user can read, for choosing a repository to register. `None` = the start list: the drives (Windows) or
     /// `/` (Unix) plus the home dir, with the listing path `""`. Directories only, hidden and
     /// system folders skipped, sorted, capped ([`BrowseListing::truncated`]).
     BrowsePickList {
         abs_dir: Option<String>,
-    },
-    /// The home dir and the extra browse roots stored in `server.json`.
-    BrowseConfig,
-    /// Replace the extra browse roots stored in `server.json` (absolute existing folders;
-    /// filesystem roots are refused). Returns the new [`BrowseConfig`].
-    BrowseSetRoots {
-        roots: Vec<String>,
     },
     /// Start a text search; `search` is a client-chosen id echoed in `Notify::SearchHits` /
     /// `Notify::SearchDone` (sent to this connection only, after the `Unit` reply).
@@ -321,17 +354,21 @@ pub enum Request {
     /// Fuzzy file-name search over non-ignored files (`max_results` 0 = 100).
     SearchFiles {
         session: String,
+        /// `None` = every repo of the session.
+        repo: Option<String>,
         query: String,
         max_results: u32,
     },
     /// `base` = branch to compare with (`None` = the branch checked out in the main repo).
     GitStatus {
         session: String,
+        repo: String,
         base: Option<String>,
     },
     /// `path` `None` = every changed tracked file.
     GitDiff {
         session: String,
+        repo: String,
         path: Option<String>,
         against: DiffAgainst,
         base: Option<String>,
@@ -339,6 +376,7 @@ pub enum Request {
     /// File content at a revision; `Response::FileAt(None)` if it does not exist there.
     GitFileAt {
         session: String,
+        repo: String,
         path: String,
         rev: GitRev,
         base: Option<String>,
@@ -347,6 +385,7 @@ pub enum Request {
     /// editor's current (possibly unsaved) content; `None` = read the file.
     DefLookup {
         session: String,
+        repo: String,
         path: String,
         line: u32,
         col: u32,
@@ -371,8 +410,13 @@ impl Request {
             Request::ConfigurationCreate { .. } => "configuration.create",
             Request::ConfigurationUpdate(_) => "configuration.update",
             Request::ConfigurationDelete { .. } => "configuration.delete",
+            Request::RepoList => "repo.list",
+            Request::RepoRegister { .. } => "repo.register",
+            Request::RepoUnregister { .. } => "repo.unregister",
             Request::SessionList => "session.list",
             Request::SessionCreate(_) => "session.create",
+            Request::SessionAttachRepo { .. } => "session.attach_repo",
+            Request::SessionDetachRepo { .. } => "session.detach_repo",
             Request::SessionStart { .. } => "session.start",
             Request::SessionStop { .. } => "session.stop",
             Request::SessionRestart { .. } => "session.restart",
@@ -393,11 +437,7 @@ impl Request {
             Request::FsDelete { .. } => "fs.delete",
             Request::FsWatch { .. } => "fs.watch",
             Request::FsUnwatch { .. } => "fs.unwatch",
-            Request::BrowseRoots => "browse.roots",
-            Request::BrowseList { .. } => "browse.list",
             Request::BrowsePickList { .. } => "browse.pick_list",
-            Request::BrowseConfig => "browse.config",
-            Request::BrowseSetRoots { .. } => "browse.set_roots",
             Request::SearchText { .. } => "search.text",
             Request::SearchCancel { .. } => "search.cancel",
             Request::SearchFiles { .. } => "search.files",
@@ -424,6 +464,13 @@ pub enum Response {
     Configuration(ConfigurationInfo),
     Sessions(Vec<SessionInfo>),
     Session(SessionInfo),
+    /// `session.create`: the session and the repos whose worktree failed.
+    SessionCreated {
+        session: SessionInfo,
+        failures: Vec<RepoFailureInfo>,
+    },
+    Repos(Vec<RepoInfo>),
+    Repo(RepoInfo),
     Attached(Attached),
     Entries(Vec<FsEntry>),
     Stat(FsStat),
@@ -432,9 +479,7 @@ pub enum Response {
     Written {
         version: String,
     },
-    Roots(Vec<String>),
     Browse(BrowseListing),
-    BrowseConfig(BrowseConfig),
     FileMatches(Vec<FileMatch>),
     GitStatus(GitStatus),
     Diff(Vec<DiffFile>),
@@ -465,16 +510,20 @@ pub enum Notify {
     AccountsChanged,
     /// The configuration list (or a configuration) changed.
     ConfigurationsChanged,
+    /// The repository registry changed.
+    ReposChanged,
     /// Files changed under a watched session (debounced; root-relative paths, deduplicated).
     /// `rescan` = too many changes to list: re-read everything shown.
     FsChanged {
         session: String,
+        repo: String,
         paths: Vec<String>,
         rescan: bool,
     },
     /// The session's git state changed (index, HEAD, refs) without necessarily touching files.
     GitChanged {
         session: String,
+        repo: String,
     },
     /// A batch of `search.text` results.
     SearchHits {
@@ -569,6 +618,7 @@ mod tests {
                         env: vec![("K".into(), "v".into())],
                     }],
                     instructions: "Use pnpm.".into(),
+                    default_repos: Some(vec!["0a1b2c3d".into()]),
                     created_at: 1,
                 }),
             },
@@ -595,6 +645,11 @@ mod tests {
                         hooks: crate::Support::Unsupported,
                         resume: false,
                         session_name: true,
+                        original_repo: crate::ModeCaps {
+                            skills: crate::Support::Native,
+                            mcp: crate::Support::Native,
+                            instructions: crate::Support::Native,
+                        },
                     },
                 }])),
             },

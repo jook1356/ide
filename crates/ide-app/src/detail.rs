@@ -68,11 +68,12 @@ impl SideTab {
 pub enum ItemKey {
     /// The session's web page (always open).
     Web,
-    /// A file in the editor.
+    /// A file in the editor ([`qualify`]d path).
     File(String),
-    /// A changed file's diff (`staged` = index vs HEAD, else working tree vs index).
+    /// A changed file's diff (`staged` = index vs HEAD, else working tree vs index;
+    /// [`qualify`]d path).
     Diff { staged: bool, path: String },
-    /// A file on disk compared with the unsaved buffer (save conflict).
+    /// A file on disk compared with the unsaved buffer (save conflict; [`qualify`]d path).
     Compare(String),
 }
 
@@ -107,6 +108,37 @@ impl ItemKey {
             staged,
             path: p.into(),
         })
+    }
+
+    /// The key with a [`qualify`]d path: plain paths (saved before multi-repo sessions) get
+    /// `repo`; `None` when there is none.
+    pub fn qualified(self, repo: Option<&str>) -> Option<Self> {
+        let q = |p: String| -> Option<String> {
+            if !split_q(&p).0.is_empty() {
+                Some(p)
+            } else {
+                repo.map(|r| qualify(r, &p))
+            }
+        };
+        Some(match self {
+            ItemKey::Web => ItemKey::Web,
+            ItemKey::File(p) => ItemKey::File(q(p)?),
+            ItemKey::Diff { staged, path } => ItemKey::Diff {
+                staged,
+                path: q(path)?,
+            },
+            ItemKey::Compare(p) => ItemKey::Compare(q(p)?),
+        })
+    }
+
+    /// The repo of a file / diff key.
+    pub fn repo(&self) -> Option<&str> {
+        match self {
+            ItemKey::Web => None,
+            ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
+                Some(split_q(p).0)
+            }
+        }
     }
 }
 
@@ -211,11 +243,21 @@ impl SearchState {
         self.running = false;
     }
 
+    /// Group hits by file (key: [`qualify`]d path); files of one repo stay together (the view
+    /// shows a repo header above each repo's files).
     fn add(&mut self, hits: Vec<SearchMatch>) {
         for h in hits {
-            match self.groups.iter_mut().rev().find(|(p, _)| *p == h.path) {
+            let key = qualify(&h.repo, &h.path);
+            match self.groups.iter_mut().rev().find(|(p, _)| *p == key) {
                 Some((_, v)) => v.push(h),
-                None => self.groups.push((h.path.clone(), vec![h])),
+                None => {
+                    let at = self
+                        .groups
+                        .iter()
+                        .rposition(|(p, _)| split_q(p).0 == h.repo)
+                        .map_or(self.groups.len(), |i| i + 1);
+                    self.groups.insert(at, (key, vec![h]));
+                }
             }
         }
     }
@@ -223,6 +265,9 @@ impl SearchState {
 
 /// The detail area of one session.
 pub struct Detail {
+    /// The repo shown by Changes and Explore (Hermes Desk's per-tab Changes folder); `""` =
+    /// none (a session without repos).
+    pub repo: String,
     pub items: Vec<(ItemKey, Item)>,
     pub active: ItemKey,
     pub side: SideTab,
@@ -236,20 +281,23 @@ pub struct Detail {
     pub status_error: Option<String>,
     pub search: SearchState,
     pub diff_mode: DiffMode,
-    /// `fs.watch` requested on the current client.
-    pub watched: bool,
+    /// Repos with `fs.watch` requested on the current client.
+    pub watched: BTreeSet<String>,
     /// Shown state may be outdated (not watched for a while, reconnect): refresh when shown.
     pub stale: bool,
     pub toast: Option<(String, Instant)>,
 }
 
 impl Detail {
-    pub fn new(saved: Option<&DetailUi>) -> Self {
+    /// `first_repo`: the session's first repo; files saved before multi-repo sessions (plain
+    /// paths) belong to it.
+    pub fn new(saved: Option<&DetailUi>, first_repo: Option<&str>) -> Self {
         let mut items: Vec<(ItemKey, Item)> = vec![(ItemKey::Web, Item::Web)];
         let mut active = ItemKey::Web;
         let mut side = SideTab::Explore;
         if let Some(ui) = saved {
-            for k in ui.open.iter().filter_map(|s| ItemKey::decode(s)) {
+            let fix = |k: ItemKey| k.qualified(first_repo);
+            for k in ui.open.iter().filter_map(|s| ItemKey::decode(s)).filter_map(fix) {
                 if items.iter().any(|(x, _)| *x == k) {
                     continue;
                 }
@@ -264,7 +312,7 @@ impl Detail {
                 };
                 items.push((k, item));
             }
-            if let Some(a) = ui.active.as_deref().and_then(ItemKey::decode)
+            if let Some(a) = ui.active.as_deref().and_then(ItemKey::decode).and_then(fix)
                 && items.iter().any(|(k, _)| *k == a)
             {
                 active = a;
@@ -272,6 +320,7 @@ impl Detail {
             side = SideTab::parse(&ui.side);
         }
         Self {
+            repo: first_repo.unwrap_or_default().to_owned(),
             items,
             active,
             side,
@@ -284,7 +333,7 @@ impl Detail {
             status_error: None,
             search: SearchState::default(),
             diff_mode: DiffMode::Unified,
-            watched: false,
+            watched: BTreeSet::new(),
             stale: false,
             toast: None,
         }
@@ -325,6 +374,21 @@ impl Detail {
 
     pub fn active_item(&self) -> Option<&Item> {
         self.item(&self.active)
+    }
+
+    /// Show another repo in Changes / Explore: its tree and status are loaded afresh.
+    pub fn set_repo(&mut self, repo: String) {
+        if self.repo == repo {
+            return;
+        }
+        self.repo = repo;
+        self.tree = FileTree::new();
+        self.loaded_dirs.clear();
+        self.root_loading = false;
+        self.tree_error = None;
+        self.changes = ChangesList::new();
+        self.status_loaded = false;
+        self.status_error = None;
     }
 
     /// Show a message for a few seconds.
@@ -371,9 +435,12 @@ pub enum DetailMsg {
     Close(ItemKey),
     Side(SideTab),
     Tree(TreeMessage),
-    Listed(String, Result<Vec<FsEntry>, ProtoError>),
+    /// The Changes / Explore repo picked (Hermes Desk's repo dropdown).
+    PickRepo(String),
+    /// `(repo, dir, entries)`.
+    Listed(String, String, Result<Vec<FsEntry>, ProtoError>),
     Changes(ChangesMessage),
-    Status(Result<ide_client::GitStatus, ProtoError>),
+    Status(String, Result<ide_client::GitStatus, ProtoError>),
     Code(String, CodeMessage),
     Diff(ItemKey, DiffViewMessage),
     FileLoaded(String, LoadReason, Result<FileContent, ProtoError>),
@@ -386,7 +453,8 @@ pub enum DetailMsg {
         ItemKey,
         Result<(Vec<ide_client::DiffFile>, Option<String>), ProtoError>,
     ),
-    FsDone(FsOp, Result<(), ProtoError>),
+    /// A tree operation in repo `.0` finished.
+    FsDone(String, FsOp, Result<(), ProtoError>),
     SearchInput(String),
     SearchCase,
     SearchWord,
@@ -394,21 +462,39 @@ pub enum DetailMsg {
     SearchSubmit,
     Search(u64, SearchItem),
     SearchToggleFile(String),
-    /// Open `path` at 1-based line / column (search hit, definition, quick open).
+    /// Open `path` ([`qualify`]d) at 1-based line / column (search hit, definition, quick open).
     OpenAt(String, u32, u32),
-    Def(Result<DefResult, ProtoError>),
-    Watched(Result<(), ProtoError>),
+    /// A definition lookup in repo `.0` answered.
+    Def(String, Result<DefResult, ProtoError>),
+    Watched(String, Result<(), ProtoError>),
 }
 
 // ---------------------------------------------------------------------------------- helpers
 
-/// Parent folder of a root-relative path (`""` for top-level entries).
+/// A file of one attached repo as used by item keys and file items: `<repo id>:<path>`
+/// (repo ids are 8 hex digits, so the first `:` separates them). Tree, changes and RPC paths
+/// are plain root-relative paths of one repo.
+pub fn qualify(repo: &str, path: &str) -> String {
+    format!("{repo}:{path}")
+}
+
+/// `(repo id, root-relative path)` of a [`qualify`]d path (`("", path)` for a plain one).
+pub fn split_q(q: &str) -> (&str, &str) {
+    match q.split_once(':') {
+        Some((r, p)) if r.len() == 8 && r.bytes().all(|b| b.is_ascii_hexdigit()) => (r, p),
+        _ => ("", q),
+    }
+}
+
+/// Parent folder of a root-relative (or qualified) path (`""` for top-level entries).
 pub fn parent(path: &str) -> &str {
+    let path = split_q(path).1;
     path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
 }
 
-/// Last component of a root-relative path.
+/// Last component of a root-relative (or qualified) path.
 pub fn file_name(path: &str) -> &str {
+    let path = split_q(path).1;
     path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path)
 }
 
@@ -582,29 +668,42 @@ impl App {
         }
     }
 
-    /// Watch the shown session (and only it), load what it shows and refresh it when stale.
+    /// Watch every repo of the shown session (and only it), load what it shows and refresh it
+    /// when stale.
     pub fn sync_detail(&mut self) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
         let shown = self.shown_detail();
         let mut tasks = Vec::new();
-        // Unwatch every other session.
-        let others: Vec<String> = self
-            .sessions
-            .iter_mut()
-            .filter(|l| l.detail.watched && Some(&l.info.id) != shown.as_ref())
-            .map(|l| {
-                l.detail.watched = false;
+        // Unwatch other sessions and repos no longer attached.
+        let mut unwatch: Vec<(String, String)> = Vec::new();
+        for l in &mut self.sessions {
+            let keep: Vec<String> = if Some(&l.info.id) == shown.as_ref() {
+                l.info.repos.iter().map(|r| r.repo.clone()).collect()
+            } else {
+                Vec::new()
+            };
+            let gone: Vec<String> = l
+                .detail
+                .watched
+                .iter()
+                .filter(|r| !keep.contains(r))
+                .cloned()
+                .collect();
+            if !gone.is_empty() {
                 l.detail.stale = true;
-                l.info.id.clone()
-            })
-            .collect();
-        for id in others {
+            }
+            for r in gone {
+                l.detail.watched.remove(&r);
+                unwatch.push((l.info.id.clone(), r));
+            }
+        }
+        for (id, repo) in unwatch {
             let c = c.clone();
             tasks.push(
                 Task::future(async move {
-                    let _ = c.fs_unwatch(&id).await;
+                    let _ = c.fs_unwatch(&id, &repo).await;
                 })
                 .discard(),
             );
@@ -612,19 +711,31 @@ impl App {
         let Some(sid) = shown else {
             return Task::batch(tasks);
         };
-        let Some(d) = self.detail_mut(&sid) else {
+        let Some(live) = self.live(&sid) else {
             return Task::batch(tasks);
         };
-        if !d.watched {
-            d.watched = true;
-            let (c, s) = (c.clone(), sid.clone());
-            tasks.push(Task::perform(async move { c.fs_watch(&s).await }, {
-                let sid = sid.clone();
-                move |r| msg(&sid, DetailMsg::Watched(r))
-            }));
+        let repos: Vec<String> = live.info.repos.iter().map(|r| r.repo.clone()).collect();
+        let d = self.detail_mut(&sid).expect("session");
+        // The picked repo was detached (or none picked yet): show the first one.
+        if !repos.contains(&d.repo) {
+            let first = repos.first().cloned().unwrap_or_default();
+            d.set_repo(first);
         }
+        for r in repos {
+            if d.watched.insert(r.clone()) {
+                let (c, s, rr) = (c.clone(), sid.clone(), r.clone());
+                tasks.push(Task::perform(async move { c.fs_watch(&s, &rr).await }, {
+                    let sid = sid.clone();
+                    move |res| msg(&sid, DetailMsg::Watched(r.clone(), res))
+                }));
+            }
+        }
+        let d = self.detail_mut(&sid).expect("session");
         let stale = std::mem::take(&mut d.stale);
-        if d.loaded_dirs.is_empty() && !d.root_loading {
+        if d.repo.is_empty() {
+            d.tree_error = None;
+            d.status_error = None;
+        } else if d.loaded_dirs.is_empty() && !d.root_loading {
             d.root_loading = true;
             tasks.push(self.list_dirs(&sid, vec![String::new()]));
         } else if stale {
@@ -632,7 +743,7 @@ impl App {
             tasks.push(self.list_dirs(&sid, dirs));
         }
         let d = self.detail_mut(&sid).expect("session");
-        if !d.status_loaded || stale {
+        if !d.repo.is_empty() && (!d.status_loaded || stale) {
             d.status_loaded = true;
             tasks.push(self.load_status(&sid));
         }
@@ -644,36 +755,48 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// List folders of the picked repo's tree.
     fn list_dirs(&self, sid: &str, dirs: Vec<String>) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
+        let Some(repo) = self.detail(sid).map(|d| d.repo.clone()).filter(|r| !r.is_empty())
+        else {
+            return Task::none();
+        };
         Task::batch(dirs.into_iter().map(|dir| {
-            let (c, s, d) = (c.clone(), sid.to_owned(), dir.clone());
-            let sid = sid.to_owned();
-            Task::perform(async move { c.fs_list(&s, &d, true).await }, move |r| {
-                msg(&sid, DetailMsg::Listed(dir.clone(), r))
+            let (c, s, d, r) = (c.clone(), sid.to_owned(), dir.clone(), repo.clone());
+            let (sid, repo) = (sid.to_owned(), repo.clone());
+            Task::perform(async move { c.fs_list(&s, &r, &d, true).await }, move |res| {
+                msg(&sid, DetailMsg::Listed(repo.clone(), dir.clone(), res))
             })
         }))
     }
 
+    /// Git status of the picked repo (the Changes list).
     fn load_status(&self, sid: &str) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        let (s, sid) = (sid.to_owned(), sid.to_owned());
-        Task::perform(async move { c.git_status(&s, None).await }, move |r| {
-            msg(&sid, DetailMsg::Status(r))
+        let Some(repo) = self.detail(sid).map(|d| d.repo.clone()).filter(|r| !r.is_empty())
+        else {
+            return Task::none();
+        };
+        let (s, sid, r) = (sid.to_owned(), sid.to_owned(), repo.clone());
+        Task::perform(async move { c.git_status(&s, &r, None).await }, move |res| {
+            msg(&sid, DetailMsg::Status(repo.clone(), res))
         })
     }
 
+    /// Read `path` ([`qualify`]d).
     fn read_file(&self, sid: &str, path: &str, reason: LoadReason) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        let (s, p) = (sid.to_owned(), path.to_owned());
+        let (repo, rel) = split_q(path);
+        let (s, r, p) = (sid.to_owned(), repo.to_owned(), rel.to_owned());
         let (sid, path) = (sid.to_owned(), path.to_owned());
-        Task::perform(async move { c.fs_read(&s, &p, READ_MAX).await }, move |r| {
+        Task::perform(async move { c.fs_read(&s, &r, &p, READ_MAX).await }, move |r| {
             msg(&sid, DetailMsg::FileLoaded(path.clone(), reason, r))
         })
     }
@@ -728,6 +851,10 @@ impl App {
         let ItemKey::Diff { staged, path } = key.clone() else {
             return Task::none();
         };
+        let (repo, path) = {
+            let (r, p) = split_q(&path);
+            (r.to_owned(), p.to_owned())
+        };
         if let Some(Item::Diff(x)) = self.detail_mut(sid).and_then(|d| d.item_mut(&key)) {
             x.loading = true;
         }
@@ -740,17 +867,17 @@ impl App {
                 } else {
                     DiffAgainst::WorkingTree
                 };
-                let files = c.git_diff(&s, Some(&path), against, None).await?;
+                let files = c.git_diff(&s, &repo, Some(&path), against, None).await?;
                 // The whole new side lets the view expand unchanged regions.
                 let new_text = if staged {
-                    c.git_file_at(&s, &path, ide_client::GitRev::Index, None)
+                    c.git_file_at(&s, &repo, &path, ide_client::GitRev::Index, None)
                         .await
                         .ok()
                         .flatten()
                         .filter(|f| !f.binary)
                         .map(|f| f.text)
                 } else {
-                    c.fs_read(&s, &path, 0)
+                    c.fs_read(&s, &repo, &path, 0)
                         .await
                         .ok()
                         .filter(|f| !f.binary && !f.truncated)
@@ -801,7 +928,11 @@ impl App {
             d.items.push((key.clone(), item));
         }
         d.active = key.clone();
-        if let ItemKey::Diff { staged, path } = &key {
+        let same_repo = key.repo() == Some(d.repo.as_str());
+        if let ItemKey::Diff { staged, path } = &key
+            && same_repo
+        {
+            let path = &split_q(path).1.to_owned();
             let g = if *staged {
                 ChangeGroup::Staged
             } else if d
@@ -871,11 +1002,22 @@ impl App {
         self.activate(sid, next)
     }
 
-    fn after_fs_change(&mut self, sid: &str, paths: &[String], rescan: bool) -> Task<Message> {
+    /// Files changed in `repo`: refresh the tree / Changes when it is the picked repo, and
+    /// open files / diffs of that repo.
+    fn after_fs_change(
+        &mut self,
+        sid: &str,
+        repo: &str,
+        paths: &[String],
+        rescan: bool,
+    ) -> Task<Message> {
         let Some(d) = self.detail(sid) else {
             return Task::none();
         };
-        let dirs: Vec<String> = if rescan {
+        let shown = d.repo == repo;
+        let dirs: Vec<String> = if !shown {
+            Vec::new()
+        } else if rescan {
             d.loaded_dirs.iter().cloned().collect()
         } else {
             // The folder of each changed path and its ancestors (folder badges), and the
@@ -898,36 +1040,77 @@ impl App {
             }
             set.into_iter().collect()
         };
-        let p = (!rescan).then_some(paths);
+        let qualified: Vec<String> = paths.iter().map(|p| qualify(repo, p)).collect();
+        let p = if rescan {
+            // Everything of this repo.
+            self.repo_items(sid, repo)
+        } else {
+            qualified
+        };
         Task::batch([
             self.list_dirs(sid, dirs),
-            self.load_status(sid),
-            self.check_files(sid, p),
-            self.reload_diffs(sid, p),
+            if shown {
+                self.load_status(sid)
+            } else {
+                Task::none()
+            },
+            self.check_files(sid, Some(&p)),
+            self.reload_diffs(sid, Some(&p)),
         ])
     }
 
-    fn after_git_change(&mut self, sid: &str) -> Task<Message> {
-        let dirs: Vec<String> = self
-            .detail(sid)
-            .map(|d| d.loaded_dirs.iter().cloned().collect())
-            .unwrap_or_default();
+    /// Qualified paths of the open files / diffs of `repo`.
+    fn repo_items(&self, sid: &str, repo: &str) -> Vec<String> {
+        self.detail(sid)
+            .map(|d| {
+                d.items
+                    .iter()
+                    .filter(|(k, _)| k.repo() == Some(repo))
+                    .filter_map(|(k, _)| match k {
+                        ItemKey::File(p) | ItemKey::Diff { path: p, .. } => Some(p.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn after_git_change(&mut self, sid: &str, repo: &str) -> Task<Message> {
+        let Some(d) = self.detail(sid) else {
+            return Task::none();
+        };
+        let shown = d.repo == repo;
+        let dirs: Vec<String> = if shown {
+            d.loaded_dirs.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let p = self.repo_items(sid, repo);
         Task::batch([
             self.list_dirs(sid, dirs),
-            self.load_status(sid),
-            self.reload_diffs(sid, None),
+            if shown {
+                self.load_status(sid)
+            } else {
+                Task::none()
+            },
+            self.reload_diffs(sid, Some(&p)),
         ])
     }
 
-    /// `Notify::FsChanged` / `GitChanged` of a session.
-    pub fn on_fs_notify(&mut self, sid: &str, paths: Option<(Vec<String>, bool)>) -> Task<Message> {
-        if !self.detail(sid).is_some_and(|d| d.watched) {
+    /// `Notify::FsChanged` / `GitChanged` of a session's repo.
+    pub fn on_fs_notify(
+        &mut self,
+        sid: &str,
+        repo: &str,
+        paths: Option<(Vec<String>, bool)>,
+    ) -> Task<Message> {
+        if !self.detail(sid).is_some_and(|d| d.watched.contains(repo)) {
             return Task::none();
         }
-        crate::script::log(&format!("watch {sid}: {paths:?}"));
+        crate::script::log(&format!("watch {sid}/{repo}: {paths:?}"));
         match paths {
-            Some((p, rescan)) => self.after_fs_change(sid, &p, rescan),
-            None => self.after_git_change(sid),
+            Some((p, rescan)) => self.after_fs_change(sid, repo, &p, rescan),
+            None => self.after_git_change(sid, repo),
         }
     }
 
@@ -977,8 +1160,17 @@ impl App {
                     None => task,
                 }
             }
-            DetailMsg::Listed(dir, r) => {
+            DetailMsg::PickRepo(repo) => {
                 let d = self.detail_mut(sid).expect("session");
+                d.set_repo(repo.clone());
+                crate::script::log(&format!("detail {sid}: repo {repo}"));
+                self.sync_detail()
+            }
+            DetailMsg::Listed(repo, dir, r) => {
+                let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo {
+                    return Task::none();
+                }
                 if dir.is_empty() {
                     d.root_loading = false;
                 }
@@ -1009,9 +1201,10 @@ impl App {
                 let task = task.map(move |m| msg(&sid2, DetailMsg::Changes(m)));
                 match ev {
                     Some(ChangesEvent::OpenDiff { group, path }) => {
+                        let repo = self.detail(sid).expect("session").repo.clone();
                         let key = ItemKey::Diff {
                             staged: group == ChangeGroup::Staged,
-                            path,
+                            path: qualify(&repo, &path),
                         };
                         // Re-opening a diff shows the current state.
                         let reload = matches!(
@@ -1029,8 +1222,11 @@ impl App {
                     None => task,
                 }
             }
-            DetailMsg::Status(r) => {
+            DetailMsg::Status(repo, r) => {
                 let d = self.detail_mut(sid).expect("session");
+                if d.repo != repo {
+                    return Task::none();
+                }
                 match r {
                     Ok(s) => {
                         let mut unstaged: Vec<ChangeEntry> =
@@ -1128,7 +1324,7 @@ impl App {
                 }
                 Task::none()
             }
-            DetailMsg::FsDone(op, r) => self.on_fs_done(sid, op, r),
+            DetailMsg::FsDone(repo, op, r) => self.on_fs_done(sid, &repo, op, r),
             DetailMsg::SearchInput(q) => {
                 self.detail_mut(sid).expect("session").search.query = q;
                 Task::none()
@@ -1188,15 +1384,16 @@ impl App {
                 self.modal = None;
                 self.open_file_at(sid, &path, line, col)
             }
-            DetailMsg::Def(r) => match r {
+            DetailMsg::Def(repo, r) => match r {
                 Ok(DefResult::One(t)) => {
                     crate::script::log(&format!("definition -> {}:{}:{}", t.path, t.line, t.col));
-                    self.open_file_at(sid, &t.path, t.line, t.col)
+                    self.open_file_at(sid, &qualify(&repo, &t.path), t.line, t.col)
                 }
                 Ok(DefResult::Many { name, targets }) => {
                     crate::script::log(&format!("definition of {name}: {} targets", targets.len()));
                     self.modal = Some(Modal::DefPicker(crate::app::DefPickerForm {
                         session: sid.to_owned(),
+                        repo,
                         name,
                         targets,
                     }));
@@ -1214,13 +1411,13 @@ impl App {
                     Task::none()
                 }
             },
-            DetailMsg::Watched(r) => {
+            DetailMsg::Watched(repo, r) => {
                 if let Err(e) = r {
-                    crate::script::log(&format!("fs.watch {sid}: {e}"));
+                    crate::script::log(&format!("fs.watch {sid}/{repo}: {e}"));
                     if e.id != "disconnected" {
                         let text = i18n::proto_error(&e);
                         let d = self.detail_mut(sid).expect("session");
-                        d.watched = false;
+                        d.watched.remove(&repo);
                         d.toast(text);
                     }
                 }
@@ -1233,15 +1430,18 @@ impl App {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        let (s, sid_owned) = (sid.to_owned(), sid.to_owned());
+        let repo = self.detail(sid).map(|d| d.repo.clone()).unwrap_or_default();
+        let (s, r, sid_owned) = (sid.to_owned(), repo.clone(), sid.to_owned());
         let done = move |op: FsOp| {
-            let sid = sid_owned.clone();
-            move |r: Result<(), ProtoError>| msg(&sid, DetailMsg::FsDone(op.clone(), r))
+            let (sid, repo) = (sid_owned.clone(), repo.clone());
+            move |res: Result<(), ProtoError>| {
+                msg(&sid, DetailMsg::FsDone(repo.clone(), op.clone(), res))
+            }
         };
         match ev {
             TreeEvent::Expand(dir) => self.list_dirs(sid, vec![dir]),
             TreeEvent::Collapse(_) | TreeEvent::Select(_) => Task::none(),
-            TreeEvent::Open(path) => self.open_file_at(sid, &path, 0, 0),
+            TreeEvent::Open(path) => self.open_file_at(sid, &qualify(&r, &path), 0, 0),
             TreeEvent::CreateFile { dir, name } => {
                 let path = join(&dir, &name);
                 let op = FsOp::Created {
@@ -1249,7 +1449,7 @@ impl App {
                     is_dir: false,
                 };
                 Task::perform(
-                    async move { c.fs_create_file(&s, &path, "").await.map(drop) },
+                    async move { c.fs_create_file(&s, &r, &path, "").await.map(drop) },
                     done(op),
                 )
             }
@@ -1259,7 +1459,7 @@ impl App {
                     path: path.clone(),
                     is_dir: true,
                 };
-                Task::perform(async move { c.fs_create_dir(&s, &path).await }, done(op))
+                Task::perform(async move { c.fs_create_dir(&s, &r, &path).await }, done(op))
             }
             TreeEvent::Rename { path, new_name } => {
                 let to = join(parent(&path), &new_name);
@@ -1270,7 +1470,10 @@ impl App {
                     from: path.clone(),
                     to: to.clone(),
                 };
-                Task::perform(async move { c.fs_rename(&s, &path, &to).await }, done(op))
+                Task::perform(
+                    async move { c.fs_rename(&s, &r, &path, &to).await },
+                    done(op),
+                )
             }
             TreeEvent::Delete(path) => {
                 let is_dir = self
@@ -1278,6 +1481,7 @@ impl App {
                     .is_some_and(|d| d.loaded_dirs.contains(&path) || d.tree.is_expanded(&path));
                 self.modal = Some(Modal::DeleteEntry(crate::app::DeleteEntryForm {
                     session: sid.to_owned(),
+                    repo: r,
                     path,
                     is_dir,
                     error: None,
@@ -1298,16 +1502,22 @@ impl App {
         };
         f.busy = true;
         f.error = None;
-        let (s, path) = (f.session.clone(), f.path.clone());
-        let sid = s.clone();
+        let (s, repo, path) = (f.session.clone(), f.repo.clone(), f.path.clone());
+        let (sid, r) = (s.clone(), repo.clone());
         let op = FsOp::Deleted { path: path.clone() };
         Task::perform(
-            async move { c.fs_delete(&s, &path, true).await },
-            move |r| msg(&sid, DetailMsg::FsDone(op.clone(), r)),
+            async move { c.fs_delete(&s, &r, &path, true).await },
+            move |res| msg(&sid, DetailMsg::FsDone(repo.clone(), op.clone(), res)),
         )
     }
 
-    fn on_fs_done(&mut self, sid: &str, op: FsOp, r: Result<(), ProtoError>) -> Task<Message> {
+    fn on_fs_done(
+        &mut self,
+        sid: &str,
+        repo: &str,
+        op: FsOp,
+        r: Result<(), ProtoError>,
+    ) -> Task<Message> {
         crate::script::log(&format!("fs op {op:?}: {r:?}"));
         if let Err(e) = r {
             let text = i18n::proto_error(&e);
@@ -1328,18 +1538,19 @@ impl App {
                 let t = if *is_dir {
                     Task::none()
                 } else {
-                    self.open_file_at(sid, path, 0, 0)
+                    self.open_file_at(sid, &qualify(repo, path), 0, 0)
                 };
                 (vec![parent(path).to_owned()], t)
             }
             FsOp::Renamed { from, to } => {
                 // Open items of the old path follow the rename.
                 if let Some(d) = self.detail_mut(sid) {
+                    let (qf, qt) = (qualify(repo, from), qualify(repo, to));
                     for (k, i) in &mut d.items {
                         if let ItemKey::File(p) = k
-                            && under(p, from)
+                            && under(p, &qf)
                         {
-                            let np = format!("{to}{}", &p[from.len()..]);
+                            let np = format!("{qt}{}", &p[qf.len()..]);
                             // The view keeps its buffer (and unsaved edits); events are routed
                             // by the item's path, not the view's.
                             if let Item::File(f) = i {
@@ -1351,7 +1562,9 @@ impl App {
                             *k = ItemKey::File(np);
                         }
                     }
-                    d.tree.forget(from);
+                    if d.repo == repo {
+                        d.tree.forget(from);
+                    }
                     let prefix = format!("{from}/");
                     d.loaded_dirs
                         .retain(|x| x != from && !x.starts_with(&prefix));
@@ -1368,7 +1581,9 @@ impl App {
                     .map(|d| {
                         d.items
                             .iter()
-                            .filter(|(k, _)| matches!(k, ItemKey::File(p) if under(p, path)))
+                            .filter(|(k, _)| {
+                                matches!(k, ItemKey::File(p) if under(p, &qualify(repo, path)))
+                            })
                             .map(|(k, _)| k.clone())
                             .collect()
                     })
@@ -1377,7 +1592,9 @@ impl App {
                 for k in keys {
                     tasks.push(self.close_item(sid, &k));
                 }
-                if let Some(d) = self.detail_mut(sid) {
+                if let Some(d) = self.detail_mut(sid)
+                    && d.repo == repo
+                {
                     d.tree.forget(path);
                     let prefix = format!("{path}/");
                     d.loaded_dirs
@@ -1389,6 +1606,9 @@ impl App {
         };
         let mut dirs = dirs;
         dirs.dedup();
+        if self.detail(sid).is_none_or(|d| d.repo != repo) {
+            return then;
+        }
         Task::batch([self.list_dirs(sid, dirs), self.load_status(sid), then])
     }
 
@@ -1407,11 +1627,15 @@ impl App {
                     .and_then(|f| f.view.as_ref())
                     .map(|v| v.text());
                 crate::script::log(&format!("go to definition at {path}:{line}:{column}"));
-                let (s, p) = (sid.to_owned(), path.to_owned());
-                let sid = sid.to_owned();
+                let (repo, rel) = split_q(path);
+                let (s, r, p) = (sid.to_owned(), repo.to_owned(), rel.to_owned());
+                let (sid, repo) = (sid.to_owned(), repo.to_owned());
                 Task::perform(
-                    async move { c.def_lookup(&s, &p, line as u32, column as u32, text).await },
-                    move |r| msg(&sid, DetailMsg::Def(r)),
+                    async move {
+                        c.def_lookup(&s, &r, &p, line as u32, column as u32, text)
+                            .await
+                    },
+                    move |res| msg(&sid, DetailMsg::Def(repo.clone(), res)),
                 )
             }
         }
@@ -1445,10 +1669,14 @@ impl App {
             "save {path} ({} bytes, expected version {expected:?})",
             text.len()
         ));
-        let (s, p, t) = (sid.to_owned(), path.to_owned(), text.clone());
+        let (repo, rel) = split_q(path);
+        let (s, r, p, t) = (sid.to_owned(), repo.to_owned(), rel.to_owned(), text.clone());
         let (sid, path) = (sid.to_owned(), path.to_owned());
         Task::perform(
-            async move { c.fs_write(&s, &p, t, expected.as_deref(), encoding).await },
+            async move {
+                c.fs_write(&s, &r, &p, t, expected.as_deref(), encoding)
+                    .await
+            },
             move |r| msg(&sid, DetailMsg::Saved(path.clone(), text.clone(), r)),
         )
     }
@@ -1637,8 +1865,10 @@ impl App {
             s.error = Some(tr::err_disconnected());
             return Task::none();
         };
+        // Every repo of the session (results grouped by repo).
         let q = TextSearch {
             session: sid.to_owned(),
+            repo: None,
             query: s.query.clone(),
             regex: s.regex,
             case_sensitive: s.case_sensitive,
@@ -1659,14 +1889,22 @@ impl App {
         task
     }
 
-    /// Select `path` in the tree, expanding (and listing) its folders.
+    /// Select `path` ([`qualify`]d) in the tree, expanding (and listing) its folders; shows its
+    /// repo first.
     pub fn tree_reveal(&mut self, sid: &str, path: &str) -> Task<Message> {
+        let (repo, rel) = split_q(path);
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
-        let (task, events) = d.tree.reveal(path);
+        let mut switched = Task::none();
+        if !repo.is_empty() && d.repo != repo {
+            d.set_repo(repo.to_owned());
+            switched = self.sync_detail();
+        }
+        let d = self.detail_mut(sid).expect("session");
+        let (task, events) = d.tree.reveal(rel);
         let sid2 = sid.to_owned();
-        let mut tasks = vec![task.map(move |m| msg(&sid2, DetailMsg::Tree(m)))];
+        let mut tasks = vec![switched, task.map(move |m| msg(&sid2, DetailMsg::Tree(m)))];
         for ev in events {
             tasks.push(self.on_tree_event(sid, ev));
         }
@@ -1701,7 +1939,7 @@ impl App {
         f.seq += 1;
         let seq = f.seq;
         Task::perform(
-            async move { c.search_files(&sid, &q, QUICK_MAX).await },
+            async move { c.search_files(&sid, None, &q, QUICK_MAX).await },
             move |r| Message::QuickResults(seq, r),
         )
     }
@@ -1752,6 +1990,21 @@ mod tests {
     }
 
     #[test]
+    fn qualified_paths() {
+        let q = qualify("0123abcd", "src/a.rs");
+        assert_eq!(q, "0123abcd:src/a.rs");
+        assert_eq!(split_q(&q), ("0123abcd", "src/a.rs"));
+        assert_eq!(split_q("src/a.rs"), ("", "src/a.rs"));
+        assert_eq!(split_q("notahex1:x"), ("", "notahex1:x"));
+        assert_eq!((file_name(&q), parent(&q)), ("a.rs", "src"));
+        assert_eq!(ItemKey::File(q.clone()).repo(), Some("0123abcd"));
+        assert_eq!(
+            ItemKey::decode(&ItemKey::File(q.clone()).encode().unwrap()),
+            Some(ItemKey::File(q))
+        );
+    }
+
+    #[test]
     fn path_helpers() {
         assert_eq!(parent("a/b/c.txt"), "a/b");
         assert_eq!(parent("c.txt"), "");
@@ -1773,20 +2026,28 @@ mod tests {
             active: Some("diff:w:README.md".into()),
             side: "changes".into(),
         };
-        let d = Detail::new(Some(&ui));
+        let d = Detail::new(Some(&ui), Some("0123abcd"));
         assert_eq!(d.items.len(), 3);
         assert_eq!(d.side, SideTab::Changes);
         assert_eq!(
             d.active,
             ItemKey::Diff {
                 staged: false,
-                path: "README.md".into()
+                path: "0123abcd:README.md".into()
             }
         );
+        // Plain paths (saved before multi-repo sessions) belong to the first repo.
         assert_eq!(
             d.to_ui().open,
-            vec!["web", "file:src/main.ts", "diff:w:README.md"]
+            vec![
+                "web",
+                "file:0123abcd:src/main.ts",
+                "diff:w:0123abcd:README.md"
+            ]
         );
+        assert_eq!(d.repo, "0123abcd");
+        // Without a repo they cannot be opened.
+        assert_eq!(Detail::new(Some(&ui), None).items.len(), 1);
     }
 
     #[test]

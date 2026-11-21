@@ -25,14 +25,15 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - Test daemons: kill only your own, by PID (`<data>/ide-server.pid`), or end a script run with the
   app's stop-server action; never `taskkill /IM ide-server.exe` (it hits other data dirs' daemons).
 - App end-to-end test (in-app, no OS input): `IDE_APP_SCRIPT=1 IDE_DATA_DIR=<scratch>
-  IDE_APP_TEST_REPO=<scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
+  IDE_APP_TEST_REPO=<scratch repo> IDE_APP_TEST_REPO2=<second scratch repo> IDE_APP_EVIDENCE=<dir>` (+ `IDE_APP_SCRIPT_CLAUDE=1` to also open a
   Claude first-run screen, `IDE_APP_SCRIPT_PAUSE=1` to hold key screens for an external capture, or a comma-separated list of
   pause-name prefixes such as `ko_rail` to hold only those);
   results in `<evidence>/script.log` (`IDE_APP_SCRIPT_PAUSE_MS` lengthens the pauses;
   `IDE_APP_SCRIPT_ONLY=p2` runs only startup + the phase 2 file/changes/search checks + server
   stop). The phase 2 part creates its fixtures in the test repo on first use (TS import, Korean
-  file name, binary file) and adds the repo's parent as a browse root (`server.json` of the data
-  dir). Unset an inherited `IDE_APP_SCRIPT_CLAUDE` unless a Claude first-run check is wanted. The script
+  file name, binary file) and registers the repo on the repos page; a multi-repo pass (in Korean)
+  registers the second repo, makes both a configuration's default repos, creates a two-worktree
+  session, switches Changes/Explore between repos, detaches/attaches, and checks delete cleanup. Unset an inherited `IDE_APP_SCRIPT_CLAUDE` unless a Claude first-run check is wanted. The script
   runs against a real local daemon (started from the data dir, stopped at the end through the close
   dialog), in English with one Korean pass (`ko_*` screenshots). iced's `window::screenshot` (this
   iced rev) leaves `text_input` values blank; capture the real window to check those. Do not block

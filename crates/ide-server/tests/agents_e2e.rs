@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use common::*;
 use ide_client::{
-    Client, ClientOptions, ConfigurationInfo, McpServerInfo, NewSession, SessionKind,
+    Client, ClientOptions, ConfigurationInfo, McpServerInfo, NewSession, SessionKind, SessionMode,
 };
 use ide_core::{LaunchEnv, Paths};
 use ide_server::{Server, ServerConfig};
@@ -152,16 +152,32 @@ async fn claude_and_codex_specs_from_a_configuration() {
         .await
         .unwrap();
 
+    let repo_id = c
+        .register_repo(&repo.display().to_string())
+        .await
+        .unwrap()
+        .id;
+    let p = |x: PathBuf| x.display().to_string();
+    let files = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".git")
+            .collect();
+        v.sort();
+        v
+    };
     for provider in ["claude", "codex"] {
         let acct = c.create_account(provider, "Team").await.unwrap();
-        let s = c
+        // Original-repo mode: flags and scratch files only, nothing written into the repo.
+        let (s, _) = c
             .create_session(NewSession {
                 provider: provider.into(),
                 account: Some(acct.slug.clone()),
                 configuration: cfg.slug.clone(),
-                repo_path: repo.display().to_string(),
+                repos: Vec::new(),
+                original_repo: Some(repo_id.clone()),
                 title: String::new(),
-                base_ref: String::new(),
                 start: false,
                 cols: 80,
                 rows: 24,
@@ -179,8 +195,8 @@ async fn claude_and_codex_specs_from_a_configuration() {
                 .find(|(x, _)| x == k)
                 .map(|(_, v)| PathBuf::from(v))
         };
-        let p = |x: PathBuf| x.display().to_string();
-        assert_eq!(spec.cwd, PathBuf::from(&s.worktree_path));
+        assert_eq!(s.mode, SessionMode::OriginalRepo);
+        assert!(ide_core::same_path(&spec.cwd, &repo));
         if provider == "claude" {
             assert_eq!(s.title, "Claude Code · repo");
             assert_eq!(
@@ -196,7 +212,7 @@ async fn claude_and_codex_specs_from_a_configuration() {
                     p(scratch.join("instructions.md")),
                 ]
             );
-            assert_eq!(env("CLAUDE_CONFIG_DIR"), Some(acct_dir));
+            assert_eq!(env("CLAUDE_CONFIG_DIR"), Some(acct_dir.clone()));
             assert!(
                 scratch
                     .join("plugin")
@@ -221,15 +237,10 @@ async fn claude_and_codex_specs_from_a_configuration() {
                 "{}",
                 spec.args[4]
             );
-            assert_eq!(env("CODEX_HOME"), Some(acct_dir));
+            assert_eq!(env("CODEX_HOME"), Some(acct_dir.clone()));
         }
-        // Nothing generated inside the worktree (only the repo's own file).
-        let wt: Vec<_> = std::fs::read_dir(&s.worktree_path)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n != ".git")
-            .collect();
-        assert_eq!(wt, ["README.md"]);
+        // Nothing generated inside the repository (only its own file).
+        assert_eq!(files(&repo), ["README.md"]);
         assert_eq!(
             c.delete_account(provider, "team", false)
                 .await
@@ -238,10 +249,48 @@ async fn claude_and_codex_specs_from_a_configuration() {
             "account-in-use"
         );
         c.delete_session(&s.id, true).await.unwrap();
-        assert!(
-            !scratch.exists(),
-            "generated files removed with the session"
-        );
+        assert!(!scratch.exists(), "generated files removed with the session");
+        assert_eq!(files(&repo), ["README.md"], "the repo is kept");
+
+        // Workspace mode: skills + guidance materialized in the session folder (never in the
+        // worktree); the repo's git dir is passed with --add-dir.
+        let (s, _) = c
+            .create_session(NewSession {
+                provider: provider.into(),
+                account: Some(acct.slug.clone()),
+                configuration: cfg.slug.clone(),
+                repos: vec![repo_id.clone()],
+                original_repo: None,
+                title: String::new(),
+                start: false,
+                cols: 80,
+                rows: 24,
+            })
+            .await
+            .unwrap();
+        let root = PathBuf::from(&s.root);
+        let spec = ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap();
+        assert!(ide_core::same_path(&spec.cwd, &root));
+        let (skills_dir, guide) = if provider == "claude" {
+            (".claude", "CLAUDE.md")
+        } else {
+            (".agents", "AGENTS.md")
+        };
+        assert!(root.join(skills_dir).join("skills").join("review").join("SKILL.md").is_file());
+        let g = std::fs::read_to_string(root.join(guide)).unwrap();
+        assert!(g.contains("`repo/`") && g.contains(&format!("ide/{}", s.id)), "{g}");
+        assert!(!spec.args.contains(&"--plugin-dir".to_owned()));
+        let add: Vec<&String> = spec
+            .args
+            .windows(2)
+            .filter(|w| w[0] == "--add-dir")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(add.len(), 1, "{:?}", spec.args);
+        assert!(ide_core::same_path(Path::new(add[0]), &repo.join(".git")));
+        assert_eq!(files(Path::new(&s.repos[0].path)), ["README.md"]);
+        c.delete_session(&s.id, true).await.unwrap();
+        assert!(!root.exists());
         c.delete_account(provider, "team", true).await.unwrap();
     }
     // A login session for an account of a provider without a login command cannot exist;

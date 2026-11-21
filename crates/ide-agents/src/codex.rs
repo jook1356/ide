@@ -5,15 +5,20 @@
 //! | Account | `CODEX_HOME=<account dir>` |
 //! | Login | `codex login`; status `codex login status` (exit 0 = logged in) |
 //! | Daemon | `--no-daemon` (never adopt/leave the shared app-server daemon) |
-//! | Skills | fallback: listed in the developer instructions (Codex only discovers skills in the repo, `$HOME/.agents/skills` and `$CODEX_HOME/skills`; `skills.config` only enables/disables discovered ones) |
+//! | Skills | workspace: `<session folder>/.agents/skills/<name>/` (discovered from the cwd, also outside git: verified); original repo: fallback, listed in the developer instructions (nothing may be written into the repo; see docs/agent-providers.md for the rejected CODEX_HOME overlay) |
+//! | Guidance | workspace: `<session folder>/AGENTS.md` (verified: read from a non-git cwd) |
+//! | Outside dirs | `--add-dir` (writable: legacy worktrees, the repositories' git dirs) |
 //! | MCP | `-c mcp_servers.<name>={command="..", args=[..], env={..}}` |
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
 
 use ide_core::{McpServer, Result};
 
 use crate::detect::{PROBE_TIMEOUT, run_capture};
-use crate::fallback::toml_string;
-use crate::{AccountDir, AccountStatus, AgentProvider, Caps, HostEnv, LaunchPlan, Support};
+use crate::fallback::{add_dirs, copy_skills, toml_string};
+use crate::{
+    AccountDir, AccountStatus, AgentProvider, Caps, HostEnv, LaunchPlan, ModeSupport, RootPrepared,
+    SessionContext, Skill, Support,
+};
 
 /// Codex CLI.
 #[derive(Debug, Default, Clone, Copy)]
@@ -64,12 +69,17 @@ impl AgentProvider for Codex {
         Caps {
             accounts: true,
             login: true,
-            skills: Support::Fallback,
+            skills: Support::Native,
             mcp: Support::Native,
             instructions: Support::Native,
             hooks: Support::Unsupported,
             resume: false,
             session_name: false,
+            original_repo: ModeSupport {
+                skills: Support::Fallback,
+                mcp: Support::Native,
+                instructions: Support::Native,
+            },
         }
     }
 
@@ -100,6 +110,30 @@ impl AgentProvider for Codex {
         plan.arg("--no-daemon");
     }
 
+    fn prepare_root(
+        &self,
+        plan: &mut LaunchPlan,
+        ctx: &SessionContext,
+        _config: &ide_core::Configuration,
+        skills: &[Skill],
+    ) -> Result<RootPrepared> {
+        plan.clear_root_path(".agents/skills")?;
+        plan.clear_root_path("AGENTS.md")?;
+        if !skills.is_empty() {
+            copy_skills(skills, &plan.root_dir(".agents/skills")?)?;
+        }
+        if let Some(g) = &ctx.guidance {
+            plan.write_root_file("AGENTS.md", g.as_bytes())?;
+        }
+        Ok(RootPrepared {
+            skills: true,
+            guidance: ctx.guidance.is_some(),
+        })
+    }
+    fn apply_dirs(&self, plan: &mut LaunchPlan, dirs: &[std::path::PathBuf]) -> Result<()> {
+        add_dirs(plan, dirs);
+        Ok(())
+    }
     fn apply_mcp(&self, plan: &mut LaunchPlan, servers: &[McpServer]) -> Result<()> {
         for s in servers {
             plan.arg("-c").arg(mcp_override(s));

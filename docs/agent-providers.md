@@ -50,7 +50,12 @@ pub trait AgentProvider: Send + Sync {
     fn account_env(&self, acct: &AccountDir) -> Vec<(String, String)> { vec![] }
     fn login_args(&self) -> Option<Vec<String>> { None }          // see login_spec()
     fn account_status(&self, acct: &AccountDir, env: &HostEnv) -> AccountStatus { Unknown }
+    fn account_home(&self, acct: &AccountDir, ctx: &SessionContext) -> Result<PathBuf>; // default: acct.dir
+    fn after_exit(&self, ctx: &SessionContext, acct: Option<&AccountDir>) {}   // default: nothing
     // Session assembly (each step has a default)
+    fn prepare_root(&self, plan, ctx: &SessionContext, config: &Configuration, skills: &[Skill])
+        -> Result<RootPrepared>;                           // default: nothing (workspace only)
+    fn apply_dirs(&self, plan, dirs: &[PathBuf]) -> Result<()>;   // default: nothing
     fn begin(&self, plan: &mut LaunchPlan, acct: Option<&AccountDir>);   // account env, base args
     fn apply_skills(&self, plan, skills: &[Skill]) -> Result<()>;  // default: skills_as_instructions
     fn apply_mcp(&self, plan, servers: &[McpServer]) -> Result<()>;  // default: note "unsupported"
@@ -81,7 +86,11 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
    top per session, so one configuration works with any account.
 3. **Unsupported capability -> documented fallback** (skills become instructions) or a launch note
    + the UI shows the support level; never silently dropped.
-4. **Provider-specific details stay inside the provider.** No `match provider` outside `ide-agents`.
+4. **Provider-specific details stay inside the provider.** No `match provider` outside `ide-agents`;
+   mode-dependent behaviour goes through `SessionContext` + the trait (`prepare_root`, `apply_dirs`,
+   `account_home`, `after_exit`, `Caps::mode`), never through server branches.
+5. **Workspace sessions** may get generated files in the session folder (outside every repo);
+   **original-repo sessions** never get a file in their cwd.
 
 ## Provider mapping
 | Common | Claude Code (v 2.1.329) | Codex (v 0.160.1) | Shell | Declarative (TOML) |
@@ -113,6 +122,72 @@ Notes:
   shim would run through `cmd.exe /d /s /c`, where `&|<>^` inside the instructions text could be
   interpreted by cmd (a; not hit with the current installs).
 
+### Session context, modes and the new trait methods
+Every assembly step gets a `SessionContext` (in `SessionInput::ctx` / `LaunchPlan`):
+```rust
+pub enum SessionMode { Workspace, OriginalRepo }          // ide_core::SessionMode
+pub struct RepoInfo { name: String, path: PathBuf /* worktree or repo */, git_dir: Option<PathBuf> }
+pub struct SessionContext {
+    mode: SessionMode,
+    root: PathBuf,        // workspace: <data>/workspaces/<id> (the cwd, outside every repo);
+                          // original repo: the repository itself
+    repos: Vec<RepoInfo>,
+    scratch: PathBuf,     // <data>/sessions/<id>/agent (generated files, never in a repo)
+    guidance: Option<String>, // session guidance text (Hermes Desk's HERMES.md role)
+}
+```
+- `prepare_root` materializes project-level files into `ctx.root`, where the CLI discovers them
+  from its cwd. `assemble()` only calls it for `Workspace`; writes go through
+  `LaunchPlan::write_root_file` / `root_dir`, which return an error in `OriginalRepo` mode, so a
+  provider cannot write into a repository even by mistake. It returns `RootPrepared { skills,
+  guidance }`: what it covered (the skills / guidance are then not passed again by the apply steps).
+  The files are regenerated on every start (a configuration change applies on the next start,
+  attach/detach regenerates the guidance right away); the previous generated `skills` folder and
+  guidance file are removed first (`LaunchPlan::clear_root_path`).
+- `apply_dirs` gets `ctx.outside_dirs()`: worktrees outside the root (migrated legacy sessions)
+  and every repo's shared git dir (commits on the worktree branch write there). Claude and Codex
+  pass them with `--add-dir` (both listed in `analysis/*-help.txt`).
+- `account_home` returns the config home for the session (default: the account dir). The server
+  never builds account env itself; `begin()` gets the account with the returned dir.
+- `after_exit` runs when a session's process exited or was stopped (server: `Service::after_exit`).
+  Default no-op; no built-in provider needs it now (see "Codex overlay" below).
+- `Caps` reports per mode: the top-level `skills`/`mcp`/`instructions` are for workspace
+  sessions, `original_repo: ModeSupport { skills, mcp, instructions }` for original-repo
+  sessions; `Caps::mode(m)` picks one. Sent to the UI as `ProviderCaps { .., original_repo:
+  ModeCaps }` and shown on the configurations page (two support lines per provider).
+
+| | Claude workspace | Claude original repo | Codex workspace | Codex original repo |
+|---|---|---|---|---|
+| Skills | native: `<root>/.claude/skills/<folder>/` (copied) | native: plugin via `--plugin-dir` (scratch) | native: `<root>/.agents/skills/<folder>/` (copied) | fallback: listed in `developer_instructions` |
+| MCP | native: `--mcp-config <scratch>/mcp.json` | same | native: `-c mcp_servers.*` | same |
+| Instructions + session guidance | `<root>/CLAUDE.md` (guidance) + `--append-system-prompt-file` (configuration text) | `--append-system-prompt-file` (both) | `<root>/AGENTS.md` (guidance) + `-c developer_instructions` | `-c developer_instructions` (both) |
+
+Verified facts behind this table (scratch homes under `ti-probe/`, no login, no prompts):
+- (v) Codex 0.160.1, cwd = a non-git folder: `codex debug prompt-input hello` lists skills from
+  `<cwd>/.agents/skills/` and `<cwd>/.codex/skills/` and includes `<cwd>/AGENTS.md`.
+- (v) Codex ignores a project `<cwd>/.codex/config.toml` there (its `developer_instructions` did
+  not appear, `codex mcp list --json` printed `[]`), so MCP and instructions stay on `-c`.
+- (v) Claude 2.1.329: a project `<cwd>/.mcp.json` shows as `Pending approval (run claude to
+  approve)` in `claude mcp list` / `claude mcp get` -> it would stop at an approval prompt, so MCP
+  stays on `--mcp-config` (no prompt).
+- (d, not verified) Claude loads `<cwd>/.claude/skills/` and `<cwd>/CLAUDE.md` from a non-git cwd:
+  documented behaviour; checking needs a logged-in session (`/skills`, `/memory`).
+- Instructions stay on `--append-system-prompt-file` / `developer_instructions` in both modes
+  (no prompt, no file in a repo); only the generated guidance is a root file in workspace mode.
+
+#### Codex overlay (evaluated, not used)
+Native skills for Codex original-repo sessions would need a per-session `CODEX_HOME` overlay
+(`$CODEX_HOME/skills`). Probe: `auth.json` hard-linked into an overlay home (Python `os.link`;
+`cmd /c mklink /H` failed here) kept the same inode and link count 2 after `codex login
+--with-api-key` through either home (v), so in-place auth writes are shared. Not adopted because
+(a) OAuth refreshes were not observable without a real login (an atomic rename would silently
+split the link and the next session would use a stale token), (b) the overlay must also mirror
+`config.toml`, history, sessions and logs of the account, (c) a symlink/junction alternative
+needs admin or developer mode on Windows. Codex original-repo skills therefore use the
+documented fallback (`Caps.original_repo.skills = Fallback`) and `account_home` / `after_exit`
+keep their defaults. The trait methods stay so an overlay can be added inside `codex.rs` without
+touching the server.
+
 ### Declarative providers
 `<data>/providers/*.toml`, sample [`docs/providers/example.toml`](providers/example.toml):
 `id`, `name`, `program`, `args`, `version_args`, `min_version`, `glyph`, `account_env`,
@@ -136,15 +211,15 @@ Runs when the server opens a user's data (`ide_core::migrate_profiles`), before 
   account uses the CLI's default login);
 - the app's `ui.json` `profile` key is read as the sidebar's configuration (`#[serde(alias)]`).
 
-## Protocol (PROTO_VERSION 2)
+## Protocol (PROTO_VERSION 3, see repos-and-workspaces.md for repos/sessions)
 | Method | Result |
 |---|---|
-| `provider.list { refresh }` | `Providers(Vec<ProviderInfo { id, name, glyph, color, detection { path, version, min_version, usable, error }, caps { accounts, login, skills, mcp, instructions, hooks: Support, resume, session_name } }>)` (detection cached per server until `refresh`) |
+| `provider.list { refresh }` | `Providers(Vec<ProviderInfo { id, name, glyph, color, detection { path, version, min_version, usable, error }, caps { accounts, login, skills, mcp, instructions, hooks: Support, resume, session_name, original_repo { skills, mcp, instructions } } }>)` (detection cached per server until `refresh`) |
 | `account.list` / `account.create { provider, name }` / `account.rename { provider, slug, name }` / `account.delete { provider, slug, remove_files }` | `Accounts` / `Account` / `Account` / `Unit` (`account-in-use` while sessions use it) |
 | `account.status { provider, slug }` | `AccountState(LoggedIn / LoggedOut / Unknown)` (runs the CLI's status command) |
 | `account.login { provider, slug, cols, rows }` | `Session`: a started *login session* (`kind: Login`, cwd `sessions/<id>/cwd`, no repo/branch) running the login command; the app shows it like a session tab; delete it when done |
 | `configuration.list` / `.create { name }` / `.update(ConfigurationInfo)` / `.delete { slug }` | `Configurations` / `Configuration` / `Configuration` / `Unit` (`configuration-in-use`, `last-configuration`) |
-| `session.create { provider, account?, configuration, repo_path, ... }` | `Session` (`SessionInfo` has `kind`, `provider`, `account`, `configuration` instead of `profile`/`agent`) |
+| `session.create { provider, account?, configuration, repos, original_repo?, ... }` | `SessionCreated { session, failures }` (`SessionInfo` has `kind`, `provider`, `account`, `configuration`, `mode`, `root`, `repos`) |
 
 Notifications `AccountsChanged`, `ConfigurationsChanged` replace `ProfilesChanged`; Welcome
 capabilities `providers`, `accounts`, `configurations` replace `profiles`.

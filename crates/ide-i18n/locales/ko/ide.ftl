@@ -68,15 +68,9 @@ no-session = 세션 없음
 
 ## New-session dialog
 
-repo-folder-label = 저장소 폴더
-repo-placeholder = C:/src/my-repo
-browse = 찾아보기…
 agent-label = 에이전트
 title-label = 제목 (선택)
 title-placeholder = 비워 두면 '에이전트 · 저장소'
-base-ref-label = 기준 ref (선택)
-base-ref-placeholder = HEAD
-worktree-note = 세션마다 ide/<session-id> 브랜치로 새 worktree를 만들어요.
 cancel = 취소
 create = 만들기
 creating = 만드는 중…
@@ -139,7 +133,7 @@ close-remember = 다시 묻지 않기 (설정에서 바꿀 수 있어요)
 
 err-web-view = 웹 뷰 오류: { $detail }
 err-rename-failed = 이름을 바꾸지 못했어요: { $detail }
-err-choose-repo = 저장소 폴더를 선택하세요.
+err-choose-repo = 레포를 선택하세요.
 err-server-missing = 서버 프로그램을 찾지 못했어요: { $detail }
 
 ## Errors from the server and the connection (ide_proto::ProtoError ids)
@@ -264,12 +258,7 @@ dont-save = 저장 안 함
 browse-up = 상위 폴더
 browse-empty = 하위 폴더가 없어요.
 browse-git = Git 저장소
-browse-roots-label = 저장소 폴더
-browse-roots-note = 새 세션 대화상자에서 서버의 이 폴더들을 둘러볼 수 있어요. 홈 폴더는 항상 포함돼요.
-browse-root-placeholder = 서버의 절대 폴더 경로
-browse-home = 홈
-pick-root-open = 서버에서 폴더 선택
-pick-root-title = 저장소 폴더 추가
+pick-root-title = 레포 추가
 pick-root-note = 서버에 있는 폴더예요. 폴더를 두 번 클릭하거나 Enter를 누르면 열려요.
 pick-start = 내 컴퓨터
 pick-select = 이 폴더 선택
@@ -331,4 +320,49 @@ mcp-name-placeholder = 이름
 mcp-command-placeholder = 명령
 mcp-args-placeholder = 인수
 mcp-env-placeholder = KEY=값
-provider-support = { $provider }: 스킬 { $skills } · MCP { $mcp } · 지침 { $instructions }
+
+# 레포 (Hermes Desk의 레포 등록, 레포 페이지, 세션 워크스페이스)
+group-login = 로그인 터미널
+no-repos = 레포 없음
+repos-title = 레포 관리
+repos-none = 등록된 레포가 없습니다.
+repos-list-label = 레포
+repo-add = 레포 추가
+repo-path-placeholder = 서버의 레포 경로 (Enter로 추가)
+repos-pick-note = 왼쪽 레포 목록에서 레포를 추가하거나 선택하세요.
+repos-note = 세션마다 자기 폴더에 레포별 워크트리를 만들어요. 등록된 git 레포만 쓸 수 있어요.
+repo-no-sessions = 이 레포를 쓰는 세션이 없어요.
+repo-unregister = 등록 해제
+repo-unregister-keep-files = 등록 해제 (파일 유지)
+repo-base-label = 기준 브랜치
+repo-base-unknown = (알 수 없음)
+repo-base-note = 새 워크트리는 이 브랜치에서 갈라져요: main → master → origin 기본 브랜치 → 현재 브랜치 순서로 선택합니다.
+repo-sessions-label = 세션 { $count }개
+provider-support-modes = { $provider }: 워크스페이스 { $workspace } · 원본 레포 { $original } (스킬, MCP, 지침)
+configuration-default-repos = 기본 레포
+configuration-default-repos-note = 새 세션을 만들 때 미리 선택되는 레포입니다. 세션마다 바꿀 수 있습니다.
+workspace-label = 워크스페이스
+use-worktrees = 워크트리 사용
+use-worktrees-note = 세션마다 레포의 워크트리(브랜치 ide/<세션 id>)를 만들어 원본과 분리해서 작업합니다.
+worktree-repos-label = 워크트리를 만들 레포
+no-repos-empty-workspace = 등록된 레포가 없습니다. 레포 없이 빈 워크스페이스로 시작합니다.
+empty-workspace-note = 레포를 고르지 않으면 빈 워크스페이스로 시작해요.
+worktree-branch-note = 레포마다 기준 브랜치에서 새 브랜치를 만들어요.
+worktree-repos-note = 고른 레포마다 워크트리를 만듭니다. 처음 선택은 구성의 기본 레포이고, 레포는 나중에 세션의 ⚙에서 추가할 수 있습니다.
+original-repo-warning = 원본 레포에서 바로 작업해요. 에이전트가 고른 레포의 원본 폴더와 지금 체크아웃된 브랜치에서 그대로 파일을 고치고 커밋합니다. 같은 레포를 쓰는 다른 세션이나 직접 하던 작업과 변경이 섞일 수 있어요. 커밋하지 않은 변경이 있으면 먼저 정리해 두세요.
+original-repo-label = 작업할 레포
+no-repos-register-first = 등록된 레포가 없습니다. 먼저 레포를 등록하세요.
+session-repos-title = “{ $title }” 레포
+session-repos-label = 레포 · 브랜치 ← 기준 브랜치
+session-repo-detach = 이 워크트리를 세션에서 제거 (브랜치는 유지)
+session-repos-add-label = 레포 추가
+session-repos-note = 추가한 레포는 저장하면 세션 폴더에 워크트리가 생기고, 이미 실행 중인 에이전트는 다시 시작할 때 작업 규칙에 반영돼요.
+session-repos-no-workspace = 이 세션은 워크스페이스가 없어 레포를 추가할 수 없습니다.
+session-repos-open = 세션 레포
+no-repos-in-session = 이 세션에는 레포가 없어요. ⚙에서 추가하세요.
+err-some-worktrees-failed = 일부 레포의 워크트리를 만들지 못했습니다:
+    { $detail }
+err-repo-not-found = 레포 { $id }가 등록되어 있지 않아요.
+err-repo-in-use = “{ $name }” 레포를 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
+err-repo-not-attached = 이 세션에는 “{ $name }” 레포가 없어요.
+err-not-a-workspace-session = { $id } 세션은 원본 레포에서 바로 작업해서 워크스페이스가 없어요.

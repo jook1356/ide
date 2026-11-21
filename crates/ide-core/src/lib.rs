@@ -7,10 +7,11 @@
 //! let paths = Paths::from_env()?;
 //! migrate_profiles(&paths)?; // legacy profiles -> accounts + configurations
 //! let configs = ConfigurationStore::open(&paths)?;
+//! let mut repos = RepoStore::open(&paths)?;
 //! let mut sessions = SessionStore::open(&paths)?;
-//!
+//! migrate_workspaces(&paths, &mut repos, &mut sessions, &[])?;
+//! let repo = repos.register("C:/src/my-repo".as_ref())?;
 //! let req = NewSession {
-//!     repo_path: "C:/src/my-repo".into(),
 //!     target: SessionTarget {
 //!         provider: "shell".into(),
 //!         account: None,
@@ -18,14 +19,16 @@
 //!     },
 //!     title: String::new(),
 //!     provider_name: "Shell".into(),
-//!     base_ref: String::new(),
+//!     repos: vec![repo.id.clone()],
+//!     original_repo: None,
 //! };
-//! // The precheck resolves the agent program before the worktree is created.
-//! let session = create_session(&paths, &req, |_planned| Ok(()))?;
+//! // The precheck resolves the agent program before anything is created.
+//! let (session, _failures) = create_session(&paths, &repos, &req, |_planned| Ok(()))?;
 //! sessions.upsert(session.clone())?;
 //! // `ide-agents` turns (session, account, configuration) into a `LaunchSpec`.
 //! // ... later: stop the process, then
-//! delete_session(&paths, &mut sessions, &session.id, true)?;
+//! remove_session_files(&paths, &session, &repos, true)?;
+//! sessions.remove(&session.id)?;
 //! # Ok(()) }
 //! ```
 
@@ -36,9 +39,11 @@ pub mod launch;
 pub mod migrate;
 pub mod ops;
 pub mod paths;
+pub mod registry;
 pub mod repo;
 pub mod session;
 pub mod slug;
+pub mod workspace;
 pub mod worktree;
 
 pub use account::{Account, AccountStore};
@@ -52,12 +57,17 @@ pub use launch::{
     wrap_batch_file,
 };
 pub use migrate::{MigrationReport, migrate_profiles};
-pub use ops::{
-    NewSession, create_login_session, create_session, delete_session, remove_session_dir,
-    remove_session_files,
+pub use ops::{create_login_session, remove_session_dir};
+pub use registry::{BaseBranch, RegisteredRepo, RepoId, RepoStore, detect_base};
+pub use workspace::{
+    NewSession, RepoFailure, WorkspaceMigration, attach_repo, create_session, detach_repo,
+    is_managed_path, migrate_workspaces, remove_session_files, session_guidance,
 };
 pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};
-pub use session::{Session, SessionId, SessionKind, SessionStatus, SessionStore, SessionTarget};
+pub use session::{
+    Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore, SessionTarget,
+    SessionWorktree,
+};
 pub use slug::{slugify, validate_slug};
 pub use worktree::{BRANCH_PREFIX, Worktree, WorktreeInfo, worktree_exists};

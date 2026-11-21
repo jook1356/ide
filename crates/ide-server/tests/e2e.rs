@@ -110,21 +110,25 @@ where
     assert_eq!(c1.accounts().await.unwrap().len(), 1);
 
     // Session: created and started with no client attached.
-    // Session: created and started with no client attached.
+    let repo_id = c1
+        .register_repo(&repo.display().to_string())
+        .await
+        .unwrap()
+        .id;
     let req = NewSession {
         provider: "shell".into(),
         account: None,
         configuration: "default".into(),
-        repo_path: repo.display().to_string(),
+        repos: vec![repo_id.clone()],
+        original_repo: None,
         title: String::new(),
-        base_ref: String::new(),
         start: true,
         cols: 100,
         rows: 30,
     };
     let bad = c1
         .create_session(NewSession {
-            repo_path: repo.join("nope").display().to_string(),
+            repos: vec!["0badc0de".into()],
             ..req.clone()
         })
         .await
@@ -154,8 +158,8 @@ where
     ] {
         assert_eq!(c1.create_session(bad_req).await.unwrap_err().id, id);
     }
-    assert!(bad.id == "not-a-git-repo" || bad.id == "io", "{bad}");
-    let s = c1
+    assert_eq!(bad.id, "repo-not-found", "{bad}");
+    let (s, _) = c1
         .create_session(NewSession {
             configuration: "work-stuff".into(),
             ..req
@@ -176,8 +180,12 @@ where
         "configuration-in-use"
     );
     c1.delete_account("claude", "work", true).await.unwrap();
-    assert!(Path::new(&s.worktree_path).is_dir());
-    assert!(s.branch.starts_with("ide/"));
+    assert!(Path::new(&s.repos[0].path).is_dir());
+    assert!(s.repos[0].branch.starts_with("ide/"));
+    assert_eq!(
+        c1.unregister_repo(&repo_id).await.unwrap_err().id,
+        "repo-in-use"
+    );
     let renamed = c1.rename_session(&s.id, "renamed").await.unwrap();
     assert_eq!(renamed.title, "renamed");
     assert_eq!(
@@ -286,7 +294,8 @@ async fn delete_and_check(c: &Client, s: &SessionInfo) {
     let stopped = c.stop_session(&s.id).await.unwrap();
     assert_eq!(stopped.state, SessionState::Stopped);
     c.delete_session(&s.id, true).await.unwrap();
-    assert!(!Path::new(&s.worktree_path).exists());
+    assert!(!Path::new(&s.repos[0].path).exists());
+    assert!(!Path::new(&s.root).exists());
     assert!(c.sessions().await.unwrap().is_empty());
 }
 
@@ -305,7 +314,8 @@ async fn memory_transport_end_to_end() {
         col2,
         session: s,
     } = sc;
-    let wt = PathBuf::from(&s.worktree_path);
+    // The shell runs in the session folder (the worktree is a subfolder).
+    let wt = PathBuf::from(&s.root);
 
     if let Some(py) = python() {
         // A program asks for the cursor position while no client is attached.
@@ -473,15 +483,15 @@ async fn local_child_daemon_end_to_end() {
     assert_eq!(welcome.user, ide_server::current_user());
     delete_and_check(&sc.c1, &sc.session).await;
     // `server.shutdown` stops the daemon (and its sessions); the pid file goes away.
-    let extra = sc
+    let (extra, _) = sc
         .c1
         .create_session(NewSession {
             provider: "shell".into(),
             account: None,
             configuration: "default".into(),
-            repo_path: repo.display().to_string(),
+            repos: Vec::new(),
+            original_repo: Some(sc.session.repos[0].repo.clone()),
             title: "shutdown".into(),
-            base_ref: String::new(),
             start: true,
             cols: 80,
             rows: 24,
@@ -590,7 +600,7 @@ async fn handshake_errors() {
                     "sessions",
                     "term",
                     "files",
-                    "browse",
+                    "repos",
                     "browse-pick",
                     "search",
                     "git",

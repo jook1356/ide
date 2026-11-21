@@ -53,12 +53,32 @@ pub struct Configuration {
     /// Extra instructions appended to the agent's system/developer prompt.
     #[serde(default)]
     pub instructions: String,
+    /// Repositories pre-checked in the new-session dialog (Desk: the agent's "기본 레포").
+    /// `None` = every registered repository (Desk's default when nothing was saved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_repos: Option<Vec<crate::registry::RepoId>>,
     /// Creation time, Unix seconds.
     #[serde(default)]
     pub created_at: u64,
 }
 
 impl Configuration {
+    /// Desk's `defaultReposFor`: the saved defaults that are still registered (in `registered`
+    /// order), or every registered repository when none were saved.
+    pub fn default_repos_for(
+        &self,
+        registered: &[crate::registry::RepoId],
+    ) -> Vec<crate::registry::RepoId> {
+        match &self.default_repos {
+            None => registered.to_vec(),
+            Some(saved) => registered
+                .iter()
+                .filter(|r| saved.contains(r))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// An empty configuration.
     pub fn empty(slug: &str, name: &str) -> Self {
         Configuration {
@@ -67,6 +87,7 @@ impl Configuration {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             instructions: String::new(),
+            default_repos: None,
             created_at: now_unix(),
         }
     }
@@ -285,6 +306,20 @@ mod tests {
             store.update(missing),
             Err(Error::ConfigurationNotFound(_))
         ));
+
+        // Default repos: none saved = all; saved = the still registered ones.
+        let (r1, r2) = (crate::registry::RepoId::new(), crate::registry::RepoId::new());
+        let all = vec![r1.clone(), r2.clone()];
+        assert_eq!(saved.default_repos_for(&all), all);
+        let mut with = saved.clone();
+        with.default_repos = Some(vec![r2.clone(), crate::registry::RepoId::new()]);
+        store.update(with.clone()).unwrap();
+        assert_eq!(
+            store.get(&with.slug).unwrap().default_repos_for(&all),
+            vec![r2.clone()]
+        );
+        with.default_repos = Some(Vec::new());
+        assert!(with.default_repos_for(&all).is_empty());
 
         let reopened = ConfigurationStore::open(&paths).unwrap();
         assert_eq!(reopened.list(), store.list());

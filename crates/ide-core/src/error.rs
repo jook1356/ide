@@ -218,6 +218,30 @@ pub enum Error {
         /// The program name that was searched for.
         program: String,
     },
+
+    /// No registered repository with this id exists.
+    #[error("repository {0:?} is not registered")]
+    RepoNotFound(String),
+
+    /// The repository is attached to sessions and cannot be unregistered.
+    #[error("repository {name:?} is used by {count} session(s)")]
+    RepoInUse {
+        /// Repository name.
+        name: String,
+        /// Sessions using it.
+        count: usize,
+    },
+
+    /// The session has no worktree of this repository.
+    #[error("repository {name:?} is not attached to the session")]
+    RepoNotAttached {
+        /// Repository name (or id).
+        name: String,
+    },
+
+    /// The operation needs a session workspace (not an original-repo or login session).
+    #[error("session {0} has no workspace")]
+    NotAWorkspaceSession(String),
 }
 
 /// A language-agnostic description of an [`Error`] for UIs: one variant per message, holding
@@ -292,6 +316,19 @@ pub enum ErrorMessage<'a> {
     ProgramNotFound {
         program: &'a str,
     },
+    RepoNotFound {
+        id: &'a str,
+    },
+    RepoInUse {
+        name: &'a str,
+        count: usize,
+    },
+    RepoNotAttached {
+        name: &'a str,
+    },
+    NotAWorkspaceSession {
+        id: &'a str,
+    },
 }
 
 impl ErrorMessage<'_> {
@@ -317,6 +354,10 @@ impl ErrorMessage<'_> {
             ErrorMessage::Git { .. } => "git",
             ErrorMessage::WorktreeExists { .. } => "worktree-exists",
             ErrorMessage::ProgramNotFound { .. } => "program-not-found",
+            ErrorMessage::RepoNotFound { .. } => "repo-not-found",
+            ErrorMessage::RepoInUse { .. } => "repo-in-use",
+            ErrorMessage::RepoNotAttached { .. } => "repo-not-attached",
+            ErrorMessage::NotAWorkspaceSession { .. } => "not-a-workspace-session",
         }
     }
 }
@@ -388,6 +429,13 @@ impl Error {
             },
             Error::WorktreeExists(path) => ErrorMessage::WorktreeExists { path },
             Error::ProgramNotFound { program } => ErrorMessage::ProgramNotFound { program },
+            Error::RepoNotFound(id) => ErrorMessage::RepoNotFound { id },
+            Error::RepoInUse { name, count } => ErrorMessage::RepoInUse {
+                name,
+                count: *count,
+            },
+            Error::RepoNotAttached { name } => ErrorMessage::RepoNotAttached { name },
+            Error::NotAWorkspaceSession(id) => ErrorMessage::NotAWorkspaceSession { id },
         }
     }
 }

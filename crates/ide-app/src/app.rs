@@ -13,10 +13,10 @@ use std::time::Duration;
 use iced::widget::{operation, text_editor};
 use iced::{Event, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 use ide_client::{
-    AccountInfo, AccountState, BrowseConfig, BrowseListing, Client, ClientEvent, ClientOptions,
+    AccountInfo, AccountState, BrowseListing, Client, ClientEvent, ClientOptions,
     ConfigurationInfo, DefTarget, FileMatch, LocalChild, McpServerInfo, NewSession, Notify,
-    ProtoError, ProviderInfo, SessionInfo, SessionKind, SessionState, Ssh, Switchable, Transport,
-    Welcome,
+    ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, SessionInfo, SessionKind, SessionState,
+    Ssh, Switchable, Transport, Welcome,
 };
 use ide_i18n::LanguagePref;
 use ide_term::{TermConfig, TermModel, ViewEvent};
@@ -43,11 +43,11 @@ const INITIAL_GRID: (u16, u16) = (120, 30);
 
 pub const TERM_ID: &str = "ide-term";
 pub const RENAME_ID: &str = "ide-rename";
-pub const NEW_REPO_ID: &str = "ide-new-repo";
+pub const NEW_TITLE_ID: &str = "ide-new-title";
 pub const URL_ID: &str = "ide-url";
 pub const CONFIG_NAME_ID: &str = "ide-config-name";
 pub const SSH_HOST_ID: &str = "ide-ssh-host";
-pub const ROOT_INPUT_ID: &str = "ide-root-input";
+pub const REPO_INPUT_ID: &str = "ide-repo-input";
 /// The folder list of the repos page's folder picker.
 pub const PICK_LIST_ID: &str = "ide-pick-list";
 
@@ -126,7 +126,7 @@ pub struct Live {
 impl Live {
     fn new(info: SessionInfo, url: String, config: &TermConfig, detail: Option<&DetailUi>) -> Self {
         Self {
-            detail: Detail::new(detail),
+            detail: Detail::new(detail, info.repos.first().map(|r| r.repo.as_str())),
             state: info.state.into(),
             info,
             term: TermModel::new(INITIAL_GRID.0, INITIAL_GRID.1, config),
@@ -147,8 +147,8 @@ impl Live {
     }
 }
 
+/// The new-session dialog (Hermes Desk's `NewSessionModal`).
 pub struct NewForm {
-    pub repo: String,
     /// Provider id.
     pub provider: String,
     /// Account slug (`None` = the CLI's default login).
@@ -156,28 +156,19 @@ pub struct NewForm {
     /// Configuration slug.
     pub configuration: String,
     pub title: String,
-    pub base_ref: String,
+    /// Desk's "워크트리 사용": a session folder with one worktree per checked repo; off = work
+    /// in one registered repo's own checkout.
+    pub use_worktrees: bool,
+    /// Checked repos (ids; pre-checked: the configuration's default repos).
+    pub repos: Vec<String>,
+    /// The repo of an original-repo session.
+    pub original_repo: Option<String>,
     pub error: Option<String>,
     pub busy: bool,
-    /// Server-side folder browser (open while `Some`).
-    pub browser: Option<Box<FolderBrowser>>,
-}
-
-/// Folders on the server (works over SSH too): the browse roots and one listed folder.
-#[derive(Default)]
-pub struct FolderBrowser {
-    pub roots: Vec<String>,
-    pub listing: Option<BrowseListing>,
-    pub loading: bool,
-    pub error: Option<String>,
-    /// Incremented per request; older answers are dropped.
-    pub seq: u64,
-    /// The folder last asked for.
-    pub dir: String,
 }
 
 /// The repos page's folder picker: any folder the server's OS user can read
-/// (`browse.pick_list`), to add as a browse root. Server-side, so it works over SSH too.
+/// (`browse.pick_list`), to register as a repository. Server-side, so it works over SSH too.
 #[derive(Default)]
 pub struct PickRootForm {
     pub listing: Option<BrowseListing>,
@@ -192,9 +183,8 @@ pub struct PickRootForm {
 }
 
 impl PickRootForm {
-    /// The folder "Select this folder" adds: the highlighted entry, else the listed folder.
-    /// `None` for the start list without a highlight and for filesystem roots (refused as
-    /// browse roots).
+    /// The folder "Select this folder" registers: the highlighted entry, else the listed
+    /// folder. `None` for the start list without a highlight and for filesystem roots.
     pub fn target(&self) -> Option<&str> {
         let l = self.listing.as_ref()?;
         let p = match self.selected.and_then(|i| l.entries.get(i)) {
@@ -206,7 +196,7 @@ impl PickRootForm {
     }
 }
 
-/// `C:\`, `C:`, `/`, `\\server\share` (a whole drive or share; refused as a browse root).
+/// `C:\`, `C:`, `/`, `\\server\share` (a whole drive or share; never a repository).
 pub fn is_fs_root(p: &str) -> bool {
     let t = p.trim_end_matches(['\\', '/']);
     if t.is_empty() {
@@ -221,6 +211,15 @@ pub fn is_fs_root(p: &str) -> bool {
         return rest.split(['\\', '/']).filter(|s| !s.is_empty()).count() <= 2;
     }
     false
+}
+
+/// Desk's `defaultReposFor`: `saved` ids still in `registered` (registry order), or every
+/// registered repo when nothing was saved.
+pub fn default_repos_for(saved: Option<&Vec<String>>, registered: &[String]) -> Vec<String> {
+    match saved {
+        None => registered.to_vec(),
+        Some(s) => registered.iter().filter(|r| s.contains(r)).cloned().collect(),
+    }
 }
 
 /// Scroll the folder picker's list to a relative position (0 = top, 1 = bottom).
@@ -291,6 +290,8 @@ pub struct QuickForm {
 /// Several go-to-definition candidates.
 pub struct DefPickerForm {
     pub session: String,
+    /// Repo the targets' paths are relative to.
+    pub repo: String,
     pub name: String,
     pub targets: Vec<DefTarget>,
 }
@@ -298,6 +299,7 @@ pub struct DefPickerForm {
 /// Confirm deleting a file / folder from the tree.
 pub struct DeleteEntryForm {
     pub session: String,
+    pub repo: String,
     pub path: String,
     pub is_dir: bool,
     pub error: Option<String>,
@@ -305,6 +307,16 @@ pub struct DeleteEntryForm {
 }
 
 /// Closing a file with unsaved edits.
+/// Desk's "세션 설정" repo part: the session's repos, repos to add (attach on save) and
+/// detaching one (ide addition; Desk cannot remove a worktree mid-session).
+pub struct SessionReposForm {
+    pub session: String,
+    /// Registered repos checked to be attached on save.
+    pub add: Vec<String>,
+    pub error: Option<String>,
+    pub busy: bool,
+}
+
 pub struct CloseDirtyForm {
     pub session: String,
     pub path: String,
@@ -337,11 +349,14 @@ pub struct SettingsForm {
     pub ssh_host: String,
     pub ssh_command: String,
     pub server_error: Option<String>,
-    /// Browse roots on the server (`None` until loaded).
-    pub roots: Option<BrowseConfig>,
-    pub root_input: String,
-    pub roots_error: Option<String>,
-    pub roots_busy: bool,
+    /// Repos page: path typed to register.
+    pub repo_input: String,
+    /// Repos page: the repo shown right of the list (Desk's selected repo).
+    pub repo_selected: Option<String>,
+    /// Repos page: "unregister" was clicked once (Desk's confirm step).
+    pub repo_confirm: bool,
+    pub repos_error: Option<String>,
+    pub repos_busy: bool,
 }
 
 impl SettingsForm {
@@ -402,8 +417,10 @@ pub enum Modal {
     DefPicker(DefPickerForm),
     DeleteEntry(DeleteEntryForm),
     CloseDirty(CloseDirtyForm),
-    /// Repos page: choose a folder on the server to add as a browse root.
+    /// Repos page: choose a folder on the server to register as a repository.
     PickRoot(PickRootForm),
+    /// The session's repos (attach / detach).
+    SessionRepos(SessionReposForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -414,6 +431,8 @@ pub struct ConfigEdit {
     /// Skill folders (server paths), one per row.
     pub skills: Vec<String>,
     pub mcp: Vec<McpRow>,
+    /// Desk's "기본 레포" (`None` = every registered repo).
+    pub default_repos: Option<Vec<String>>,
 }
 
 impl ConfigEdit {
@@ -423,6 +442,7 @@ impl ConfigEdit {
             name: c.name.clone(),
             instructions: text_editor::Content::with_text(&c.instructions),
             skills: c.skills.clone(),
+            default_repos: c.default_repos.clone(),
             mcp: c
                 .mcp_servers
                 .iter()
@@ -467,6 +487,7 @@ impl ConfigEdit {
                         .collect(),
                 })
                 .collect(),
+            default_repos: self.default_repos.clone(),
             ..self.base.clone()
         }
     }
@@ -546,21 +567,19 @@ pub enum Message {
     DeleteDone(String, Result<(), ProtoError>),
 
     OpenNew,
-    NewRepo(String),
-    /// Show / hide the folder browser of the new-session dialog.
-    NewBrowse,
-    BrowseRoots(Result<Vec<String>, ProtoError>),
-    /// List a folder in the browser (`""` = the first root).
-    BrowseGo(String),
-    BrowseListed(u64, Result<BrowseListing, ProtoError>),
+    /// "워크트리 사용" on / off.
+    NewUseWorktrees(bool),
+    /// Check / uncheck a repo for the session folder.
+    NewRepoChecked(String, bool),
+    /// The repo of an original-repo session.
+    NewOriginalRepo(String),
     NewProvider(String),
     /// Account slug; `""` = the CLI's default login.
     NewAccount(String),
     NewConfiguration(String),
     NewTitle(String),
-    NewBase(String),
     NewSubmit,
-    NewCreated(Result<SessionInfo, ProtoError>),
+    NewCreated(Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError>),
     CloseModal,
 
     /// Sidebar: show the sessions of this configuration.
@@ -594,6 +613,8 @@ pub enum Message {
     CfgMcp(usize, McpField, String),
     CfgMcpAdd,
     CfgMcpRemove(usize),
+    /// Check / uncheck a default repo of the edited configuration.
+    CfgDefaultRepo(String, bool),
     CfgSave,
     CfgCancel,
     CfgDelete(String),
@@ -646,11 +667,24 @@ pub enum Message {
     CloseDirtyDiscard,
     /// Drop expired transient messages.
     Expire,
-    RootsLoaded(Result<BrowseConfig, ProtoError>),
-    RootInput(String),
-    RootAdd,
-    RootRemove(usize),
-    RootsSaved(Result<BrowseConfig, ProtoError>),
+    ReposLoaded(Result<Vec<RepoInfo>, ProtoError>),
+    RepoInput(String),
+    /// Register the typed path.
+    RepoAdd,
+    RepoRegistered(Result<RepoInfo, ProtoError>),
+    /// Repos page: show a repo.
+    RepoSelect(String),
+    /// Repos page: the first / cancelled click of "unregister".
+    RepoConfirm(bool),
+    RepoUnregister(String),
+    RepoUnregistered(String, Result<(), ProtoError>),
+    /// Open the session's repos dialog.
+    SessionRepos(String),
+    SessionRepoAdd(String, bool),
+    SessionReposSave,
+    SessionRepoDetach(String),
+    /// Attach (`true`: closes the dialog) / detach finished.
+    SessionReposDone(bool, Result<SessionInfo, ProtoError>),
     /// Open the repos page's folder picker (at the typed path if it is listable).
     PickOpen,
     /// List a folder in the picker (`None` = the start list).
@@ -662,7 +696,7 @@ pub enum Message {
     PickMove(i32),
     /// Enter in the picker: open the highlighted folder.
     PickEnter,
-    /// "Select this folder": fill the path field and add the root.
+    /// "Select this folder": register it.
     PickConfirm,
 
     WindowOpened(Option<window::Id>),
@@ -789,6 +823,8 @@ pub struct App {
     pub providers: Vec<ProviderInfo>,
     pub accounts: Vec<AccountInfo>,
     pub configs: Vec<ConfigurationInfo>,
+    /// Registered repositories (Hermes Desk's `ws.repos`).
+    pub repos: Vec<RepoInfo>,
     pub sessions: Vec<Live>,
     pub selected: Option<String>,
     pub ui: UiState,
@@ -849,6 +885,7 @@ impl App {
             providers: Vec::new(),
             accounts: Vec::new(),
             configs: Vec::new(),
+            repos: Vec::new(),
             sessions: Vec::new(),
             selected: None,
             ui,
@@ -901,7 +938,7 @@ impl App {
         self.conn = Conn::Connecting;
         for l in &mut self.sessions {
             l.attached = false;
-            l.detail.watched = false;
+            l.detail.watched.clear();
             l.detail.stale = true;
         }
     }
@@ -912,7 +949,7 @@ impl App {
         self.conn = Conn::Disconnected(reason);
         for l in &mut self.sessions {
             l.attached = false;
-            l.detail.watched = false;
+            l.detail.watched.clear();
             l.detail.stale = true;
         }
     }
@@ -1001,6 +1038,22 @@ impl App {
                 .filter(move |l| l.info.kind == SessionKind::Agent && l.info.configuration == slug)
         };
         (of().count(), of().filter(|l| l.state.is_alive()).count())
+    }
+
+    /// Name of a registered repo (falls back to a session's attached repo, then the id).
+    pub fn repo_name(&self, id: &str) -> String {
+        self.repos
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.name.clone())
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .flat_map(|l| l.info.repos.iter())
+                    .find(|r| r.repo == id)
+                    .map(|r| r.name.clone())
+            })
+            .unwrap_or_else(|| id.to_owned())
     }
 
     /// A provider by id.
@@ -1187,7 +1240,7 @@ impl App {
                 // Watches and listings start over on the new connection (the gap is not
                 // replayed): refresh the shown detail area.
                 for l in &mut self.sessions {
-                    l.detail.watched = false;
+                    l.detail.watched.clear();
                     l.detail.stale = true;
                 }
                 // The PTY size follows the most recent client: re-send ours.
@@ -1200,7 +1253,7 @@ impl App {
                     self.refresh(),
                     self.ensure_attached(),
                     self.sync_detail(),
-                    self.load_roots(),
+                    self.load_repos(),
                 ])
             }
             ClientEvent::Disconnected { error } => {
@@ -1255,12 +1308,14 @@ impl App {
             Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
                 self.refresh()
             }
+            Notify::ReposChanged => self.load_repos(),
             Notify::FsChanged {
                 session,
+                repo,
                 paths,
                 rescan,
-            } => self.on_fs_notify(&session, Some((paths, rescan))),
-            Notify::GitChanged { session } => self.on_fs_notify(&session, None),
+            } => self.on_fs_notify(&session, &repo, Some((paths, rescan))),
+            Notify::GitChanged { session, repo } => self.on_fs_notify(&session, &repo, None),
             // Routed to the `SearchStream`s by the client; late ones are dropped.
             Notify::SearchHits { .. } | Notify::SearchDone { .. } => Task::none(),
         }
@@ -1534,12 +1589,12 @@ impl App {
                 };
                 match r {
                     Ok(()) => {
-                        let worktree = self
+                        let root = self
                             .live(&id)
-                            .map(|l| l.info.worktree_path.clone())
+                            .map(|l| l.info.root.clone())
                             .unwrap_or_default();
                         crate::script::log(&format!(
-                            "deleted session {id} (remove_worktree={remove}, worktree {worktree})"
+                            "deleted session {id} (remove_worktree={remove}, root {root})"
                         ));
                         if let Some(idx) = self.sessions.iter().position(|l| l.id() == id) {
                             let live = self.sessions.remove(idx);
@@ -1582,94 +1637,42 @@ impl App {
                     .find(|p| p.detection.usable)
                     .map(|p| p.id.clone())
                     .unwrap_or_default();
+                let configuration = self.current_configuration();
+                let repos = self.default_repos_for(&configuration);
+                let original_repo = self
+                    .ui
+                    .last_repo
+                    .clone()
+                    .filter(|r| self.repos.iter().any(|x| &x.id == r))
+                    .or_else(|| self.repos.first().map(|r| r.id.clone()));
                 self.modal = Some(Modal::NewSession(NewForm {
-                    repo: self.ui.last_repo.clone().unwrap_or_default(),
                     account: self.default_account(&provider),
                     provider,
-                    configuration: self.current_configuration(),
+                    configuration,
                     title: String::new(),
-                    base_ref: String::new(),
+                    use_worktrees: true,
+                    repos,
+                    original_repo,
                     error: None,
                     busy: false,
-                    browser: None,
                 }));
                 self.open_items = false;
-                operation::focus(NEW_REPO_ID)
+                Task::batch([operation::focus(NEW_TITLE_ID), self.load_repos()])
             }
-            Message::NewRepo(v) => self.with_new(|f| f.repo = v),
-            Message::NewBrowse => {
-                let Some(c) = self.online() else {
-                    return Task::none();
-                };
-                let Some(Modal::NewSession(f)) = &mut self.modal else {
-                    return Task::none();
-                };
-                if f.browser.take().is_some() {
-                    return Task::none();
-                }
-                f.browser = Some(Box::default());
-                // Start at the typed folder when it is browsable, else at the first root.
-                let start = f.repo.trim().trim_matches('"').to_owned();
-                let roots = Task::perform(
-                    {
-                        let c = c.clone();
-                        async move { c.browse_roots().await }
-                    },
-                    Message::BrowseRoots,
-                );
-                Task::batch([roots, self.browse_go(start)])
+            Message::NewUseWorktrees(v) => self.with_new(|f| f.use_worktrees = v),
+            Message::NewRepoChecked(id, on) => {
+                let order: Vec<String> = self.repos.iter().map(|r| r.id.clone()).collect();
+                self.with_new(|f| {
+                    f.repos.retain(|r| *r != id);
+                    if on {
+                        f.repos.push(id);
+                    }
+                    // Keep the registry order (worktree folders are made in this order).
+                    f.repos
+                        .sort_by_key(|r| order.iter().position(|o| o == r).unwrap_or(usize::MAX));
+                })
             }
-            Message::BrowseRoots(r) => {
-                if let Some(Modal::NewSession(NewForm {
-                    browser: Some(b), ..
-                })) = &mut self.modal
-                {
-                    match r {
-                        Ok(roots) => b.roots = roots,
-                        Err(e) => b.error = Some(i18n::proto_error(&e)),
-                    }
-                }
-                Task::none()
-            }
-            Message::BrowseGo(dir) => self.browse_go(dir),
-            Message::BrowseListed(seq, r) => {
-                let Some(Modal::NewSession(f)) = &mut self.modal else {
-                    return Task::none();
-                };
-                let Some(b) = &mut f.browser else {
-                    return Task::none();
-                };
-                if seq != b.seq {
-                    return Task::none();
-                }
-                b.loading = false;
-                match r {
-                    Ok(l) => {
-                        crate::script::log(&format!(
-                            "browse {} (git repo {}, {} folder(s))",
-                            l.path,
-                            l.is_git_repo,
-                            l.entries.len()
-                        ));
-                        // Browsing into a repository picks it.
-                        if l.is_git_repo {
-                            f.repo = l.path.clone();
-                            f.error = None;
-                        }
-                        b.error = None;
-                        b.listing = Some(l);
-                        Task::none()
-                    }
-                    // A typed path outside the roots: start at the first root instead.
-                    Err(_) if b.listing.is_none() && !b.dir.is_empty() => {
-                        self.browse_go(String::new())
-                    }
-                    Err(e) => {
-                        b.error = Some(i18n::proto_error(&e));
-                        Task::none()
-                    }
-                }
-            }
+            Message::NewOriginalRepo(id) => self.with_new(|f| f.original_repo = Some(id)),
             Message::NewProvider(p) => {
                 let account = self.default_account(&p);
                 self.with_new(|f| {
@@ -1678,9 +1681,15 @@ impl App {
                 })
             }
             Message::NewAccount(a) => self.with_new(|f| f.account = (!a.is_empty()).then_some(a)),
-            Message::NewConfiguration(v) => self.with_new(|f| f.configuration = v),
+            Message::NewConfiguration(v) => {
+                // Desk: the agent's default repos are the first selection.
+                let repos = self.default_repos_for(&v);
+                self.with_new(|f| {
+                    f.configuration = v;
+                    f.repos = repos;
+                })
+            }
             Message::NewTitle(v) => self.with_new(|f| f.title = v),
-            Message::NewBase(v) => self.with_new(|f| f.base_ref = v),
             Message::NewSubmit => self.submit_new(),
             Message::NewCreated(result) => self.on_created(result),
             Message::CloseModal => {
@@ -1693,6 +1702,7 @@ impl App {
                     Some(Modal::Delete(f)) => f.busy,
                     Some(Modal::StopServer(f)) => f.busy,
                     Some(Modal::Close(f)) => f.busy,
+                    Some(Modal::SessionRepos(f)) => f.busy,
                     _ => false,
                 };
                 if busy {
@@ -1748,7 +1758,7 @@ impl App {
                             iced::advanced::widget::operation::focusable::unfocus(),
                         );
                         let load = match page {
-                            Page::Repos => self.load_roots(),
+                            Page::Repos => self.load_repos(),
                             Page::Settings => {
                                 self.settings.reset_server(&self.ui.server);
                                 Task::none()
@@ -1763,62 +1773,203 @@ impl App {
                 self.rail_hover = v;
                 Task::none()
             }
-            Message::RootsLoaded(r) => self.with_settings(|f| {
-                f.roots_busy = false;
+            Message::ReposLoaded(r) => {
                 match r {
-                    Ok(c) => {
-                        crate::script::log(&format!("browse roots: {:?}", c.roots));
-                        f.roots = Some(c);
+                    Ok(list) => {
+                        crate::script::log(&format!(
+                            "repos: {:?}",
+                            list.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                        ));
+                        let f = &mut self.settings;
+                        if f
+                            .repo_selected
+                            .as_ref()
+                            .is_none_or(|s| !list.iter().any(|r| &r.id == s))
+                        {
+                            f.repo_selected = list.first().map(|r| r.id.clone());
+                            f.repo_confirm = false;
+                        }
+                        self.repos = list;
                     }
-                    Err(e) => f.roots_error = Some(i18n::proto_error(&e)),
+                    Err(e) => {
+                        if e.id != "disconnected" {
+                            self.settings.repos_error = Some(i18n::proto_error(&e));
+                        }
+                    }
                 }
-            }),
-            Message::RootInput(v) => self.with_settings(|f| f.root_input = v),
-            Message::RootAdd | Message::RootRemove(_) => {
+                Task::none()
+            }
+            Message::RepoInput(v) => self.with_settings(|f| f.repo_input = v),
+            Message::RepoAdd => {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
                 let f = &mut self.settings;
-                let mut roots = f
-                    .roots
-                    .as_ref()
-                    .map(|c| c.roots.clone())
-                    .unwrap_or_default();
-                match message {
-                    Message::RootRemove(i) if i < roots.len() => {
-                        roots.remove(i);
-                    }
-                    Message::RootAdd => {
-                        let v = f.root_input.trim().trim_matches('"').to_owned();
-                        if v.is_empty() {
-                            return Task::none();
-                        }
-                        roots.push(v);
-                    }
-                    _ => return Task::none(),
+                let path = f.repo_input.trim().trim_matches('"').to_owned();
+                if path.is_empty() || f.repos_busy {
+                    return Task::none();
                 }
-                f.roots_busy = true;
-                f.roots_error = None;
+                f.repos_busy = true;
+                f.repos_error = None;
                 Task::perform(
-                    async move { c.browse_set_roots(roots).await },
-                    Message::RootsSaved,
+                    async move { c.register_repo(&path).await },
+                    Message::RepoRegistered,
                 )
             }
-            Message::RootsSaved(r) => self.with_settings(|f| {
-                f.roots_busy = false;
+            Message::RepoRegistered(r) => {
+                let f = &mut self.settings;
+                f.repos_busy = false;
                 match r {
-                    Ok(c) => {
-                        crate::script::log(&format!("browse roots saved: {:?}", c.roots));
-                        f.roots = Some(c);
-                        f.root_input.clear();
-                        f.roots_error = None;
+                    Ok(repo) => {
+                        crate::script::log(&format!(
+                            "repo registered: {} {} (base {:?})",
+                            repo.name, repo.path, repo.base
+                        ));
+                        f.repo_input.clear();
+                        f.repo_selected = Some(repo.id.clone());
+                        f.repo_confirm = false;
+                        if !self.repos.iter().any(|x| x.id == repo.id) {
+                            self.repos.push(repo);
+                        }
+                        self.load_repos()
                     }
                     Err(e) => {
-                        crate::script::log(&format!("browse roots refused: {e}"));
-                        f.roots_error = Some(i18n::proto_error(&e));
+                        crate::script::log(&format!("repo register refused: {e}"));
+                        f.repos_error = Some(i18n::proto_error(&e));
+                        Task::none()
                     }
                 }
+            }
+            Message::RepoSelect(id) => self.with_settings(|f| {
+                f.repo_selected = Some(id);
+                f.repo_confirm = false;
+                f.repos_error = None;
             }),
+            Message::RepoConfirm(v) => self.with_settings(|f| f.repo_confirm = v),
+            Message::RepoUnregister(id) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                self.settings.repos_busy = true;
+                self.settings.repos_error = None;
+                Task::perform(
+                    {
+                        let id = id.clone();
+                        async move { c.unregister_repo(&id).await }
+                    },
+                    move |r| Message::RepoUnregistered(id.clone(), r),
+                )
+            }
+            Message::RepoUnregistered(id, r) => {
+                let f = &mut self.settings;
+                f.repos_busy = false;
+                f.repo_confirm = false;
+                crate::script::log(&format!("repo unregister {id}: {r:?}"));
+                match r {
+                    Ok(()) => {
+                        self.repos.retain(|x| x.id != id);
+                        f.repo_selected = self.repos.first().map(|r| r.id.clone());
+                        self.load_repos()
+                    }
+                    Err(e) => {
+                        f.repos_error = Some(i18n::proto_error(&e));
+                        Task::none()
+                    }
+                }
+            }
+            Message::SessionRepos(sid) => {
+                if !self.connected() || self.live(&sid).is_none() {
+                    return Task::none();
+                }
+                self.open_items = false;
+                self.modal = Some(Modal::SessionRepos(SessionReposForm {
+                    session: sid,
+                    add: Vec::new(),
+                    error: None,
+                    busy: false,
+                }));
+                self.load_repos()
+            }
+            Message::SessionRepoAdd(id, on) => {
+                if let Some(Modal::SessionRepos(f)) = &mut self.modal {
+                    f.add.retain(|r| *r != id);
+                    if on {
+                        f.add.push(id);
+                    }
+                }
+                Task::none()
+            }
+            Message::SessionReposSave | Message::SessionRepoDetach(_) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(Modal::SessionRepos(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                if f.busy {
+                    return Task::none();
+                }
+                let sid = f.session.clone();
+                match message {
+                    Message::SessionRepoDetach(repo) => {
+                        f.busy = true;
+                        f.error = None;
+                        crate::script::log(&format!("detach {repo} from {sid}"));
+                        Task::perform(async move { c.detach_repo(&sid, &repo).await }, |r| {
+                            Message::SessionReposDone(false, r)
+                        })
+                    }
+                    _ if f.add.is_empty() => {
+                        self.modal = None;
+                        self.after_select()
+                    }
+                    _ => {
+                        f.busy = true;
+                        f.error = None;
+                        let add = std::mem::take(&mut f.add);
+                        crate::script::log(&format!("attach {add:?} to {sid}"));
+                        // One worktree after the other, like Desk's `wsAddRepoToSessions` loop.
+                        Task::perform(
+                            async move {
+                                let mut last = None;
+                                for r in add {
+                                    last = Some(c.attach_repo(&sid, &r).await?);
+                                }
+                                Ok(last.expect("repos to add"))
+                            },
+                            |r| Message::SessionReposDone(true, r),
+                        )
+                    }
+                }
+            }
+            Message::SessionReposDone(close, r) => {
+                let Some(Modal::SessionRepos(f)) = &mut self.modal else {
+                    return self.refresh();
+                };
+                f.busy = false;
+                match r {
+                    Ok(info) => {
+                        crate::script::log(&format!(
+                            "session {} repos: {:?}",
+                            info.id,
+                            info.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                        ));
+                        let id = info.id.clone();
+                        // Save closes the dialog (Desk); a detach keeps it open.
+                        if close {
+                            self.modal = None;
+                        }
+                        if let Some(l) = self.live_mut(&id) {
+                            l.info = info;
+                        }
+                        Task::batch([self.sync_detail(), self.load_repos()])
+                    }
+                    Err(e) => {
+                        f.error = Some(i18n::proto_error(&e));
+                        Task::batch([self.refresh(), self.load_repos()])
+                    }
+                }
+            }
             Message::PickOpen => {
                 if self.online().is_none() {
                     return Task::none();
@@ -1826,7 +1977,7 @@ impl App {
                 self.rename = None;
                 self.modal = Some(Modal::PickRoot(PickRootForm::default()));
                 // Start at the typed folder when it is listable, else at the start list.
-                let typed = self.settings.root_input.trim().trim_matches('"').to_owned();
+                let typed = self.settings.repo_input.trim().trim_matches('"').to_owned();
                 self.pick_go((!typed.is_empty()).then_some(typed))
             }
             Message::PickGo(dir) => self.pick_go(dir),
@@ -1911,10 +2062,10 @@ impl App {
                 let Some(path) = target else {
                     return Task::none();
                 };
-                crate::script::log(&format!("pick: add root {path:?}"));
+                crate::script::log(&format!("pick: register {path:?}"));
                 self.modal = None;
-                self.settings.root_input = path;
-                self.update(Message::RootAdd)
+                self.settings.repo_input = path;
+                self.update(Message::RepoAdd)
             }
             Message::AcctProvider(p) => self.with_settings(|f| f.acct_provider = p),
             Message::AcctName(v) => self.with_settings(|f| f.acct_name = v),
@@ -1982,7 +2133,7 @@ impl App {
                     ));
                     // Shown like a new session, on the work page.
                     self.settings.busy = false;
-                    self.on_created(Ok(info))
+                    self.on_created(Ok((info, Vec::new())))
                 }
                 Err(e) => {
                     crate::script::log(&format!("login error: {e}"));
@@ -2102,6 +2253,19 @@ impl App {
                     e.mcp.remove(i);
                 }
             }),
+            Message::CfgDefaultRepo(id, on) => {
+                let registered: Vec<String> = self.repos.iter().map(|r| r.id.clone()).collect();
+                self.with_cfg(|e| {
+                    // `None` (every repo) becomes an explicit list on the first change.
+                    let mut list = crate::app::default_repos_for(e.default_repos.as_ref(), &registered);
+                    list.retain(|r| *r != id);
+                    if on {
+                        list.push(id);
+                    }
+                    list.sort_by_key(|r| registered.iter().position(|o| o == r));
+                    e.default_repos = Some(list);
+                })
+            }
             Message::CfgCancel => self.with_settings(|f| f.cfg_edit = None),
             Message::CfgSave => {
                 let Some(c) = self.online() else {
@@ -2286,7 +2450,10 @@ impl App {
             }
             Message::QuickSubmit => {
                 let path = match &self.modal {
-                    Some(Modal::QuickOpen(f)) => f.results.get(f.selected).map(|m| m.path.clone()),
+                    Some(Modal::QuickOpen(f)) => f
+                        .results
+                        .get(f.selected)
+                        .map(|m| crate::detail::qualify(&m.repo, &m.path)),
                     _ => None,
                 };
                 match path {
@@ -2314,7 +2481,12 @@ impl App {
                     return Task::none();
                 };
                 match f.targets.get(i) {
-                    Some(t) => self.open_file_at(&f.session, &t.path, t.line, t.col),
+                    Some(t) => self.open_file_at(
+                        &f.session,
+                        &crate::detail::qualify(&f.repo, &t.path),
+                        t.line,
+                        t.col,
+                    ),
                     None => Task::none(),
                 }
             }
@@ -2478,15 +2650,24 @@ impl App {
         Task::none()
     }
 
-    /// Load the browse roots for the repos page (while it is shown and connected).
-    fn load_roots(&mut self) -> Task<Message> {
-        if self.ui.page != Page::Repos {
-            return Task::none();
-        }
+    /// Load the registered repos (repos page, new-session dialog, configuration editor).
+    pub(crate) fn load_repos(&mut self) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        Task::perform(async move { c.browse_config().await }, Message::RootsLoaded)
+        Task::perform(async move { c.repos().await }, Message::ReposLoaded)
+    }
+
+    /// Desk's `defaultReposFor` for a configuration: its saved default repos that are still
+    /// registered, or every registered repo when none were saved.
+    pub fn default_repos_for(&self, configuration: &str) -> Vec<String> {
+        let registered: Vec<String> = self.repos.iter().map(|r| r.id.clone()).collect();
+        let saved = self
+            .configs
+            .iter()
+            .find(|c| c.slug == configuration)
+            .and_then(|c| c.default_repos.as_ref());
+        default_repos_for(saved, &registered)
     }
 
     /// Window close: with a local server and running sessions, ask (unless remembered)
@@ -2545,26 +2726,6 @@ impl App {
         )
     }
 
-    /// List `dir` in the new-session dialog's folder browser.
-    fn browse_go(&mut self, dir: String) -> Task<Message> {
-        let Some(c) = self.online() else {
-            return Task::none();
-        };
-        let Some(Modal::NewSession(NewForm {
-            browser: Some(b), ..
-        })) = &mut self.modal
-        else {
-            return Task::none();
-        };
-        b.seq += 1;
-        b.loading = true;
-        b.dir = dir.clone();
-        let seq = b.seq;
-        Task::perform(async move { c.browse_list(&dir).await }, move |r| {
-            Message::BrowseListed(seq, r)
-        })
-    }
-
     fn with_new(&mut self, f: impl FnOnce(&mut NewForm)) -> Task<Message> {
         if let Some(Modal::NewSession(form)) = &mut self.modal {
             f(form);
@@ -2593,25 +2754,33 @@ impl App {
         if f.busy {
             return Task::none();
         }
-        let repo = f.repo.trim().trim_matches('"').to_owned();
-        if repo.is_empty() {
-            f.error = Some(tr::err_choose_repo());
-            return Task::none();
-        }
+        let (repos, original_repo) = if f.use_worktrees {
+            (f.repos.clone(), None)
+        } else {
+            match f.original_repo.clone() {
+                Some(r) => (Vec::new(), Some(r)),
+                None => {
+                    f.error = Some(tr::err_choose_repo());
+                    return Task::none();
+                }
+            }
+        };
         f.busy = true;
         f.error = None;
         let req = NewSession {
             provider: f.provider.clone(),
             account: f.account.clone(),
             configuration: f.configuration.clone(),
-            repo_path: repo.clone(),
+            repos,
+            original_repo: original_repo.clone(),
             title: f.title.clone(),
-            base_ref: f.base_ref.clone(),
             start: true,
             cols,
             rows,
         };
-        self.ui.last_repo = Some(repo);
+        if original_repo.is_some() {
+            self.ui.last_repo = original_repo;
+        }
         // git runs on the server.
         Task::perform(
             async move { c.create_session(req).await },
@@ -2619,8 +2788,11 @@ impl App {
         )
     }
 
-    fn on_created(&mut self, result: Result<SessionInfo, ProtoError>) -> Task<Message> {
-        let info = match result {
+    fn on_created(
+        &mut self,
+        result: Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError>,
+    ) -> Task<Message> {
+        let (info, failures) = match result {
             Ok(v) => v,
             Err(e) => {
                 crate::script::log(&format!("new session error: {e}"));
@@ -2632,9 +2804,27 @@ impl App {
             }
         };
         crate::script::log(&format!(
-            "created session {} {:?} worktree={} branch={} state={:?}",
-            info.id, info.title, info.worktree_path, info.branch, info.state
+            "created session {} {:?} mode={:?} root={} repos={:?} state={:?}",
+            info.id,
+            info.title,
+            info.mode,
+            info.root,
+            info.repos
+                .iter()
+                .map(|r| format!("{}@{}", r.name, r.branch))
+                .collect::<Vec<_>>(),
+            info.state
         ));
+        // Desk: "일부 레포의 워크트리를 만들지 못했습니다" (the session exists anyway).
+        if !failures.is_empty() {
+            let detail = failures
+                .iter()
+                .map(|f| format!("{}: {}", f.name, i18n::proto_error(&f.error)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::script::log(&format!("worktree failures: {detail}"));
+            self.banner = Some(tr::err_some_worktrees_failed(&detail));
+        }
         let id = info.id.clone();
         let configuration = (info.kind == SessionKind::Agent).then(|| info.configuration.clone());
         match self.live_mut(&id) {
@@ -2862,18 +3052,9 @@ pub fn same_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// Last component of a server path (either separator).
-pub fn path_name(p: &str) -> &str {
-    p.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(p)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{PickRootForm, crumbs, is_fs_root, normalize_url, path_name, same_path};
+    use super::{PickRootForm, crumbs, is_fs_root, normalize_url, same_path};
     use ide_client::{BrowseEntry, BrowseListing};
 
     fn c(path: &str) -> Vec<(&'static str, &'static str)> {
@@ -2967,8 +3148,5 @@ mod tests {
     fn paths() {
         assert!(same_path("C:\\src\\Repo\\", "c:/src/repo"));
         assert!(!same_path("C:/src/a", "C:/src/b"));
-        assert_eq!(path_name("C:\\src\\my-repo\\"), "my-repo");
-        assert_eq!(path_name("/home/me/repo"), "repo");
-        assert_eq!(path_name("repo"), "repo");
     }
 }

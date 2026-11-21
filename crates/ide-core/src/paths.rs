@@ -7,8 +7,10 @@
 //! sessions.json
 //! accounts/<provider>/<slug>/          (a CLI's own config home for one login)
 //! providers/*.toml                     (declarative agent providers)
+//! repos.json                           (registered repositories)
 //! sessions/<session-id>/agent/         (generated per-session files: MCP JSON, plugin, ...)
-//! worktrees/<repo-slug>/<session-id>/
+//! workspaces/<session-id>/<repo-name>/ (session folder = agent cwd, one worktree per repo)
+//! worktrees/<repo-slug>/<session-id>/  (legacy single-repo worktrees, kept where they are)
 //! profiles.json, profiles/<slug>/{claude,codex}/   (legacy; migrated to accounts)
 //! ```
 
@@ -89,6 +91,22 @@ impl Paths {
     /// `sessions/<id>/agent`: files generated for a session's agent (scratch dir).
     pub fn session_agent_dir(&self, id: &str) -> PathBuf {
         self.session_dir(id).join("agent")
+    }
+
+    /// `repos.json`.
+    pub fn repos_file(&self) -> PathBuf {
+        self.root.join("repos.json")
+    }
+
+    /// `workspaces/`: session folders.
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.root.join("workspaces")
+    }
+
+    /// `workspaces/<session-id>` (absolute): a session's folder and agent cwd.
+    pub fn workspace_dir(&self, session_id: &str) -> PathBuf {
+        let p = self.workspaces_dir().join(session_id);
+        std::path::absolute(&p).unwrap_or(p)
     }
 
     /// `worktrees/`.

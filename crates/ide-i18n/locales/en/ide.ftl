@@ -72,15 +72,9 @@ no-session = No session
 
 ## New-session dialog
 
-repo-folder-label = REPOSITORY FOLDER
-repo-placeholder = C:/src/my-repo
-browse = Browse…
 agent-label = AGENT
 title-label = TITLE (OPTIONAL)
 title-placeholder = Defaults to agent · repo
-base-ref-label = BASE REF (OPTIONAL)
-base-ref-placeholder = HEAD
-worktree-note = A new worktree on branch ide/<session-id> is created for the session.
 cancel = Cancel
 create = Create
 creating = Creating…
@@ -146,7 +140,7 @@ close-remember = Don't ask again (change it in Settings)
 
 err-web-view = Web view: { $detail }
 err-rename-failed = Rename failed: { $detail }
-err-choose-repo = Choose a repository folder.
+err-choose-repo = Choose a repository.
 err-server-missing = The server program was not found: { $detail }
 
 ## Errors from the server and the connection (ide_proto::ProtoError ids)
@@ -289,12 +283,7 @@ dont-save = Don't save
 browse-up = Parent folder
 browse-empty = No subfolders.
 browse-git = Git repository
-browse-roots-label = REPOSITORY FOLDERS
-browse-roots-note = The new-session dialog can browse these folders on the server. Your home folder is always included.
-browse-root-placeholder = Absolute folder path on the server
-browse-home = home
-pick-root-open = Choose a folder on the server
-pick-root-title = Add a repository folder
+pick-root-title = Add a repository
 pick-root-note = Folders on the server. Double-click a folder (or press Enter) to open it.
 pick-start = Computer
 pick-select = Select this folder
@@ -359,4 +348,55 @@ mcp-name-placeholder = name
 mcp-command-placeholder = command
 mcp-args-placeholder = arguments
 mcp-env-placeholder = KEY=value
-provider-support = { $provider }: skills { $skills } · MCP { $mcp } · instructions { $instructions }
+
+# Repositories (Hermes Desk's repo registry, 레포 page, session workspaces)
+group-login = Login terminals
+no-repos = No repositories
+repos-title = Repositories
+repos-none = No repositories registered.
+repos-list-label = REPOSITORIES
+repo-add = Add repo
+repo-path-placeholder = Repository path on the server (Enter to add)
+repos-pick-note = Add a repository or pick one on the left.
+repos-note = Sessions get one worktree per repository in their own folder. Only registered git repositories can be used.
+repo-no-sessions = No session uses this repository.
+repo-unregister = Unregister
+repo-unregister-keep-files = Unregister (keep files)
+repo-base-label = BASE BRANCH
+repo-base-unknown = (could not be determined)
+repo-base-note = New worktrees branch off this branch: main → master → origin's default branch → the current branch.
+repo-sessions-label = { $count ->
+    [one] 1 SESSION
+   *[other] { $count } SESSIONS
+}
+provider-support-modes = { $provider }: workspace { $workspace } · original repo { $original } (skills, MCP, instructions)
+configuration-default-repos = Default repositories
+configuration-default-repos-note = Pre-checked when a session is created with this configuration; each session can change them.
+workspace-label = WORKSPACE
+use-worktrees = Use worktrees
+use-worktrees-note = The session gets its own folder with a worktree of each repository (branch ide/<session-id>), separate from the originals.
+worktree-repos-label = Repositories to create worktrees for
+no-repos-empty-workspace = No repositories registered: the session starts with an empty workspace.
+empty-workspace-note = No repository checked: the session starts with an empty workspace.
+worktree-branch-note = Each worktree gets a new branch from the repository's base branch.
+worktree-repos-note = The first selection is the configuration's default repositories; repositories can be added later from the session's ⚙.
+original-repo-warning = The agent edits and commits in the repository's own folder and current branch. Other sessions and your own work in that repository can get mixed up; clean up uncommitted changes first.
+original-repo-label = Repository to work in
+no-repos-register-first = No repositories registered. Register one on the Repos page first.
+session-repos-title = Repositories of “{ $title }”
+session-repos-label = Repositories · branch ← base
+session-repo-detach = Remove this worktree from the session (its branch is kept)
+session-repos-add-label = Add repositories
+session-repos-note = Added repositories get a worktree in the session folder when you save; a running agent sees them in its guidance after a restart.
+session-repos-no-workspace = This session works in a repository directly and has no workspace, so repositories cannot be added.
+session-repos-open = Session repositories
+no-repos-in-session = This session has no repositories. Add one with ⚙.
+err-some-worktrees-failed = Some worktrees could not be created:
+    { $detail }
+err-repo-not-found = Repository { $id } is not registered.
+err-repo-in-use = { $count ->
+    [one] 1 session uses
+   *[other] { $count } sessions use
+} repository “{ $name }”; delete them first.
+err-repo-not-attached = Repository “{ $name }” is not attached to this session.
+err-not-a-workspace-session = Session { $id } works in a repository directly (no workspace).

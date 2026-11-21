@@ -227,19 +227,25 @@ impl AgentProvider for DeclarativeProvider {
             InstructionsMechanism::None => Support::Unsupported,
             _ => Support::Native,
         };
+        let skills = if instructions == Support::Native {
+            Support::Fallback
+        } else {
+            Support::Unsupported
+        };
         Caps {
             accounts: self.spec.account_env.is_some(),
             login: self.spec.account_env.is_some() && self.spec.login_args.is_some(),
-            skills: if instructions == Support::Native {
-                Support::Fallback
-            } else {
-                Support::Unsupported
-            },
+            skills,
             mcp: Support::Unsupported,
             instructions,
             hooks: Support::Unsupported,
             resume: false,
             session_name: false,
+            original_repo: crate::ModeSupport {
+                skills,
+                mcp: Support::Unsupported,
+                instructions,
+            },
         }
     }
     fn account_env(&self, acct: &AccountDir) -> Vec<(String, String)> {

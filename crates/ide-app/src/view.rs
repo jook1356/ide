@@ -12,9 +12,9 @@ use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 
 use crate::app::{
-    App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_REPO_ID,
-    NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, RENAME_ID, ROOT_INPUT_ID, RunState,
-    SIDEBAR_W, SSH_HOST_ID, SettingsForm, TERM_ID, path_name, same_path,
+    App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_TITLE_ID,
+    NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, REPO_INPUT_ID, RENAME_ID, RunState,
+    SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, TERM_ID,
 };
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
@@ -149,6 +149,29 @@ fn folder_entry_row(e: &BrowseEntry, tag: Option<String>) -> El<'_> {
         ));
     }
     r.boxed()
+}
+
+/// The sidebar group of a session: its repos' names (`ide, lib`), or "no repositories".
+fn session_repos_label(s: &ide_client::SessionInfo) -> String {
+    if s.kind == ide_client::SessionKind::Login {
+        return tr::group_login();
+    }
+    if s.repos.is_empty() {
+        return tr::no_repos();
+    }
+    s.repos
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn vline_full<'a>() -> El<'a> {
+    container(space())
+        .width(1)
+        .height(Length::Fixed(220.0))
+        .style(style::bg(style::BORDER))
+        .boxed()
 }
 
 fn error_box<'a>(e: &'a str) -> El<'a> {
@@ -408,19 +431,16 @@ impl App {
             .iter()
             .filter(|l| self.in_filter(&l.info))
             .collect();
-        // Group by repository, in order of first appearance.
-        let mut groups: Vec<(&Live, Vec<&Live>)> = Vec::new();
+        // Group by the session's repositories, in order of first appearance.
+        let mut groups: Vec<(String, Vec<&Live>)> = Vec::new();
         for l in &mine {
-            match groups
-                .iter_mut()
-                .find(|(first, _)| same_path(&first.info.repo_path, &l.info.repo_path))
-            {
+            let key = session_repos_label(&l.info);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, v)) => v.push(l),
-                None => groups.push((l, vec![l])),
+                None => groups.push((key, vec![l])),
             }
         }
-        for (first, members) in groups {
-            let repo_name = path_name(&first.info.repo_path);
+        for (repo_name, members) in groups {
             list = list.push(
                 container(
                     text(repo_name.to_uppercase())
@@ -631,11 +651,16 @@ impl App {
             row![
                 text(glyph).size(13).color(gcolor),
                 text(s.title.as_str()).size(13).font(style::BOLD),
-                text(s.branch.as_str())
-                    .size(12)
-                    .color(style::DIM)
-                    .font(style::MONO),
-                text(s.worktree_path.as_str())
+                text(
+                    s.repos
+                        .first()
+                        .map(|r| r.branch.clone())
+                        .unwrap_or_default()
+                )
+                .size(12)
+                .color(style::DIM)
+                .font(style::MONO),
+                text(s.root.as_str())
                     .size(11)
                     .color(style::FAINT)
                     .wrapping(text::Wrapping::None)
@@ -770,88 +795,219 @@ impl App {
         .boxed()
     }
 
-    /// The new-session dialog's folder browser (folders on the server).
-    fn folder_browser<'a>(&'a self, f: &'a NewForm) -> El<'a> {
-        let Some(b) = &f.browser else {
-            return space().height(0).boxed();
-        };
-        let current = b.listing.as_ref();
-        let up = current.and_then(|l| l.parent.clone());
-        let roots = pick_list(
-            // The innermost root containing the listed folder.
-            current.and_then(|l| {
-                b.roots
-                    .iter()
-                    .filter(|r| l.path.starts_with(r.as_str()))
-                    .max_by_key(|r| r.len())
-                    .cloned()
-            }),
-            b.roots.clone(),
-            |s: &String| s.clone(),
-        )
-        .on_select(Message::BrowseGo)
-        .text_size(12)
-        .padding([4, 8])
-        .width(Fill);
-        let head = row![
-            icon_button("↑", up.map(Message::BrowseGo), tr::browse_up()),
-            roots,
+    /// The new-session dialog's "워크스페이스" part (Desk's `NewSessionModal`): "use worktrees"
+    /// with a checkbox per registered repo (pre-checked: the configuration's default repos;
+    /// none = an empty workspace), or one repo to work in directly.
+    fn new_workspace_section<'a>(&'a self, f: &'a NewForm) -> El<'a> {
+        let mut c = column![
+            label(tr::workspace_label()),
+            checkbox(f.use_worktrees)
+                .label(tr::use_worktrees())
+                .on_toggle(Message::NewUseWorktrees)
+                .size(16)
+                .text_size(13),
+            text(tr::use_worktrees_note()).size(11).color(style::FAINT),
         ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-        let mut list: Column<El<'a>> = Column::new().spacing(1);
-        if let Some(l) = current {
-            list = list.push(
-                text(l.path.as_str())
-                    .size(11)
-                    .font(style::MONO)
-                    .color(if l.is_git_repo {
-                        style::GREEN
-                    } else {
-                        style::DIM
-                    })
-                    .wrapping(text::Wrapping::None)
-                    .ellipsis(text::Ellipsis::Start)
+        .spacing(6);
+        if f.use_worktrees {
+            c = c.push(text(tr::worktree_repos_label()).size(12).font(style::BOLD).boxed());
+            let mut list: Column<El<'_>> = Column::new().spacing(3);
+            for r in &self.repos {
+                let id = r.id.clone();
+                list = list.push(
+                    checkbox(f.repos.contains(&r.id))
+                        .label(format!("{}  ·  {}", r.name, r.path))
+                        .on_toggle(move |v| Message::NewRepoChecked(id.clone(), v))
+                        .size(15)
+                        .text_size(12)
+                        .boxed(),
+                );
+            }
+            c = c.push(list.boxed());
+            c = c.push(
+                text(if self.repos.is_empty() {
+                    tr::no_repos_empty_workspace()
+                } else if f.repos.is_empty() {
+                    tr::empty_workspace_note()
+                } else {
+                    tr::worktree_branch_note()
+                })
+                .size(11)
+                .color(style::DIM)
+                .boxed(),
+            );
+            c = c.push(text(tr::worktree_repos_note()).size(11).color(style::FAINT).boxed());
+        } else {
+            c = c.push(
+                container(text(tr::original_repo_warning()).size(11))
+                    .padding(8)
+                    .width(Fill)
+                    .style(style::warn_box)
                     .boxed(),
             );
-            if l.entries.is_empty() {
-                list = list.push(
-                    text(tr::browse_empty())
+            c = c.push(text(tr::original_repo_label()).size(12).font(style::BOLD).boxed());
+            let choices: Vec<Choice> = self
+                .repos
+                .iter()
+                .map(|r| Choice {
+                    key: r.id.clone(),
+                    label: format!("{} · {}", r.name, r.path),
+                })
+                .collect();
+            if choices.is_empty() {
+                c = c.push(
+                    text(tr::no_repos_register_first())
                         .size(12)
-                        .color(style::FAINT)
+                        .color(style::DIM)
                         .boxed(),
                 );
-            }
-            for e in &l.entries {
-                let r = folder_entry_row(e, None);
-                list = list.push(
-                    button(r)
-                        .padding([3, 6])
+            } else {
+                let sel = choices
+                    .iter()
+                    .find(|x| f.original_repo.as_deref() == Some(x.key.as_str()))
+                    .cloned();
+                c = c.push(
+                    pick_list(sel, choices, |c: &Choice| c.label.clone())
+                        .on_select(|c: Choice| Message::NewOriginalRepo(c.key))
+                        .text_size(13)
+                        .padding([5, 8])
                         .width(Fill)
-                        .style(style::row(same_path(&e.path, &f.repo)))
-                        .on_press(Message::BrowseGo(e.path.clone()))
                         .boxed(),
                 );
             }
-        } else if b.loading {
-            list = list.push(text(tr::tree_loading()).size(12).color(style::DIM).boxed());
         }
-        let list = list.padding(iced::Padding {
-            right: 12.0,
-            ..iced::Padding::ZERO
-        });
-        let mut c = column![head, scrollable(list).height(200)].spacing(6);
-        if let Some(e) = &b.error {
+        container(c)
+            .padding(10)
+            .width(Fill)
+            .style(style::card)
+            .boxed()
+    }
+
+    /// Desk's "세션 설정" repo table: the session's worktrees (each can be detached: an ide
+    /// addition) and registered repos to add, attached on "save".
+    fn session_repos_card<'a>(&'a self, f: &'a SessionReposForm) -> El<'a> {
+        let Some(live) = self.live(&f.session) else {
+            return space().boxed();
+        };
+        let s = &live.info;
+        let mut c = column![
+            text(tr::session_repos_title(&s.title))
+                .size(18)
+                .font(style::BOLD),
+            row![
+                text(tr::session_repos_label()).size(12).font(style::BOLD),
+                space().width(Fill),
+                text(s.root.as_str())
+                    .size(11)
+                    .font(style::MONO)
+                    .color(style::FAINT)
+                    .wrapping(text::Wrapping::None)
+                    .ellipsis(text::Ellipsis::Start),
+            ]
+            .spacing(8)
+            .boxed(),
+        ]
+        .spacing(10);
+        let workspace = s.mode == ide_client::SessionMode::Workspace;
+        let mut list: Column<El<'_>> = Column::new().spacing(3);
+        for r in &s.repos {
+            let mut row_el = row![
+                icons::icon(Icon::GitBranch, 14.0, style::DIM),
+                text(r.name.as_str()).size(13).width(Fill),
+                text(format!("{} ← {}", r.branch, r.base))
+                    .size(11)
+                    .font(style::MONO)
+                    .color(style::DIM),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if workspace {
+                row_el = row_el.push(icon_button(
+                    I_DELETE,
+                    (!f.busy && self.connected())
+                        .then(|| Message::SessionRepoDetach(r.repo.clone())),
+                    tr::session_repo_detach(),
+                ));
+            }
+            list = list.push(
+                container(row_el)
+                    .padding([3, 8])
+                    .style(style::bg(style::HEADER))
+                    .boxed(),
+            );
+        }
+        if s.repos.is_empty() {
+            list = list.push(text(tr::no_repos()).size(12).color(style::DIM).boxed());
+        }
+        c = c.push(list.boxed());
+        if workspace {
+            let addable: Vec<&ide_client::RepoInfo> = self
+                .repos
+                .iter()
+                .filter(|r| !s.repos.iter().any(|x| x.repo == r.id))
+                .collect();
+            if !addable.is_empty() {
+                c = c.push(
+                    text(tr::session_repos_add_label())
+                        .size(12)
+                        .font(style::BOLD)
+                        .boxed(),
+                );
+                for r in addable {
+                    let id = r.id.clone();
+                    c = c.push(
+                        checkbox(f.add.contains(&r.id))
+                            .label(format!("{}  ·  {}", r.name, r.path))
+                            .on_toggle(move |v| Message::SessionRepoAdd(id.clone(), v))
+                            .size(15)
+                            .text_size(12)
+                            .boxed(),
+                    );
+                }
+            } else if self.repos.is_empty() {
+                c = c.push(
+                    text(tr::no_repos_register_first())
+                        .size(12)
+                        .color(style::DIM)
+                        .boxed(),
+                );
+            }
+            c = c.push(text(tr::session_repos_note()).size(11).color(style::FAINT).boxed());
+        } else {
+            c = c.push(
+                text(tr::session_repos_no_workspace())
+                    .size(12)
+                    .color(style::DIM)
+                    .boxed(),
+            );
+        }
+        if let Some(e) = &f.error {
             c = c.push(error_box(e));
         }
-        browser_frame(c.boxed())
+        c = c.push(
+            row![
+                space().width(Fill),
+                button(text(tr::cancel()).size(13))
+                    .padding([6, 14])
+                    .style(style::secondary)
+                    .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                button(text(tr::save()).size(13))
+                    .padding([6, 14])
+                    .style(style::primary)
+                    .on_press_maybe(
+                        (!f.busy && self.connected()).then_some(Message::SessionReposSave)
+                    ),
+            ]
+            .spacing(8)
+            .boxed(),
+        );
+        c.width(520).boxed()
     }
 
     /// The repos page's folder picker (`browse.pick_list`: any folder the server's OS user
     /// can read; server-side, so it also works over SSH).
     fn pick_root_card<'a>(&'a self, f: &'a PickRootForm) -> El<'a> {
         let current = f.listing.as_ref();
-        let home = self.settings.roots.as_ref().and_then(|c| c.home.as_deref());
         // Up: the parent folder, or the start list from a drive / `/`.
         let up = current
             .filter(|l| !l.path.is_empty())
@@ -899,11 +1055,8 @@ impl App {
                 );
             }
             for (i, e) in l.entries.iter().enumerate() {
-                let tag = (l.path.is_empty()
-                    && home.is_some_and(|h| crate::app::same_path(h, &e.path)))
-                .then(tr::browse_home);
                 let selected = f.selected == Some(i);
-                let r = container(folder_entry_row(e, tag))
+                let r = container(folder_entry_row(e, None))
                     .padding([3, 6])
                     .width(Fill)
                     .style(move |_| container::Style {
@@ -968,7 +1121,7 @@ impl App {
                         target
                             .is_some()
                             .then_some(Message::PickConfirm)
-                            .filter(|_| self.connected() && !self.settings.roots_busy)
+                            .filter(|_| self.connected() && !self.settings.repos_busy)
                     ),
             ]
             .spacing(8)
@@ -981,14 +1134,23 @@ impl App {
     /// Ctrl+P: files of the selected session by name.
     fn quick_open_card<'a>(&'a self, f: &'a QuickForm) -> El<'a> {
         let mut list: Column<El<'a>> = Column::new().spacing(1);
+        let multi = self.selected_live().is_some_and(|l| l.info.repos.len() > 1);
         for (i, m) in f.results.iter().enumerate() {
             let name = crate::detail::file_name(&m.path);
+            let folder = crate::detail::parent(&m.path);
+            // Several repos: the folder starts with the repo name.
+            let folder = if multi {
+                let r = self.repo_name(&m.repo);
+                if folder.is_empty() { r } else { format!("{r}/{folder}") }
+            } else {
+                folder.to_owned()
+            };
             list = list.push(
                 button(
                     row![
                         ide_views::icons::file_icon(name),
                         text(name).size(13).wrapping(text::Wrapping::None),
-                        text(crate::detail::parent(&m.path).to_owned())
+                        text(folder)
                             .size(11)
                             .color(style::DIM)
                             .wrapping(text::Wrapping::None)
@@ -1001,7 +1163,7 @@ impl App {
                 .padding([4, 8])
                 .width(Fill)
                 .style(style::row(i == f.selected))
-                .on_press(Message::QuickPick(m.path.clone()))
+                .on_press(Message::QuickPick(crate::detail::qualify(&m.repo, &m.path)))
                 .boxed(),
             );
         }
@@ -1052,7 +1214,7 @@ impl App {
                 tr::nav_configurations(),
                 vec![card(self.configurations_section(f, online))],
             ),
-            Page::Repos => (tr::nav_repos(), vec![card(self.roots_section(f, online))]),
+            Page::Repos => (tr::repos_title(), vec![card(self.repos_section(f, online))]),
             Page::Settings => (
                 tr::settings(),
                 vec![
@@ -1204,83 +1366,159 @@ impl App {
             .boxed()
     }
 
-    /// Repos page: folders the new-session dialog can browse on the server.
-    fn roots_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
-        let mut c = column![
-            label(tr::browse_roots_label()),
-            text(tr::browse_roots_note()).size(12).color(style::DIM),
-        ]
-        .spacing(10);
-        if let Some(cfg) = &f.roots {
-            let mut list: Column<El<'_>> = Column::new().spacing(4);
-            if let Some(h) = &cfg.home {
-                list = list.push(
-                    container(
-                        row![
-                            ide_views::icons::folder_icon(false, style::DIM),
-                            text(h.as_str()).size(12).width(Fill),
-                            text(tr::browse_home()).size(11).color(style::DIM),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([5, 8])
-                    .style(style::bg(style::HEADER))
-                    .boxed(),
-                );
-            }
-            for (i, r) in cfg.roots.iter().enumerate() {
-                list = list.push(
-                    container(
-                        row![
-                            ide_views::icons::folder_icon(false, style::DIM),
-                            text(r.as_str()).size(12).width(Fill),
-                            icon_button(
-                                I_DELETE,
-                                (online && !f.roots_busy).then_some(Message::RootRemove(i)),
-                                tr::remove()
-                            ),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([2, 8])
-                    .style(style::bg(style::HEADER))
-                    .boxed(),
-                );
-            }
-            c = c.push(list.boxed());
+    /// Repos page (Hermes Desk's `RepoList` + `ReposPage`): registered repositories on the
+    /// left with "add"; the selected one's name, path, base branch, the sessions using it and
+    /// "unregister (files kept)" with a confirm step on the right.
+    fn repos_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+        let mut list: Column<El<'_>> = Column::new().spacing(2);
+        for r in &self.repos {
+            let sel = f.repo_selected.as_deref() == Some(r.id.as_str());
+            list = list.push(
+                button(
+                    row![
+                        icons::icon(Icon::GitBranch, 14.0, style::DIM),
+                        text(r.name.as_str())
+                            .size(13)
+                            .wrapping(text::Wrapping::None)
+                            .ellipsis(text::Ellipsis::End)
+                            .width(Fill),
+                        text(r.sessions.to_string()).size(10).color(style::FAINT),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([5, 8])
+                .width(Fill)
+                .style(style::row(sel))
+                .on_press(Message::RepoSelect(r.id.clone()))
+                .boxed(),
+            );
         }
-        c = c.push(
+        if self.repos.is_empty() {
+            list = list.push(text(tr::repos_none()).size(12).color(style::DIM).boxed());
+        }
+        let left = column![
             row![
-                text_input(tr::browse_root_placeholder(), &f.root_input)
-                    .id(ROOT_INPUT_ID)
-                    .on_input(Message::RootInput)
-                    .on_submit(Message::RootAdd)
-                    .size(13)
-                    .padding([5, 8])
-                    .style(style::input)
-                    .width(Fill),
-                tip(
-                    button(icons::icon(Icon::FolderOpen, 16.0, style::DIM))
-                        .padding([5, 7])
-                        .style(style::secondary)
-                        .on_press_maybe((online && !f.roots_busy).then_some(Message::PickOpen))
-                        .boxed(),
-                    tr::pick_root_open()
-                ),
-                button(text(tr::add()).size(13))
-                    .padding([5, 12])
-                    .style(style::secondary)
-                    .on_press_maybe(
-                        (online && !f.roots_busy && !f.root_input.trim().is_empty())
-                            .then_some(Message::RootAdd)
-                    ),
+                label(tr::repos_list_label()),
+                space().width(Fill),
+                button(
+                    row![
+                        icons::icon(Icon::FolderOpen, 14.0, style::DIM),
+                        text(tr::repo_add()).size(12)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
+                )
+                .padding([3, 8])
+                .style(style::secondary)
+                .on_press_maybe((online && !f.repos_busy).then_some(Message::PickOpen)),
             ]
-            .spacing(6)
-            .boxed(),
-        );
-        if let Some(e) = &f.roots_error {
+            .align_y(Alignment::Center),
+            list,
+            text_input(tr::repo_path_placeholder(), &f.repo_input)
+                .id(REPO_INPUT_ID)
+                .on_input(Message::RepoInput)
+                .on_submit(Message::RepoAdd)
+                .size(12)
+                .padding([5, 8])
+                .style(style::input)
+                .width(Fill),
+        ]
+        .spacing(8)
+        .width(240);
+        let selected = f
+            .repo_selected
+            .as_deref()
+            .and_then(|id| self.repos.iter().find(|r| r.id == id));
+        let right: El<'_> = match selected {
+            None => text(tr::repos_pick_note()).size(12).color(style::DIM).boxed(),
+            Some(r) => {
+                let users: Vec<&Live> = self
+                    .sessions
+                    .iter()
+                    .filter(|l| l.info.repos.iter().any(|x| x.repo == r.id))
+                    .collect();
+                let mut sessions: Column<El<'_>> = Column::new().spacing(2);
+                for l in &users {
+                    let branch = l
+                        .info
+                        .repos
+                        .iter()
+                        .find(|x| x.repo == r.id)
+                        .map(|x| x.branch.clone())
+                        .unwrap_or_default();
+                    sessions = sessions.push(
+                        row![
+                            text(l.info.title.as_str()).size(12).width(Fill),
+                            text(branch).size(11).font(style::MONO).color(style::DIM),
+                        ]
+                        .spacing(8)
+                        .boxed(),
+                    );
+                }
+                if users.is_empty() {
+                    sessions =
+                        sessions.push(text(tr::repo_no_sessions()).size(12).color(style::DIM).boxed());
+                }
+                let actions: El<'_> = if f.repo_confirm {
+                    row![
+                        button(text(tr::repo_unregister()).size(12))
+                            .padding([4, 12])
+                            .style(style::danger)
+                            .on_press_maybe(
+                                (online && !f.repos_busy)
+                                    .then(|| Message::RepoUnregister(r.id.clone()))
+                            ),
+                        button(text(tr::cancel()).size(12))
+                            .padding([4, 12])
+                            .style(style::secondary)
+                            .on_press(Message::RepoConfirm(false)),
+                    ]
+                    .spacing(6)
+                    .boxed()
+                } else {
+                    button(text(tr::repo_unregister_keep_files()).size(12))
+                        .padding([4, 12])
+                        .style(style::secondary)
+                        .on_press_maybe(online.then_some(Message::RepoConfirm(true)))
+                        .boxed()
+                };
+                column![
+                    row![
+                        column![
+                            text(r.name.as_str()).size(18).font(style::BOLD),
+                            text(r.path.as_str())
+                                .size(12)
+                                .font(style::MONO)
+                                .color(style::DIM),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        actions,
+                    ]
+                    .align_y(Alignment::Center),
+                    label(tr::repo_base_label()),
+                    text(if r.base.is_empty() {
+                        tr::repo_base_unknown()
+                    } else {
+                        r.base.clone()
+                    })
+                    .size(13)
+                    .font(style::MONO),
+                    text(tr::repo_base_note()).size(11).color(style::FAINT),
+                    label(tr::repo_sessions_label(i18n::count(users.len()))),
+                    sessions,
+                ]
+                .spacing(8)
+                .boxed()
+            }
+        };
+        let mut c = column![
+            text(tr::repos_note()).size(12).color(style::DIM),
+            row![left, vline_full(), container(right).width(Fill)].spacing(16),
+        ]
+        .spacing(12);
+        if let Some(e) = &f.repos_error {
             c = c.push(error_box(e));
         }
         c.boxed()
@@ -1499,15 +1737,45 @@ impl App {
                     Support::Fallback => "~",
                     Support::Unsupported => "✕",
                 };
-                tr::provider_support(
+                // Per session mode (workspace / original repo).
+                tr::provider_support_modes(
                     &p.name,
-                    s(p.caps.skills),
-                    s(p.caps.mcp),
-                    s(p.caps.instructions),
+                    &format!(
+                        "{}{}{}",
+                        s(p.caps.skills),
+                        s(p.caps.mcp),
+                        s(p.caps.instructions)
+                    ),
+                    &format!(
+                        "{}{}{}",
+                        s(p.caps.original_repo.skills),
+                        s(p.caps.original_repo.mcp),
+                        s(p.caps.original_repo.instructions)
+                    ),
                 )
             })
             .collect::<Vec<_>>()
             .join("   ");
+        // Desk's "기본 레포": pre-checked in the new-session dialog.
+        let registered: Vec<String> = self.repos.iter().map(|r| r.id.clone()).collect();
+        let defaults = crate::app::default_repos_for(e.default_repos.as_ref(), &registered);
+        let mut default_repos: Column<El<'_>> = Column::new().spacing(3);
+        for r in &self.repos {
+            let on = defaults.contains(&r.id);
+            let id = r.id.clone();
+            default_repos = default_repos.push(
+                checkbox(on)
+                    .label(format!("{}  ·  {}", r.name, r.path))
+                    .on_toggle(move |v| Message::CfgDefaultRepo(id.clone(), v))
+                    .size(14)
+                    .text_size(12)
+                    .boxed(),
+            );
+        }
+        if self.repos.is_empty() {
+            default_repos =
+                default_repos.push(text(tr::repos_none()).size(11).color(style::DIM).boxed());
+        }
         let mut skills: Column<El<'_>> = Column::new().spacing(4);
         for (i, sk) in e.skills.iter().enumerate() {
             skills = skills.push(
@@ -1574,6 +1842,11 @@ impl App {
                 ]
                 .align_y(Alignment::Center),
                 mcp,
+                small(tr::configuration_default_repos()),
+                default_repos,
+                text(tr::configuration_default_repos_note())
+                    .size(10)
+                    .color(style::FAINT),
                 text(support).size(10).color(style::FAINT),
                 row![
                     space().width(Fill),
@@ -1651,30 +1924,6 @@ impl App {
                 };
                 let mut c = column![
                     text(tr::new_session()).size(18).font(style::BOLD),
-                    label(tr::repo_folder_label()),
-                    row![
-                        text_input(tr::repo_placeholder(), &f.repo)
-                            .id(NEW_REPO_ID)
-                            .on_input(Message::NewRepo)
-                            .on_submit(Message::NewSubmit)
-                            .size(13)
-                            .padding([6, 8])
-                            .style(style::input)
-                            .width(Fill),
-                        tip(
-                            button(ide_views::icons::folder_icon(
-                                f.browser.is_some(),
-                                style::DIM
-                            ))
-                            .padding([7, 8])
-                            .style(style::choice(f.browser.is_some()))
-                            .on_press_maybe(self.when_connected(Message::NewBrowse))
-                            .boxed(),
-                            tr::browse()
-                        ),
-                    ]
-                    .spacing(6),
-                    self.folder_browser(f),
                     label(tr::agent_label()),
                     providers,
                     account_row,
@@ -1686,19 +1935,13 @@ impl App {
                         .width(Fill),
                     label(tr::title_label()),
                     text_input(tr::title_placeholder(), &f.title)
+                        .id(NEW_TITLE_ID)
                         .on_input(Message::NewTitle)
                         .on_submit(Message::NewSubmit)
                         .size(13)
                         .padding([6, 8])
                         .style(style::input),
-                    label(tr::base_ref_label()),
-                    text_input(tr::base_ref_placeholder(), &f.base_ref)
-                        .on_input(Message::NewBase)
-                        .on_submit(Message::NewSubmit)
-                        .size(13)
-                        .padding([6, 8])
-                        .style(style::input),
-                    text(tr::worktree_note()).size(11).color(style::FAINT),
+                    self.new_workspace_section(f),
                 ]
                 .spacing(8);
                 if let Some(e) = &f.error {
@@ -1741,8 +1984,14 @@ impl App {
                 ]
                 .spacing(10);
                 if let Some(s) = s {
+                    let mut lines = vec![s.root.clone()];
+                    lines.extend(
+                        s.repos
+                            .iter()
+                            .map(|r| format!("  {}  ({})", r.path, r.branch)),
+                    );
                     c = c.push(
-                        text(format!("{}  ({})", s.worktree_path, s.branch))
+                        text(lines.join("\n"))
                             .size(11)
                             .font(style::MONO)
                             .color(style::FAINT)
@@ -1884,6 +2133,7 @@ impl App {
             }
             Modal::QuickOpen(f) => self.quick_open_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
+            Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::DefPicker(f) => {
                 let mut list = Column::new().spacing(2);
                 for (i, t) in f.targets.iter().enumerate() {

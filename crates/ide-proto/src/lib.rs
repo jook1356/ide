@@ -15,12 +15,12 @@ pub mod rpc;
 pub mod term;
 
 pub use agents::{
-    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ProviderCaps, ProviderDetection,
-    ProviderInfo, SessionKind, Support,
+    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
+    ProviderDetection, ProviderInfo, RepoInfo, SessionKind, SessionMode, SessionRepo, Support,
 };
 pub use error::ProtoError;
 pub use files::{
-    AheadBehind, BrowseConfig, BrowseEntry, BrowseListing, ByteRange, ChangeKind, DefResult,
+    AheadBehind, BrowseEntry, BrowseListing, ByteRange, ChangeKind, DefResult,
     DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent, FileMatch,
     FsEntry, FsStat, GitChange, GitRev, GitStatus, LineKind, SearchMatch, SearchSummary,
     TextEncoding, TextSearch,
@@ -31,8 +31,8 @@ pub use mux::{
     StreamSender,
 };
 pub use rpc::{
-    Attached, Hello, NewSession, Notify, PROTO_VERSION, Request, Response, ResumeToken, RpcMessage,
-    SessionInfo, SessionState, UserInfo, Welcome,
+    Attached, Hello, NewSession, Notify, PROTO_VERSION, RepoFailureInfo, Request, Response,
+    ResumeToken, RpcMessage, SessionInfo, SessionState, UserInfo, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};
 

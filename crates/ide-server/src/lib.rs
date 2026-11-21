@@ -5,8 +5,8 @@
 //! - [`daemon`]: local socket listener, `--stdio` relay, detached daemon start.
 //! - Multi-user foundation: [`UserInfo`](ide_proto::UserInfo) from the transport,
 //!   [`Server::authorize`] / [`UserCtx`] resolve every resource for the connection's user,
-//!   all spawns go through [`Runner`], [`Audit`] records actions, [`PathJail`] / [`RootJail`]
-//!   confine every client path (phase 2: `fs.*`, `browse.*`, `search.*`, `git.*`, `def.lookup`).
+//!   all spawns go through [`Runner`], [`Audit`] records actions, [`RootJail`] confines every
+//!   client path to one repo worktree of one session (`fs.*`, `search.*`, `git.*`, `def.lookup`).
 
 pub mod audit;
 mod conn;
@@ -24,7 +24,7 @@ pub mod user;
 pub mod watch;
 
 pub use audit::{Audit, FileAudit, NoAudit};
-pub use jail::{PathJail, RootJail};
+pub use jail::RootJail;
 pub use pty::TermHost;
 pub use runner::{PtyChild, Runner, SameUserRunner, SpawnSpec};
 pub use service::{SERVER_CONFIG_FILE, Server, ServerConfig, UserCtx, core_error};

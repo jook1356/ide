@@ -1,9 +1,10 @@
 //! Phase 2 wire types: files, repository browsing, search, git, go-to-definition.
 //!
 //! Conventions:
-//! - Paths inside a session are **root-relative** to the session's worktree, `/`-separated,
-//!   without `.`/`..` components (`""` = the root). Only repository browsing uses absolute
-//!   paths (server OS syntax).
+//! - File, git, search and definition requests name `(session, repo)`: the worktree of that
+//!   registered repo attached to that session. Paths are **root-relative** to that worktree,
+//!   `/`-separated, without `.`/`..` components (`""` = the root). Only the folder picker uses
+//!   absolute paths (server OS syntax).
 //! - Lines are 1-based. Columns (`col`) are 1-based and count Unicode scalar values (`char`s)
 //!   of the line. Byte ranges are only used for [`SearchMatch::ranges`] (into `line_text`).
 //! - Times are Unix milliseconds.
@@ -131,25 +132,15 @@ pub struct BrowseEntry {
 pub struct BrowseListing {
     /// The listed folder (absolute, canonical, server OS syntax).
     pub path: String,
-    /// Parent folder if it is still inside a browse root (`browse.pick_list`: the parent
-    /// folder, `None` at a filesystem root; the drive/start list has the path `""`).
+    /// Parent folder (`None` at a filesystem root; the drive/start list has the path `""`).
     pub parent: Option<String>,
     /// The listed folder itself is a repository root.
     pub is_git_repo: bool,
     /// Sub-folders, sorted by name (case-insensitive).
     pub entries: Vec<BrowseEntry>,
-    /// `browse.pick_list` only: more folders than the server's cap; the rest were dropped.
+    /// More folders than the server's cap; the rest were dropped.
     #[serde(default)]
     pub truncated: bool,
-}
-
-/// `browse.config` / `browse.set_roots` result: the folders repositories can be picked from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowseConfig {
-    /// The user's home dir (always a browse root; `None` if unknown).
-    pub home: Option<String>,
-    /// Extra roots stored in the server's `server.json` (`browse_roots`), as saved.
-    pub roots: Vec<String>,
 }
 
 /// `search.text` query.
@@ -157,6 +148,8 @@ pub struct BrowseConfig {
 pub struct TextSearch {
     /// Session id.
     pub session: String,
+    /// Repo id to search; `None` = every repo attached to the session.
+    pub repo: Option<String>,
     /// Search text (a regular expression when `regex`).
     pub query: String,
     /// `query` is a regex (Rust `regex` syntax); otherwise a literal.
@@ -186,6 +179,8 @@ pub struct ByteRange {
 /// One matching line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchMatch {
+    /// Repo id the file belongs to.
+    pub repo: String,
     /// Root-relative path.
     pub path: String,
     /// 1-based line number.
@@ -218,6 +213,8 @@ pub struct SearchSummary {
 /// `search.files` result entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMatch {
+    /// Repo id the file belongs to.
+    pub repo: String,
     /// Root-relative path.
     pub path: String,
     /// Match score (higher is better).

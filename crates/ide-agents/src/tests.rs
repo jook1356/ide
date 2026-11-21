@@ -106,14 +106,128 @@ fn input<'a>(
     acct: Option<&'a Account>,
     cfg: &'a Configuration,
 ) -> SessionInput<'a> {
+    // Original-repo mode: nothing may be written into the cwd (flags and scratch only).
     SessionInput {
         session_id: "s1",
         title: "My session",
-        cwd: &f.cwd,
-        scratch: f.t.0.join("data").join("sessions").join("s1").join("agent"),
+        ctx: SessionContext {
+            mode: SessionMode::OriginalRepo,
+            root: f.cwd.clone(),
+            repos: Vec::new(),
+            scratch: f.t.0.join("data").join("sessions").join("s1").join("agent"),
+            guidance: None,
+        },
         account: acct,
         configuration: cfg,
     }
+}
+
+/// A workspace session: the session folder (cwd) holds one worktree; a second repo's
+/// worktree and both git dirs lie outside it.
+fn workspace_input<'a>(
+    f: &'a Fixture,
+    acct: Option<&'a Account>,
+    cfg: &'a Configuration,
+) -> SessionInput<'a> {
+    let root = f.t.0.join("workspaces").join("s1");
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    let mut i = input(f, acct, cfg);
+    i.ctx = SessionContext {
+        mode: SessionMode::Workspace,
+        repos: vec![
+            RepoInfo {
+                name: "app".into(),
+                path: root.join("app"),
+                git_dir: Some(f.t.0.join("src").join("app").join(".git")),
+            },
+            RepoInfo {
+                name: "old".into(),
+                path: f.t.0.join("worktrees").join("old"),
+                git_dir: None,
+            },
+        ],
+        root,
+        guidance: Some("# Session workspace s1\n- `app/`".into()),
+        ..i.ctx
+    };
+    i
+}
+
+#[test]
+fn workspace_root_files() {
+    let f = fixture("agents-root");
+    let cfg = configuration(&f);
+    let dirs = |_: &SessionInput<'_>| {
+        vec![
+            s(&f.t.0.join("src").join("app").join(".git")),
+            s(&f.t.0.join("worktrees").join("old")),
+        ]
+    };
+    // Claude: .claude/skills + CLAUDE.md in the session folder, MCP + instructions by flag.
+    let inp = workspace_input(&f, None, &cfg);
+    let root = inp.ctx.root.clone();
+    std::fs::create_dir_all(root.join(".claude").join("skills").join("stale")).unwrap();
+    let out = assemble(&Claude, &inp, &f.env).unwrap();
+    assert!(root.join(".claude/skills/lint-fix/SKILL.md").is_file());
+    assert!(root.join(".claude/skills/lint-fix/references/rules.md").is_file());
+    assert!(!root.join(".claude/skills/stale").exists(), "regenerated");
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        "# Session workspace s1\n- `app/`"
+    );
+    assert!(!out.spec.args.contains(&"--plugin-dir".to_owned()), "{:?}", out.spec.args);
+    let a = &out.spec.args;
+    let add: Vec<String> = a
+        .windows(2)
+        .filter(|w| w[0] == "--add-dir")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(add, dirs(&inp));
+    assert!(a.contains(&"--mcp-config".to_owned()));
+    let instr = std::fs::read_to_string(inp.ctx.scratch.join("instructions.md")).unwrap();
+    assert!(!instr.contains("Session workspace"), "guidance is in CLAUDE.md: {instr}");
+    assert_eq!(std::fs::read_dir(root.join("app")).unwrap().count(), 0, "worktree untouched");
+
+    // Codex: .agents/skills + AGENTS.md; skills no longer in the developer instructions.
+    let inp = workspace_input(&f, None, &cfg);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert!(root.join(".agents/skills/lint-fix/SKILL.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+        "# Session workspace s1\n- `app/`"
+    );
+    let dev = out
+        .spec
+        .args
+        .iter()
+        .find(|a| a.starts_with("developer_instructions="))
+        .unwrap();
+    assert!(!dev.contains("lint-fix") && dev.contains("pnpm"), "{dev}");
+    let add: Vec<String> = out
+        .spec
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--add-dir")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(add, dirs(&inp));
+
+    // Shell: nothing written; a declarative-style default puts the guidance in the instructions.
+    let inp = workspace_input(&f, None, &cfg);
+    std::fs::remove_file(root.join("AGENTS.md")).unwrap();
+    assemble(&Shell, &inp, &f.env).unwrap();
+    assert!(!root.join("AGENTS.md").exists());
+
+    // Original-repo mode refuses root files.
+    let plan = LaunchPlan::new("x", &input(&f, None, &cfg));
+    assert!(plan.write_root_file("CLAUDE.md", b"x").is_err());
+    assert!(plan.root_dir(".claude").is_err());
+    worktree_untouched(&f);
+
+    // Caps per mode.
+    assert_eq!(Codex.capabilities().mode(SessionMode::Workspace).skills, Support::Native);
+    assert_eq!(Codex.capabilities().mode(SessionMode::OriginalRepo).skills, Support::Fallback);
+    assert_eq!(Claude.capabilities().mode(SessionMode::OriginalRepo).skills, Support::Native);
 }
 
 fn env_of<'a>(spec: &'a LaunchSpec, key: &str) -> Option<&'a str> {
@@ -142,7 +256,7 @@ fn claude_spec() {
     let cfg = configuration(&f);
     let inp = input(&f, Some(&acct), &cfg);
     let out = assemble(&Claude, &inp, &f.env).unwrap();
-    let scratch = &inp.scratch;
+    let scratch = &inp.ctx.scratch;
     let plugin = scratch.join("plugin");
     assert_eq!(out.spec.program, f.bin.join(exe("claude")));
     assert_eq!(
@@ -262,7 +376,7 @@ fn shell_spec_ignores_configuration() {
     assert!(out.spec.args.is_empty());
     let keys: Vec<_> = out.spec.env.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(keys, ["TERM", "COLORTERM"]);
-    assert!(!inp.scratch.exists());
+    assert!(!inp.ctx.scratch.exists());
     assert_eq!(Shell.capabilities(), Caps::NONE);
     let d = Shell.detect(&f.env);
     assert!(d.usable(), "{d:?}");
@@ -344,7 +458,7 @@ fn declarative_parse_and_spec() {
     let cfg = configuration(&f);
     let inp = input(&f, Some(&acct), &cfg);
     let out = assemble(&p, &inp, &f.env).unwrap();
-    let instr = inp.scratch.join("instructions.md");
+    let instr = inp.ctx.scratch.join("instructions.md");
     assert_eq!(
         out.spec.args,
         vec![
@@ -361,7 +475,7 @@ fn declarative_parse_and_spec() {
     );
     assert_eq!(
         env_of(&out.spec, "GEMINI_SCRATCH"),
-        Some(s(&inp.scratch).as_str())
+        Some(s(&inp.ctx.scratch).as_str())
     );
     let text = std::fs::read_to_string(&instr).unwrap();
     assert!(
@@ -401,7 +515,7 @@ fn declarative_parse_and_spec() {
     let empty = Configuration::empty("default", "default");
     let inp2 = input(&f, None, &empty);
     let out = assemble(&file_p, &inp2, &f.env).unwrap();
-    let rules = inp2.scratch.join("RULES.md");
+    let rules = inp2.ctx.scratch.join("RULES.md");
     assert_eq!(out.spec.args, vec!["--rules".to_owned(), s(&rules)]);
     assert!(rules.is_file(), "file mechanism always writes the file");
     // No instructions mechanism: skills cannot fall back either.
@@ -550,7 +664,7 @@ fn real_cli_checks() {
     let inp = input(&f, Some(&acct), &cfg);
     let out = assemble(&Claude, &inp, &real).unwrap();
     println!("claude spec: {:#?}", out.spec);
-    let plugin = inp.scratch.join("plugin");
+    let plugin = inp.ctx.scratch.join("plugin");
     let (code, so, se) = run(
         &out.spec.program,
         &[
@@ -575,7 +689,7 @@ fn real_cli_checks() {
         r#"{"name":"ide-mcp-probe","version":"1.0.0","description":"probe","author":{"name":"ide"}}"#,
     )
     .unwrap();
-    std::fs::copy(inp.scratch.join("mcp.json"), probe.join(".mcp.json")).unwrap();
+    std::fs::copy(inp.ctx.scratch.join("mcp.json"), probe.join(".mcp.json")).unwrap();
     let (code, so, se) = run(
         &out.spec.program,
         &[

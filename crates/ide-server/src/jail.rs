@@ -1,10 +1,11 @@
 //! Path jail: client paths must resolve inside the user's allowed roots after
 //! canonicalization; `..` components, malformed names and symlink/junction escapes are
 //! rejected. Every file/git/search RPC goes through it:
-//! - session APIs take **root-relative** paths and use a [`RootJail`] for the session's
-//!   worktree ([`RootJail::resolve`] follows symlinks, [`RootJail::resolve_entry`] does not
-//!   follow the last component, for delete/rename/stat of a link itself);
-//! - repository browsing takes absolute paths inside the browse roots ([`PathJail`]).
+//! session APIs name `(session, repo)` and take **root-relative** paths; they use a
+//! [`RootJail`] for that repo's worktree in that session ([`RootJail::resolve`] follows
+//! symlinks, [`RootJail::resolve_entry`] does not follow the last component, for
+//! delete/rename/stat of a link itself). The registry of repositories and the sessions'
+//! worktrees are the whole scope: there are no other roots.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -102,62 +103,6 @@ fn canonical_prefix(joined: &Path, err: impl Fn() -> ProtoError) -> Result<PathB
         full.push(t);
     }
     Ok(full)
-}
-
-/// Allowed roots for one user (absolute paths: repository browsing).
-#[derive(Debug, Clone, Default)]
-pub struct PathJail {
-    roots: Vec<PathBuf>,
-}
-
-impl PathJail {
-    /// Jail with these roots (canonicalized; missing roots are skipped).
-    pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
-        let mut j = PathJail::default();
-        for r in roots {
-            j.add_root(&r);
-        }
-        j
-    }
-
-    /// Add a root.
-    pub fn add_root(&mut self, root: &Path) {
-        if let Ok(r) = canonicalize(root)
-            && !self.roots.contains(&r)
-        {
-            self.roots.push(r);
-        }
-    }
-
-    /// The canonical roots.
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
-    }
-
-    /// Resolve a client path: relative paths are joined to the first root; the result (its
-    /// longest existing ancestor, canonicalized, plus the missing tail) must lie inside a root.
-    pub fn resolve(&self, path: &str) -> Result<PathBuf, ProtoError> {
-        let p = Path::new(path);
-        if path.contains('\0') || p.components().any(|c| matches!(c, Component::ParentDir)) {
-            return Err(denied(path));
-        }
-        let joined = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.roots.first().ok_or_else(|| denied(path))?.join(p)
-        };
-        let full = canonical_prefix(&joined, || denied(path))?;
-        if self.contains(&full) {
-            Ok(full)
-        } else {
-            Err(denied(path))
-        }
-    }
-
-    /// `p` (canonical) lies inside a root.
-    pub fn contains(&self, p: &Path) -> bool {
-        self.roots.iter().any(|r| p.starts_with(r))
-    }
 }
 
 /// The jail of one root (a session worktree): root-relative paths only.
@@ -317,39 +262,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inside_outside_and_dotdot() {
-        let t = tmp("jail-a");
-        let root = t.join("root");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::create_dir_all(t.join("other")).unwrap();
-        let jail = PathJail::new([root.clone()]);
-        let canon_root = canonicalize(&root).unwrap();
-        assert_eq!(jail.resolve("sub").unwrap(), canon_root.join("sub"));
-        assert_eq!(
-            jail.resolve("sub/new/file.txt").unwrap(),
-            canon_root.join("sub").join("new").join("file.txt")
-        );
-        assert!(
-            jail.resolve(&root.join("sub").display().to_string())
-                .is_ok()
-        );
-        assert_eq!(jail.resolve("../other").unwrap_err().id, "path-denied");
-        assert!(jail.resolve("sub/../../other").is_err());
-        assert!(
-            jail.resolve(&t.join("other").display().to_string())
-                .is_err()
-        );
-        // A sibling whose name extends the root's name is outside.
-        std::fs::create_dir_all(t.join("root2")).unwrap();
-        assert!(
-            jail.resolve(&t.join("root2").display().to_string())
-                .is_err()
-        );
-        assert!(PathJail::default().resolve("x").is_err());
-        let _ = std::fs::remove_dir_all(&t);
-    }
-
-    #[test]
     fn rel_paths() {
         assert_eq!(normalize_rel("a/./b//c").unwrap(), "a/b/c");
         assert_eq!(normalize_rel("a\\b").unwrap(), "a/b");
@@ -420,35 +332,8 @@ mod tests {
         assert_eq!(j.resolve("link/new.txt").unwrap_err().id, "path-denied");
         assert_eq!(j.resolve_entry("link").unwrap(), j.root().join("link"));
         assert!(j.resolve_entry("link/s.txt").is_err());
-        let pj = PathJail::new([root.clone()]);
-        assert!(
-            pj.resolve(&root.join("link").join("s.txt").display().to_string())
-                .is_err()
-        );
         remove_dir_link(&root.join("link"));
         assert!(t.join("secret").join("s.txt").exists());
-        let _ = std::fs::remove_dir_all(&t);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn unc_paths() {
-        let t = tmp("jail-u");
-        let jail = PathJail::new([t.clone()]);
-        assert!(jail.resolve(r"\\localhost\c$\Windows").is_err());
-        assert!(jail.resolve(r"\\?\C:\Windows").is_err());
-        assert!(jail.resolve(r"\\nonexistent-host-x\share\x").is_err());
-        let s = jail.roots()[0].display().to_string();
-        // An admin-share alias of a folder inside the root canonicalizes to a UNC path,
-        // which is not inside the (drive-letter) root: denied rather than aliased.
-        if let Some(rest) = s.strip_prefix("C:\\") {
-            let unc = format!(r"\\localhost\c$\{rest}");
-            if let Ok(r) = jail.resolve(&unc) {
-                assert!(r.starts_with(&jail.roots()[0]));
-            }
-        }
-        // The verbatim form of a path inside the root is fine.
-        assert!(jail.resolve(&format!(r"\\?\{s}")).is_ok());
         let _ = std::fs::remove_dir_all(&t);
     }
 }

@@ -72,6 +72,10 @@ pub fn proto_error(e: &ProtoError) -> String {
         "git" => tr::err_git(&a("args"), &a("status"), &a("detail")),
         "worktree-exists" => tr::err_worktree_exists(&a("path")),
         "program-not-found" => tr::err_program_not_found(&a("program")),
+        "repo-not-found" => tr::err_repo_not_found(&a("id")),
+        "repo-in-use" => tr::err_repo_in_use(n("count"), &a("name")),
+        "repo-not-attached" => tr::err_repo_not_attached(&a("name")),
+        "not-a-workspace-session" => tr::err_not_a_workspace_session(&a("id")),
         // protocol / server
         "bad-message" => tr::err_bad_message(&a("detail")),
         "bad-request" => tr::err_bad_request(&a("method")),

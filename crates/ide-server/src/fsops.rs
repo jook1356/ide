@@ -1,5 +1,5 @@
 //! File operations of a session worktree (`fs.*`) and repository browsing (`browse.*`).
-//! Every path goes through the [`RootJail`] / [`PathJail`]; mutations are audited by the
+//! Every session path goes through the [`RootJail`]; mutations are audited by the
 //! caller.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use ide_proto::{
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::jail::{PathJail, RootJail, canonicalize, is_git_internal, normalize_rel};
+use crate::jail::{RootJail, canonicalize, is_git_internal, normalize_rel};
 
 /// Default `fs.read` limit.
 pub const DEFAULT_MAX_READ: u64 = 2 * 1024 * 1024;
@@ -616,70 +616,11 @@ fn has_git(p: &Path) -> bool {
     std::fs::symlink_metadata(p.join(".git")).is_ok()
 }
 
-/// `browse.list`: sub-folders of an absolute folder inside the browse roots.
-pub fn browse(jail: &PathJail, abs_dir: &str) -> Result<BrowseListing, ProtoError> {
-    let dir = if abs_dir.trim().is_empty() {
-        jail.roots()
-            .first()
-            .cloned()
-            .ok_or_else(|| crate::jail::denied(abs_dir))?
-    } else {
-        if !Path::new(abs_dir).is_absolute() {
-            return Err(crate::jail::invalid(abs_dir));
-        }
-        jail.resolve(abs_dir)?
-    };
-    let shown = dir.display().to_string();
-    let rd = std::fs::read_dir(&dir).map_err(|e| io_error(&shown, &e))?;
-    let mut entries = Vec::new();
-    for ent in rd.flatten() {
-        let Ok(ft) = ent.file_type() else { continue };
-        let p = ent.path();
-        // Directories and links to directories that stay inside the roots.
-        let is_dir = if ft.is_dir() && !is_link(&p) {
-            true
-        } else if ft.is_symlink() || is_junction(&ft) || is_link(&p) {
-            canonicalize(&p).is_ok_and(|c| c.is_dir() && jail.contains(&c))
-        } else {
-            false
-        };
-        if !is_dir {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
-            continue;
-        }
-        entries.push(BrowseEntry {
-            is_git_repo: has_git(&p),
-            path: p.display().to_string(),
-            name,
-        });
-    }
-    entries.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let parent = dir
-        .parent()
-        .filter(|p| jail.contains(p))
-        .map(|p| p.display().to_string());
-    Ok(BrowseListing {
-        is_git_repo: has_git(&dir),
-        path: shown,
-        parent,
-        entries,
-        truncated: false,
-    })
-}
-
 /// Most folders one `browse.pick_list` listing returns (sorted first, the rest dropped).
 pub const PICK_MAX_ENTRIES: usize = 2000;
 
 /// `browse.pick_list`: folders anywhere the server's OS user can read, used only to choose a
-/// new browse root. Not jailed: the server runs as the user, so the OS permissions decide what
+/// repository to register. Not jailed: the server runs as the user, so the OS permissions decide what
 /// can be listed (and nothing is read or written besides directory entries). `None` / `""` =
 /// the start list (drives or `/`, plus `home`).
 pub fn pick_list(abs_dir: Option<&str>, home: Option<&Path>) -> Result<BrowseListing, ProtoError> {
@@ -1064,42 +1005,6 @@ mod tests {
         assert!(make_dir_link(&outside, &root.join("dir").join("l2")));
         delete(&j, "dir", true).unwrap();
         assert!(outside.join("secret.txt").is_file());
-        let _ = std::fs::remove_dir_all(&t);
-    }
-
-    #[test]
-    fn browse_roots() {
-        let t = tmp("browse");
-        let home = t.join("홈");
-        init_repo(&home.join("repo1"), &[("a", "a")]);
-        std::fs::create_dir_all(home.join("plain/deeper")).unwrap();
-        std::fs::write(home.join("file.txt"), "f").unwrap();
-        std::fs::create_dir_all(t.join("outside")).unwrap();
-        assert!(make_dir_link(&t.join("outside"), &home.join("out-link")));
-        let jail = PathJail::new([home.clone()]);
-        let l = browse(&jail, "").unwrap();
-        let names: Vec<_> = l
-            .entries
-            .iter()
-            .map(|e| (e.name.as_str(), e.is_git_repo))
-            .collect();
-        assert_eq!(names, [("plain", false), ("repo1", true)]);
-        assert!(l.parent.is_none());
-        let sub = browse(&jail, &l.entries[0].path).unwrap();
-        assert_eq!(sub.entries[0].name, "deeper");
-        assert!(sub.parent.is_some());
-        assert_eq!(
-            browse(&jail, &t.display().to_string()).unwrap_err().id,
-            "path-denied"
-        );
-        assert_eq!(browse(&jail, "relative").unwrap_err().id, "path-invalid");
-        assert_eq!(
-            browse(&jail, &home.join("out-link").display().to_string())
-                .unwrap_err()
-                .id,
-            "path-denied"
-        );
-        remove_dir_link(&home.join("out-link"));
         let _ = std::fs::remove_dir_all(&t);
     }
 

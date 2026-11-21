@@ -16,8 +16,10 @@ pub struct LaunchPlan {
     pub title: String,
     /// Configuration slug (e.g. for generated plugin names).
     pub configuration: String,
-    /// Process cwd (the worktree).
+    /// Process cwd (session folder or original repository).
     pub cwd: PathBuf,
+    /// Workspace or original-repo session (root files are refused for the latter).
+    pub mode: crate::SessionMode,
     /// `sessions/<id>/agent`: generated files go here ([`LaunchPlan::write_file`]).
     pub scratch: PathBuf,
     /// Program name (resolved on `PATH` by [`crate::AgentProvider::finish`]).
@@ -39,8 +41,9 @@ impl LaunchPlan {
             session_id: input.session_id.to_owned(),
             title: input.title.to_owned(),
             configuration: input.configuration.slug.clone(),
-            cwd: input.cwd.to_path_buf(),
-            scratch: input.scratch.clone(),
+            cwd: input.ctx.root.clone(),
+            mode: input.ctx.mode,
+            scratch: input.ctx.scratch.clone(),
             program: program.to_owned(),
             args: Vec::new(),
             env: Vec::new(),
@@ -61,6 +64,53 @@ impl LaunchPlan {
         }
         std::fs::write(&path, contents).map_err(|e| Error::io(IoAction::Writing, &path, e))?;
         Ok(path)
+    }
+
+    /// Write `rel` inside the session folder (the cwd) of a workspace session; refused for
+    /// original-repo sessions (never write into a repository). Returns the absolute path.
+    pub fn write_root_file(&self, rel: &str, contents: &[u8]) -> Result<PathBuf> {
+        let path = self.root_path(rel)?;
+        if let Some(parent) = path.parent() {
+            ide_core::ensure_dir(parent)?;
+        }
+        std::fs::write(&path, contents).map_err(|e| Error::io(IoAction::Writing, &path, e))?;
+        Ok(path)
+    }
+
+    /// Create the folder `rel` inside the session folder of a workspace session.
+    pub fn root_dir(&self, rel: &str) -> Result<PathBuf> {
+        let path = self.root_path(rel)?;
+        ide_core::ensure_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Remove `rel` (file or folder) inside the session folder, if present (regeneration).
+    pub fn clear_root_path(&self, rel: &str) -> Result<()> {
+        let path = self.root_path(rel)?;
+        let r = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match r {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::io(IoAction::Removing, &path, e)),
+        }
+    }
+
+    fn root_path(&self, rel: &str) -> Result<PathBuf> {
+        if self.mode != crate::SessionMode::Workspace {
+            return Err(Error::io(
+                IoAction::Writing,
+                self.cwd.join(rel),
+                std::io::Error::other("original-repo sessions get no generated files"),
+            ));
+        }
+        Ok(rel
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+            .fold(self.cwd.clone(), |p, c| p.join(c)))
     }
 
     /// Set (or replace) an env var.

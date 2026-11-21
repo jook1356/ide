@@ -1,5 +1,5 @@
-//! `fs.watch`: one debounced `notify` watcher per watched session, shared by every
-//! connection watching it and dropped when the last one unwatches (or disconnects).
+//! `fs.watch`: one debounced `notify` watcher per watched (session, repo) worktree, shared by
+//! every connection watching it and dropped when the last one unwatches (or disconnects).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -41,31 +41,39 @@ impl Drop for Entry {
     }
 }
 
-/// Watchers of one user, keyed by session id.
+/// The watch key of a session's repo worktree.
+pub fn key(session: &str, repo: &str) -> String {
+    format!("{session}:{repo}")
+}
+
+/// Watchers of one user, keyed by [`key`].
 #[derive(Default)]
 pub struct Watchers {
     map: Mutex<HashMap<String, Entry>>,
 }
 
 impl Watchers {
-    /// Start (or join) watching `session` rooted at `jail`; `git_dir` = the per-worktree git
-    /// dir (watched for index/HEAD changes when it lies outside the root).
+    /// Start (or join) watching the worktree of `repo` in `session`, rooted at `jail`;
+    /// `git_dir` = the per-worktree git dir (watched for index/HEAD changes when it lies
+    /// outside the root).
     pub fn acquire(
         &self,
         session: &str,
+        repo: &str,
         jail: &RootJail,
         git_dir: Option<PathBuf>,
     ) -> Result<broadcast::Receiver<Notify>, ProtoError> {
+        let k = key(session, repo);
         let mut map = self.map.lock().unwrap();
-        if let Some(e) = map.get_mut(session) {
+        if let Some(e) = map.get_mut(&k) {
             e.refs += 1;
             return Ok(e.tx.subscribe());
         }
         let (tx, rx) = broadcast::channel(256);
         let alive = Arc::new(AtomicBool::new(true));
-        let watchers = start(session, jail, git_dir, tx.clone(), alive.clone())?;
+        let watchers = start(session, repo, jail, git_dir, tx.clone(), alive.clone())?;
         map.insert(
-            session.to_owned(),
+            k,
             Entry {
                 refs: 1,
                 tx,
@@ -92,14 +100,24 @@ impl Watchers {
         self.map.lock().unwrap().get(session).map_or(0, |e| e.refs)
     }
 
-    /// Stop watching `session` entirely (session deleted).
+    /// Stop watching every worktree of `session` (session deleted).
     pub fn remove(&self, session: &str) {
-        self.map.lock().unwrap().remove(session);
+        let prefix = format!("{session}:");
+        self.map
+            .lock()
+            .unwrap()
+            .retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    /// Stop watching one worktree (detached).
+    pub fn remove_key(&self, key: &str) {
+        self.map.lock().unwrap().remove(key);
     }
 }
 
 fn start(
     session: &str,
+    repo: &str,
     jail: &RootJail,
     git_dir: Option<PathBuf>,
     tx: broadcast::Sender<Notify>,
@@ -142,9 +160,10 @@ fn start(
 
     let jail = jail.clone();
     let session = session.to_owned();
+    let repo = repo.to_owned();
     std::thread::Builder::new()
-        .name(format!("watch-{session}"))
-        .spawn(move || debounce(&session, &jail, raw_rx, tx, &alive))
+        .name(format!("watch-{session}-{repo}"))
+        .spawn(move || debounce(&session, &repo, &jail, raw_rx, tx, &alive))
         .map_err(|e| ProtoError::new("watch-failed").arg("detail", e.to_string()))?;
     Ok(watchers)
 }
@@ -154,6 +173,7 @@ fn start(
 /// the watchers are dropped.
 fn debounce(
     session: &str,
+    repo: &str,
     jail: &RootJail,
     rx: mpsc::Receiver<Raw>,
     tx: broadcast::Sender<Notify>,
@@ -197,12 +217,14 @@ fn debounce(
         if rescan || paths.len() > MAX_PATHS {
             let _ = tx.send(Notify::FsChanged {
                 session: session.to_owned(),
+                repo: repo.to_owned(),
                 paths: Vec::new(),
                 rescan: true,
             });
         } else if !paths.is_empty() {
             let _ = tx.send(Notify::FsChanged {
                 session: session.to_owned(),
+                repo: repo.to_owned(),
                 paths: paths.into_iter().collect(),
                 rescan: false,
             });
@@ -210,6 +232,7 @@ fn debounce(
         if git {
             let _ = tx.send(Notify::GitChanged {
                 session: session.to_owned(),
+                repo: repo.to_owned(),
             });
         }
     }
@@ -269,9 +292,9 @@ mod tests {
         );
         let jail = RootJail::new(&wt).unwrap();
         let w = Watchers::default();
-        let mut rx = w.acquire("s", &jail, git_dir_of(jail.root())).unwrap();
-        let mut rx2 = w.acquire("s", &jail, git_dir_of(jail.root())).unwrap();
-        assert_eq!(w.watching("s"), 2);
+        let mut rx = w.acquire("s", "r", &jail, git_dir_of(jail.root())).unwrap();
+        let mut rx2 = w.acquire("s", "r", &jail, git_dir_of(jail.root())).unwrap();
+        assert_eq!(w.watching(&key("s", "r")), 2);
         std::thread::sleep(Duration::from_millis(200));
 
         std::fs::create_dir_all(wt.join("새 폴더")).unwrap();
@@ -305,10 +328,10 @@ mod tests {
         }
         assert!(got_git);
 
-        w.release("s");
-        assert_eq!(w.watching("s"), 1);
-        w.release("s");
-        assert_eq!(w.watching("s"), 0);
+        w.release(&key("s", "r"));
+        assert_eq!(w.watching(&key("s", "r")), 1);
+        w.release(&key("s", "r"));
+        assert_eq!(w.watching(&key("s", "r")), 0);
         // Released: the channel closes once the watcher thread ends.
         std::fs::write(wt.join("after.txt"), "x").unwrap();
         std::thread::sleep(Duration::from_millis(800));

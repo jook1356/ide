@@ -1,5 +1,5 @@
-//! Sessions: one agent run = (provider, account, configuration, repo, worktree). Persisted
-//! without scrollback.
+//! Sessions: one agent run = (provider, account, configuration, session folder with one
+//! worktree per attached repository). Persisted without scrollback.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -110,6 +110,34 @@ pub enum SessionKind {
     Login,
 }
 
+/// Where a session's agent runs (Hermes Desk's "워크트리 사용" checkbox).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// A session folder (`workspaces/<id>`) with one worktree per attached repository.
+    #[default]
+    Workspace,
+    /// The registered repository's own checkout (no workspace, no worktree; nothing may be
+    /// written into it).
+    OriginalRepo,
+}
+
+/// One repository attached to a session (Desk's `Worktree`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorktree {
+    /// Registered repository.
+    pub repo: crate::registry::RepoId,
+    /// Folder name inside the session folder (repo name, `-2`... on a clash).
+    pub name: String,
+    /// Worktree directory (for original-repo sessions: the repository itself).
+    pub path: PathBuf,
+    /// Checked-out branch at creation (`ide/<id>`; original repo: its current branch).
+    pub branch: String,
+    /// Branch the worktree was cut from (empty for original-repo sessions).
+    #[serde(default)]
+    pub base: String,
+}
+
 /// Which provider, account and configuration a session uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionTarget {
@@ -141,12 +169,16 @@ pub struct Session {
     /// Configuration slug.
     #[serde(default)]
     pub configuration: String,
-    /// Main checkout of the repository the worktree belongs to.
-    pub repo_path: PathBuf,
-    /// The session's own worktree (agent cwd).
-    pub worktree_path: PathBuf,
-    /// The worktree's branch (`ide/<id>`).
-    pub branch: String,
+    /// Workspace or original-repo session.
+    #[serde(default)]
+    pub mode: SessionMode,
+    /// The agent's cwd: the session folder, the original repository, or a login session's
+    /// empty dir. Empty only in files written before workspaces, until migrated.
+    #[serde(default)]
+    pub root: PathBuf,
+    /// Attached repositories.
+    #[serde(default)]
+    pub worktrees: Vec<SessionWorktree>,
     /// Creation time, Unix seconds.
     pub created_at: u64,
     /// Last activity, Unix seconds.
@@ -157,16 +189,25 @@ pub struct Session {
     /// Legacy `agent` field (`"claude"`/`"codex"`/`"shell"`; read only, for migration).
     #[serde(default, rename = "agent", skip_serializing)]
     pub legacy_agent: Option<String>,
+    /// Legacy single-repo `repo_path` (read only, for migration).
+    #[serde(default, rename = "repo_path", skip_serializing)]
+    pub legacy_repo_path: Option<PathBuf>,
+    /// Legacy single-repo `worktree_path` (read only, for migration).
+    #[serde(default, rename = "worktree_path", skip_serializing)]
+    pub legacy_worktree_path: Option<PathBuf>,
+    /// Legacy single-repo `branch` (read only, for migration).
+    #[serde(default, rename = "branch", skip_serializing)]
+    pub legacy_branch: Option<String>,
 }
 
 impl Session {
-    /// Build a session for a freshly created worktree; timestamps are set to now.
+    /// A session with no repository yet; timestamps are set to now.
     pub fn new(
         id: SessionId,
         title: impl Into<String>,
         target: SessionTarget,
-        repo: &crate::repo::Repo,
-        worktree: crate::worktree::Worktree,
+        mode: SessionMode,
+        root: PathBuf,
     ) -> Self {
         let now = now_unix();
         Session {
@@ -176,14 +217,27 @@ impl Session {
             provider: target.provider,
             account: target.account,
             configuration: target.configuration,
-            repo_path: repo.root().to_path_buf(),
-            worktree_path: worktree.path,
-            branch: worktree.branch,
+            mode,
+            root,
+            worktrees: Vec::new(),
             created_at: now,
             last_active: now,
             legacy_profile: None,
             legacy_agent: None,
+            legacy_repo_path: None,
+            legacy_worktree_path: None,
+            legacy_branch: None,
         }
+    }
+
+    /// The worktree of `repo`, if attached.
+    pub fn worktree(&self, repo: &crate::registry::RepoId) -> Option<&SessionWorktree> {
+        self.worktrees.iter().find(|w| &w.repo == repo)
+    }
+
+    /// Whether this session has its own workspace folder (attach/detach are possible).
+    pub fn is_workspace(&self) -> bool {
+        self.kind == SessionKind::Agent && self.mode == SessionMode::Workspace
     }
 
     /// The provider, account and configuration of this session.
@@ -280,6 +334,29 @@ impl SessionStore {
             .count()
     }
 
+    /// Sessions with a worktree of (or running in) a repository.
+    pub fn count_using_repo(&self, repo: &crate::registry::RepoId) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.worktree(repo).is_some())
+            .count()
+    }
+
+    /// Mutable access for multi-step operations (attach/detach, migration); saves after `f`.
+    pub fn update(&mut self, id: &SessionId, f: impl FnOnce(&mut Session)) -> Result<()> {
+        self.modify(id, f)
+    }
+
+    /// All sessions, mutable (migration); call [`SessionStore::persist`] afterwards.
+    pub fn all_mut(&mut self) -> &mut [Session] {
+        &mut self.sessions
+    }
+
+    /// Save the list.
+    pub fn persist(&self) -> Result<()> {
+        self.save()
+    }
+
     /// Agent sessions using a configuration.
     pub fn count_using_configuration(&self, slug: &str) -> usize {
         self.sessions
@@ -333,23 +410,21 @@ impl SessionStore {
 }
 
 #[cfg(test)]
-pub(crate) fn sample_session(provider: &str, worktree: PathBuf) -> Session {
-    let id = SessionId::new();
-    Session {
-        branch: id.branch(),
-        id,
-        title: "t".into(),
-        kind: SessionKind::Agent,
-        provider: provider.into(),
-        account: Some("default".into()),
-        configuration: "default".into(),
-        repo_path: PathBuf::from("repo"),
-        worktree_path: worktree,
-        created_at: 1,
-        last_active: 1,
-        legacy_profile: None,
-        legacy_agent: None,
-    }
+pub(crate) fn sample_session(provider: &str, root: PathBuf) -> Session {
+    let mut s = Session::new(
+        SessionId::new(),
+        "t",
+        SessionTarget {
+            provider: provider.into(),
+            account: Some("default".into()),
+            configuration: "default".into(),
+        },
+        SessionMode::Workspace,
+        root,
+    );
+    s.created_at = 1;
+    s.last_active = 1;
+    s
 }
 
 #[cfg(test)]

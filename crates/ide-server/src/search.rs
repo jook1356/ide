@@ -29,7 +29,7 @@ const BATCH_TIME: Duration = Duration::from_millis(100);
 /// A validated query: the compiled matcher and glob overrides.
 pub struct Prepared {
     matcher: RegexMatcher,
-    overrides: Override,
+    globs: Vec<String>,
     include_ignored: bool,
     max: u32,
 }
@@ -49,7 +49,11 @@ pub fn prepare(root: &Path, q: &TextSearch) -> Result<Prepared, ProtoError> {
         .map_err(|e| ProtoError::new("search-bad-regex").arg("detail", e.to_string()))?;
     Ok(Prepared {
         matcher,
-        overrides: overrides(root, &q.globs)?,
+        globs: {
+            // Validated once here; built per searched root in `run_text`.
+            overrides(root, &q.globs)?;
+            q.globs.clone()
+        },
         include_ignored: q.include_ignored,
         max: if q.max_results == 0 {
             DEFAULT_MAX_TEXT
@@ -95,6 +99,12 @@ fn walker(root: &Path, include_ignored: bool, ov: Override) -> WalkBuilder {
     w
 }
 
+/// A worktree's `.git` *file* (`gitdir: ...`): `ignore` 0.4.34 skips `filter_entry` for files
+/// when `max_filesize` is set, so it is checked again per entry.
+fn is_dot_git(e: &ignore::DirEntry) -> bool {
+    e.file_name() == ".git"
+}
+
 fn rel_of(root: &Path, p: &Path) -> Option<String> {
     let r = p.strip_prefix(root).ok()?;
     let parts: Vec<String> = r
@@ -116,10 +126,11 @@ fn cut(s: &str, max: usize) -> &str {
     &s[..i]
 }
 
-/// Run a prepared search under `root`. Hits are delivered in batches through `emit` (return
-/// false to stop: the receiver is gone). Checks `cancel` between files and lines.
+/// Run a prepared search under every `(repo id, root)` in order (one session's worktrees);
+/// `max_results` counts over all of them. Hits are delivered in batches through `emit`
+/// (return false to stop: the receiver is gone). Checks `cancel` between files and lines.
 pub fn run_text(
-    root: &Path,
+    roots: &[(String, &Path)],
     p: &Prepared,
     cancel: &AtomicBool,
     mut emit: impl FnMut(Vec<SearchMatch>) -> bool,
@@ -138,14 +149,19 @@ pub fn run_text(
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\0'))
         .build();
-    let walk = walker(root, p.include_ignored, p.overrides.clone()).build();
-    'files: for ent in walk {
+    'roots: for (repo, root) in roots {
+    let root: &Path = root;
+    let Ok(ov) = overrides(root, &p.globs) else {
+        continue;
+    };
+    let walk = walker(root, p.include_ignored, ov).build();
+    for ent in walk {
         if cancel.load(Ordering::Relaxed) {
             sum.cancelled = true;
-            break;
+            break 'roots;
         }
         let Ok(ent) = ent else { continue };
-        if !ent.file_type().is_some_and(|t| t.is_file()) {
+        if !ent.file_type().is_some_and(|t| t.is_file()) || is_dot_git(&ent) {
             continue;
         }
         let Some(rel) = rel_of(root, ent.path()) else {
@@ -188,6 +204,7 @@ pub fn run_text(
                     .count() as u32
                     + 1;
                 batch.push(SearchMatch {
+                    repo: repo.clone(),
                     path: rel.clone(),
                     line: lnum as u32,
                     col,
@@ -208,7 +225,7 @@ pub fn run_text(
         if !batch.is_empty() && (batch.len() >= BATCH || last_flush.elapsed() >= BATCH_TIME) {
             if !emit(std::mem::take(&mut batch)) {
                 sum.cancelled = true;
-                break 'files;
+                break 'roots;
             }
             last_flush = Instant::now();
         }
@@ -218,12 +235,13 @@ pub fn run_text(
             } else {
                 sum.truncated = true;
             }
-            break;
+            break 'roots;
         }
         if sum.matches >= p.max {
             sum.truncated = true;
-            break;
+            break 'roots;
         }
+    }
     }
     if !batch.is_empty() && !emit(batch) {
         sum.cancelled = true;
@@ -231,31 +249,35 @@ pub fn run_text(
     sum
 }
 
-/// `search.files`: fuzzy match of `query` against root-relative paths of non-ignored files.
-/// An empty query returns the first paths in name order.
-pub fn files(root: &Path, query: &str, max: u32) -> Vec<FileMatch> {
+/// `search.files`: fuzzy match of `query` against root-relative paths of non-ignored files
+/// under every `(repo id, root)`. An empty query returns the first paths in name order.
+pub fn files(roots: &[(String, &Path)], query: &str, max: u32) -> Vec<FileMatch> {
     use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
     use nucleo_matcher::{Config, Matcher, Utf32Str};
     let max = if max == 0 { DEFAULT_MAX_FILES } else { max } as usize;
-    let mut paths = Vec::new();
-    let ov = Override::empty();
-    for ent in walker(root, false, ov).build().flatten() {
-        if ent.file_type().is_some_and(|t| t.is_file())
-            && let Some(rel) = rel_of(root, ent.path())
-        {
-            paths.push(rel);
-            if paths.len() >= MAX_WALK_FILES {
-                break;
+    let mut paths: Vec<(String, String)> = Vec::new();
+    'roots: for (repo, root) in roots {
+        let root: &Path = root;
+        for ent in walker(root, false, Override::empty()).build().flatten() {
+            if ent.file_type().is_some_and(|t| t.is_file())
+                && !is_dot_git(&ent)
+                && let Some(rel) = rel_of(root, ent.path())
+            {
+                paths.push((repo.clone(), rel));
+                if paths.len() >= MAX_WALK_FILES {
+                    break 'roots;
+                }
             }
         }
     }
     let query = query.trim();
     if query.is_empty() {
-        paths.sort();
+        paths.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         return paths
             .into_iter()
             .take(max)
-            .map(|path| FileMatch {
+            .map(|(repo, path)| FileMatch {
+                repo,
                 path,
                 score: 0,
                 indices: Vec::new(),
@@ -265,27 +287,29 @@ pub fn files(root: &Path, query: &str, max: u32) -> Vec<FileMatch> {
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut buf = Vec::new();
-    let mut scored: Vec<(u32, String)> = paths
+    let mut scored: Vec<(u32, String, String)> = paths
         .into_iter()
-        .filter_map(|p| {
+        .filter_map(|(repo, p)| {
             let s = pattern.score(Utf32Str::new(&p, &mut buf), &mut matcher)?;
-            Some((s, p))
+            Some((s, repo, p))
         })
         .collect();
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.2.len().cmp(&b.2.len()))
+            .then_with(|| a.2.cmp(&b.2))
             .then_with(|| a.1.cmp(&b.1))
     });
     scored.truncate(max);
     scored
         .into_iter()
-        .map(|(score, path)| {
+        .map(|(score, repo, path)| {
             let mut idx = Vec::new();
             pattern.indices(Utf32Str::new(&path, &mut buf), &mut matcher, &mut idx);
             idx.sort_unstable();
             idx.dedup();
             FileMatch {
+                repo,
                 path,
                 score,
                 indices: idx,
@@ -302,6 +326,7 @@ mod tests {
     fn q(query: &str) -> TextSearch {
         TextSearch {
             session: String::new(),
+            repo: None,
             query: query.into(),
             regex: false,
             case_sensitive: false,
@@ -315,7 +340,7 @@ mod tests {
     fn all(root: &Path, query: &TextSearch) -> (Vec<SearchMatch>, SearchSummary) {
         let p = prepare(root, query).unwrap();
         let mut hits = Vec::new();
-        let sum = run_text(root, &p, &AtomicBool::new(false), |b| {
+        let sum = run_text(&[("r1".into(), root)], &p, &AtomicBool::new(false), |b| {
             hits.extend(b);
             true
         });
@@ -408,24 +433,38 @@ mod tests {
         assert_eq!(prepare(&root, &bg).err().unwrap().id, "search-bad-glob");
         // Cancel before start.
         let p = prepare(&root, &q("hello")).unwrap();
-        let s = run_text(&root, &p, &AtomicBool::new(true), |_| true);
+        let s = run_text(&[("r1".into(), root.as_path())], &p, &AtomicBool::new(true), |_| true);
         assert!(s.cancelled && s.matches == 0);
         // Receiver gone.
-        let s = run_text(&root, &p, &AtomicBool::new(false), |_| false);
+        let s = run_text(&[("r1".into(), root.as_path())], &p, &AtomicBool::new(false), |_| false);
         assert!(s.cancelled);
 
         // File names.
-        let f = files(&root, "mainrs", 10);
+        let f = files(&[("r1".into(), root.as_path())], "mainrs", 10);
         assert_eq!(f[0].path, "src/main.rs");
         assert!(!f[0].indices.is_empty());
         assert!(
-            files(&root, "out", 10)
+            files(&[("r1".into(), root.as_path())], "out", 10)
                 .iter()
                 .all(|m| !m.path.starts_with("target"))
         );
-        assert_eq!(files(&root, "한글", 10)[0].path, "docs/한글.md");
-        assert_eq!(files(&root, "", 2).len(), 2);
-        assert!(files(&root, "zzzzqqq", 10).is_empty());
+        assert_eq!(files(&[("r1".into(), root.as_path())], "한글", 10)[0].path, "docs/한글.md");
+        assert_eq!(files(&[("r1".into(), root.as_path())], "", 2).len(), 2);
+        // Several repos: hits carry their repo, max_results counts over all of them.
+        let other = t.join("o");
+        init_repo(&other, &[("x.md", "hello\n")]);
+        let p = prepare(&root, &q("hello")).unwrap();
+        let mut hits = Vec::new();
+        let both = [("r1".to_owned(), root.as_path()), ("r2".to_owned(), other.as_path())];
+        let s = run_text(&both, &p, &AtomicBool::new(false), |b| {
+            hits.extend(b);
+            true
+        });
+        assert_eq!(s.matches, 5);
+        assert_eq!(hits.last().map(|h| (h.repo.as_str(), h.path.as_str())), Some(("r2", "x.md")));
+        let f = files(&both, "x.md", 10);
+        assert_eq!((f[0].repo.as_str(), f[0].path.as_str()), ("r2", "x.md"));
+        assert!(files(&[("r1".into(), root.as_path())], "zzzzqqq", 10).is_empty());
         let _ = std::fs::remove_dir_all(&t);
     }
 }

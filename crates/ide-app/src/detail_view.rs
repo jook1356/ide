@@ -2,13 +2,14 @@
 //! collapse), the shown item, and the side panel (Changes / Explore / Search).
 
 use iced::widget::{
-    Column, button, column, container, popover, row, scrollable, space, stack, text, text_input,
+    Column, button, column, container, pick_list, popover, row, scrollable, space, stack, text,
+    text_input,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _};
 use ide_views::icons;
 use ide_web::WebViewWidget;
 
-use crate::app::{App, Live, Message, URL_ID};
+use crate::app::{App, Choice, Live, Message, URL_ID};
 use crate::detail::{
     DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SIDE_W, SideTab, file_name, parent,
 };
@@ -30,6 +31,7 @@ const I_DIFF: &str = "±";
 const I_RELOAD_DISK: &str = "↻";
 const I_OVERWRITE: &str = "⤓";
 const I_COMPARE: &str = "⇄";
+const I_SETTINGS: &str = "⚙";
 /// Height of the header row.
 const HEADER_H: f32 = 40.0;
 
@@ -74,7 +76,25 @@ fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
             (t, live.url_input.clone())
         }
         ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
-            (file_name(p).to_owned(), parent(p).to_owned())
+            let folder = parent(p);
+            // Several repos: the folder starts with the repo's name.
+            let folder = if live.info.repos.len() > 1 {
+                let repo = crate::detail::split_q(p).0;
+                let name = live
+                    .info
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == repo)
+                    .map_or(repo, |r| r.name.as_str());
+                if folder.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{name}/{folder}")
+                }
+            } else {
+                folder.to_owned()
+            };
+            (file_name(p).to_owned(), folder)
         }
     }
 }
@@ -492,6 +512,11 @@ impl App {
         ])
         .style(style::bg(style::HEADER));
         let content: El<'a> = match d.side {
+            SideTab::Changes | SideTab::Explore if live.info.repos.is_empty() => column![
+                self.repo_selector(live),
+                message_body(tr::no_repos_in_session(), false),
+            ]
+            .boxed(),
             SideTab::Changes => {
                 let s = sid.clone();
                 let head = container(
@@ -508,6 +533,7 @@ impl App {
                 )
                 .padding([6, 10]);
                 column![
+                    self.repo_selector(live),
                     head,
                     d.changes
                         .view()
@@ -516,16 +542,20 @@ impl App {
                 ]
                 .boxed()
             }
-            SideTab::Explore => match &d.tree_error {
-                Some(e) => message_body(e.clone(), true),
-                None => {
-                    let s = sid.clone();
-                    d.tree
-                        .view()
-                        .map(move |m| Message::Detail(s.clone(), DetailMsg::Tree(m)))
-                        .boxed()
-                }
-            },
+            SideTab::Explore => column![
+                self.repo_selector(live),
+                match &d.tree_error {
+                    Some(e) => message_body(e.clone(), true),
+                    None => {
+                        let s = sid.clone();
+                        d.tree
+                            .view()
+                            .map(move |m| Message::Detail(s.clone(), DetailMsg::Tree(m)))
+                            .boxed()
+                    }
+                },
+            ]
+            .boxed(),
             SideTab::Search => self.search_panel(live),
         };
         container(column![tabs, hline(), content])
@@ -533,6 +563,56 @@ impl App {
             .height(Fill)
             .style(style::bg(style::SIDEBAR))
             .boxed()
+    }
+
+    /// Hermes Desk's Changes-panel header (`BranchSelect`): `repo / branch` of the shown repo,
+    /// a dropdown of the session's repos, and the session's repo settings (⚙: attach / detach).
+    fn repo_selector<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let d = &live.detail;
+        let sid = live.info.id.clone();
+        let choices: Vec<Choice> = live
+            .info
+            .repos
+            .iter()
+            .map(|r| Choice {
+                key: r.repo.clone(),
+                label: format!("{} / {}", r.name, r.branch),
+            })
+            .collect();
+        let selected = choices.iter().find(|c| c.key == d.repo).cloned();
+        let picker: El<'a> = if choices.is_empty() {
+            text(tr::no_repos())
+                .size(12)
+                .color(style::DIM)
+                .width(Fill)
+                .boxed()
+        } else {
+            let s = sid.clone();
+            pick_list(selected, choices, |c: &Choice| c.label.clone())
+                .on_select(move |c: Choice| Message::Detail(s.clone(), DetailMsg::PickRepo(c.key)))
+                .text_size(12)
+                .padding([3, 6])
+                .width(Fill)
+                .boxed()
+        };
+        container(
+            row![
+                crate::icons::icon(crate::icons::Icon::GitBranch, 14.0, style::DIM),
+                picker,
+                icon_button(
+                    I_SETTINGS,
+                    self.connected()
+                        .then(|| Message::SessionRepos(sid.clone())),
+                    tr::session_repos_open()
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([5, 8])
+        .width(Fill)
+        .style(style::bg(style::HEADER))
+        .boxed()
     }
 
     fn search_panel<'a>(&'a self, live: &'a Live) -> El<'a> {
@@ -609,7 +689,32 @@ impl App {
             );
         }
         let mut list = Column::new().spacing(0).padding([4, 0]);
+        let mut last_repo: Option<&str> = None;
+        let multi = live.info.repos.len() > 1;
         for (path, hits) in &s.groups {
+            // Results are grouped by repo: a header above each repo's files.
+            let repo = crate::detail::split_q(path).0;
+            if multi && last_repo != Some(repo) {
+                last_repo = Some(repo);
+                let name = live
+                    .info
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == repo)
+                    .map_or(repo, |r| r.name.as_str());
+                list = list.push(
+                    container(
+                        row![
+                            crate::icons::icon(crate::icons::Icon::GitBranch, 12.0, style::DIM),
+                            text(name.to_owned()).size(11).font(style::BOLD).color(style::DIM),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([4, 8])
+                    .boxed(),
+                );
+            }
             let collapsed = s.collapsed.contains(path);
             let sid2 = live.info.id.clone();
             list = list.push(
@@ -671,7 +776,7 @@ impl App {
                     .style(style::row(false))
                     .on_press(Message::Detail(
                         sid2.clone(),
-                        DetailMsg::OpenAt(h.path.clone(), h.line, h.col),
+                        DetailMsg::OpenAt(crate::detail::qualify(&h.repo, &h.path), h.line, h.col),
                     ))
                     .boxed(),
                 );

@@ -62,16 +62,21 @@ async fn real_cli_launch() {
             p.id, p.detection.usable, p.detection
         );
     }
+    let repo_id = c
+        .register_repo(&repo.display().to_string())
+        .await
+        .unwrap()
+        .id;
     for provider in ["claude", "codex"] {
         let acct = c.create_account(provider, "Probe").await.unwrap();
-        let s = c
+        let (s, _) = c
             .create_session(NewSession {
                 provider: provider.into(),
                 account: Some(acct.slug.clone()),
                 configuration: cfg.slug.clone(),
-                repo_path: repo.display().to_string(),
+                repos: vec![repo_id.clone()],
+                original_repo: None,
                 title: format!("{provider} launch probe"),
-                base_ref: String::new(),
                 start: true,
                 cols: 120,
                 rows: 32,

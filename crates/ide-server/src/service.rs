@@ -9,25 +9,26 @@ use std::time::Duration;
 
 use ide_agents::{AgentProvider, Detection, Providers, SessionInput};
 use ide_core::{
-    AccountStore, ConfigurationStore, ErrorMessage, LaunchEnv, LaunchSpec, Paths, Session,
-    SessionId, SessionKind, SessionStore, SessionTarget,
+    AccountStore, ConfigurationStore, ErrorMessage, LaunchEnv, LaunchSpec, Paths, RegisteredRepo,
+    RepoId, RepoStore, Session, SessionId, SessionKind, SessionMode, SessionStore, SessionTarget,
+    SessionWorktree,
 };
 use ide_proto::{
-    AccountInfo, AccountState, BrowseConfig, ConfigurationInfo, McpServerInfo, NewSession, Notify,
-    ProtoError, ProviderCaps, ProviderDetection, ProviderInfo, Request, Response, SessionInfo,
-    SessionState, Support, TextSearch, UserInfo,
+    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, NewSession, Notify,
+    ProtoError, ProviderCaps, ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, Request,
+    Response, SessionInfo, SessionRepo, SessionState, Support, TextSearch, UserInfo,
 };
 use tokio::sync::broadcast;
 
 use crate::audit::{Audit, FileAudit};
-use crate::jail::{PathJail, RootJail, normalize_rel};
+use crate::jail::{RootJail, normalize_rel};
 use crate::pty::TermHost;
 use crate::runner::{Runner, SameUserRunner, SpawnSpec};
 use crate::watch::Watchers;
 use crate::{def, fsops, git, search};
 
-/// Server config file in the data dir: `{ "browse_roots": ["D:/src", ...] }` adds roots
-/// the repository picker (and `session.create`) may use besides the home dir.
+/// Server config file in the data dir. Its legacy `browse_roots` are only read once, by the
+/// migration to the repository registry (folders that are git repos get registered).
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,8 +47,6 @@ pub struct ServerConfig {
     pub audit: Arc<dyn Audit>,
     /// Program resolution environment (`None` = the process environment).
     pub launch_env: Option<LaunchEnv>,
-    /// Browse roots (`None` = the home dir plus `browse_roots` of `<data>/server.json`).
-    pub browse_roots: Option<Vec<PathBuf>>,
 }
 
 impl ServerConfig {
@@ -68,7 +67,6 @@ impl ServerConfig {
             paths,
             user,
             launch_env: None,
-            browse_roots: None,
         }
     }
 }
@@ -130,7 +128,6 @@ impl Server {
                 .launch_env
                 .clone()
                 .unwrap_or_else(LaunchEnv::from_process),
-            self.config.browse_roots.clone(),
         )?);
         users.insert(user.id.clone(), ctx.clone());
         Ok(ctx)
@@ -232,13 +229,13 @@ pub struct UserCtx {
     detections: Mutex<HashMap<String, Detection>>,
     accounts: Mutex<AccountStore>,
     configs: Mutex<ConfigurationStore>,
+    repos: Mutex<RepoStore>,
     sessions: Mutex<SessionStore>,
     hosts: Mutex<HashMap<String, Arc<TermHost>>>,
     events: broadcast::Sender<Notify>,
     runner: Arc<dyn Runner>,
     audit: Arc<dyn Audit>,
     launch_env: LaunchEnv,
-    browse_roots: Option<Vec<PathBuf>>,
     watchers: Watchers,
     write_lock: Mutex<()>,
 }
@@ -250,7 +247,6 @@ impl UserCtx {
         runner: Arc<dyn Runner>,
         audit: Arc<dyn Audit>,
         launch_env: LaunchEnv,
-        browse_roots: Option<Vec<PathBuf>>,
     ) -> Result<Self, ProtoError> {
         let report = ide_core::migrate_profiles(&paths).map_err(|e| core_error(&e))?;
         if report != Default::default() {
@@ -267,7 +263,23 @@ impl UserCtx {
         }
         let accounts = AccountStore::open(&paths).map_err(|e| core_error(&e))?;
         let configs = ConfigurationStore::open(&paths).map_err(|e| core_error(&e))?;
-        let sessions = SessionStore::open(&paths).map_err(|e| core_error(&e))?;
+        let mut sessions = SessionStore::open(&paths).map_err(|e| core_error(&e))?;
+        let mut repos = RepoStore::open(&paths).map_err(|e| core_error(&e))?;
+        let roots: Vec<PathBuf> = legacy_browse_roots(&paths);
+        let m = ide_core::migrate_workspaces(&paths, &mut repos, &mut sessions, &roots)
+            .map_err(|e| core_error(&e))?;
+        if m != Default::default() {
+            tracing::info!(
+                "migrated to the repository registry: {} repo(s) registered, {} session(s) moved to workspaces",
+                m.repos,
+                m.sessions
+            );
+            audit.record(
+                &user,
+                "migrate.workspaces",
+                &format!("repos={} sessions={}", m.repos, m.sessions),
+            );
+        }
         let providers = Providers::load(&paths.providers_dir());
         Ok(UserCtx {
             user,
@@ -276,13 +288,13 @@ impl UserCtx {
             detections: Mutex::new(HashMap::new()),
             accounts: Mutex::new(accounts),
             configs: Mutex::new(configs),
+            repos: Mutex::new(repos),
             sessions: Mutex::new(sessions),
             hosts: Mutex::new(HashMap::new()),
             events: broadcast::channel(4096).0,
             runner,
             audit,
             launch_env,
-            browse_roots,
             watchers: Watchers::default(),
             write_lock: Mutex::new(()),
         })
@@ -351,125 +363,87 @@ impl UserCtx {
             .ok_or_else(not_found)
     }
 
-    /// The jail of a session's worktree (the session must belong to this user).
-    pub fn session_root(&self, id: &str) -> Result<(Session, RootJail), ProtoError> {
+    /// The jail scope of file, git, search and definition requests: the worktree of `repo`
+    /// attached to session `id` of this user. Nothing else is reachable through them.
+    pub fn worktree_root(
+        &self,
+        id: &str,
+        repo: &str,
+    ) -> Result<(Session, SessionWorktree, RootJail), ProtoError> {
         let s = self.resolve_session(id)?;
-        let j = RootJail::new(&s.worktree_path)?;
-        Ok((s, j))
-    }
-
-    /// Browse roots: the configured override, else the home dir plus `browse_roots` from
-    /// `<data>/server.json` (re-read on every call). Missing folders are skipped.
-    pub fn browse_jail(&self) -> PathJail {
-        if let Some(r) = &self.browse_roots {
-            return PathJail::new(r.iter().cloned());
-        }
-        let mut roots: Vec<PathBuf> = home_dir().into_iter().collect();
-        roots.extend(self.read_server_config().1.into_iter().map(PathBuf::from));
-        PathJail::new(roots)
-    }
-
-    /// `<data>/server.json` as a JSON object (empty if missing or invalid) and its
-    /// `browse_roots` strings.
-    fn read_server_config(&self) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
-        let cfg = self.paths.root().join(SERVER_CONFIG_FILE);
-        let Ok(text) = std::fs::read_to_string(&cfg) else {
-            return Default::default();
+        let not_attached = || {
+            ProtoError::new("repo-not-attached").arg("name", repo)
         };
-        match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(serde_json::Value::Object(map)) => {
-                let roots = map
-                    .get("browse_roots")
-                    .and_then(|r| r.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r.as_str().map(str::to_owned))
-                    .collect();
-                (map, roots)
-            }
-            Ok(_) => Default::default(),
-            Err(e) => {
-                tracing::warn!("{}: {e}", cfg.display());
-                Default::default()
-            }
-        }
+        let rid = RepoId::parse(repo).map_err(|_| not_attached())?;
+        let wt = s.worktree(&rid).cloned().ok_or_else(not_attached)?;
+        let j = RootJail::new(&wt.path)?;
+        Ok((s, wt, j))
     }
 
-    /// `browse.config`: the home dir and the extra roots saved in `server.json`.
-    pub fn browse_config(&self) -> BrowseConfig {
-        BrowseConfig {
-            home: home_dir().map(|h| h.display().to_string()),
-            roots: self.read_server_config().1,
-        }
+    /// The registered repository of a worktree (its main checkout, for base resolution).
+    fn repo_path_of(&self, wt: &SessionWorktree) -> Option<PathBuf> {
+        self.repos
+            .lock()
+            .unwrap()
+            .get(&wt.repo)
+            .map(|r| r.path.clone())
     }
 
-    /// `browse.set_roots`: validate every root (absolute, existing folder, not a filesystem
-    /// root; canonicalized, duplicates dropped) and store them in `server.json` (other keys
-    /// are kept; the file is created if missing).
-    pub fn set_browse_roots(&self, roots: Vec<String>) -> Result<BrowseConfig, ProtoError> {
-        const MAX_ROOTS: usize = 64;
-        if roots.len() > MAX_ROOTS {
-            return Err(ProtoError::new("bad-request").arg("method", "browse.set_roots"));
-        }
-        let mut clean: Vec<String> = Vec::new();
-        for r in &roots {
-            let p = validate_browse_root(r)?.display().to_string();
-            if !clean.contains(&p) {
-                clean.push(p);
-            }
-        }
-        let _g = self.write_lock.lock().unwrap();
-        let (mut map, _) = self.read_server_config();
-        map.insert(
-            "browse_roots".into(),
-            serde_json::Value::Array(clean.iter().cloned().map(Into::into).collect()),
-        );
-        let dir = self.paths.root();
-        let path = dir.join(SERVER_CONFIG_FILE);
-        let tmp = dir.join(format!("{SERVER_CONFIG_FILE}.tmp"));
-        let io = |e: std::io::Error| {
-            ProtoError::new("fs-io")
-                .arg("path", path.display().to_string())
-                .arg("detail", e.to_string())
-        };
-        let bytes = serde_json::to_vec_pretty(&serde_json::Value::Object(map))
-            .map_err(|e| ProtoError::new("internal").arg("detail", e.to_string()))?;
-        std::fs::create_dir_all(dir).map_err(io)?;
-        std::fs::write(&tmp, bytes).map_err(io)?;
-        std::fs::rename(&tmp, &path).map_err(io)?;
-        self.audit("browse.set_roots", &clean.join(";"));
-        Ok(self.browse_config())
+    /// Start (or join) the watcher of a session's repo worktree for one connection.
+    pub fn watch(
+        &self,
+        id: &str,
+        repo: &str,
+    ) -> Result<broadcast::Receiver<Notify>, ProtoError> {
+        let (s, wt, j) = self.worktree_root(id, repo)?;
+        self.watchers.acquire(
+            s.id.as_str(),
+            wt.repo.as_str(),
+            &j,
+            crate::watch::git_dir_of(j.root()),
+        )
     }
 
-    /// Start (or join) the watcher of a session for one connection.
-    pub fn watch(&self, id: &str) -> Result<broadcast::Receiver<Notify>, ProtoError> {
-        let (s, j) = self.session_root(id)?;
-        self.watchers
-            .acquire(s.id.as_str(), &j, crate::watch::git_dir_of(j.root()))
+    /// Release one connection's watch of a session's repo worktree.
+    pub fn unwatch(&self, id: &str, repo: &str) {
+        self.watchers.release(&crate::watch::key(id, repo));
     }
 
-    /// Release one connection's watch of a session.
-    pub fn unwatch(&self, id: &str) {
-        self.watchers.release(id);
+    /// Connections watching a session's repo worktree.
+    pub fn watching(&self, id: &str, repo: &str) -> usize {
+        self.watchers.watching(&crate::watch::key(id, repo))
     }
 
-    /// Connections watching a session.
-    pub fn watching(&self, id: &str) -> usize {
-        self.watchers.watching(id)
-    }
-
-    /// Validate a text search: the session root and the compiled query.
+    /// Validate a text search: the worktrees to search (`q.repo`, else every attached repo, in
+    /// attach order) and the compiled query.
     pub fn search_prepare(
         &self,
         q: &TextSearch,
-    ) -> Result<(RootJail, search::Prepared), ProtoError> {
-        let (_, j) = self.session_root(&q.session)?;
-        let p = search::prepare(j.root(), q)?;
-        Ok((j, p))
+    ) -> Result<(Vec<(String, RootJail)>, search::Prepared), ProtoError> {
+        let s = self.resolve_session(&q.session)?;
+        let mut roots = Vec::new();
+        for wt in &s.worktrees {
+            if q.repo.as_deref().is_some_and(|r| r != wt.repo.as_str()) {
+                continue;
+            }
+            if let Ok(j) = RootJail::new(&wt.path) {
+                roots.push((wt.repo.to_string(), j));
+            }
+        }
+        if let Some(r) = &q.repo
+            && roots.is_empty()
+        {
+            return Err(ProtoError::new("repo-not-attached").arg("name", r));
+        }
+        let first = roots
+            .first()
+            .map_or_else(|| s.root.clone(), |(_, j)| j.root().to_path_buf());
+        let p = search::prepare(&first, q)?;
+        Ok((roots, p))
     }
 
-    fn audit_fs(&self, action: &str, session: &str, rel: &str) {
-        self.audit(action, &format!("{session} {rel}"));
+    fn audit_fs(&self, action: &str, session: &str, repo: &str, rel: &str) {
+        self.audit(action, &format!("{session} {repo} {rel}"));
     }
 
     /// The terminal host of a resolved session (created idle on first use).
@@ -492,6 +466,7 @@ impl UserCtx {
 
     fn info(&self, s: &Session) -> SessionInfo {
         let host = self.existing_host(s.id.as_str());
+        let repos = self.repos.lock().unwrap();
         SessionInfo {
             id: s.id.to_string(),
             title: s.title.clone(),
@@ -502,14 +477,133 @@ impl UserCtx {
             provider: s.provider.clone(),
             account: s.account.clone(),
             configuration: s.configuration.clone(),
-            repo_path: s.repo_path.display().to_string(),
-            worktree_path: s.worktree_path.display().to_string(),
-            branch: s.branch.clone(),
+            mode: match s.mode {
+                SessionMode::Workspace => ide_proto::SessionMode::Workspace,
+                SessionMode::OriginalRepo => ide_proto::SessionMode::OriginalRepo,
+            },
+            root: s.root.display().to_string(),
+            repos: s
+                .worktrees
+                .iter()
+                .map(|w| SessionRepo {
+                    repo: w.repo.to_string(),
+                    name: repos
+                        .get(&w.repo)
+                        .map_or_else(|| w.name.clone(), |r| r.name.clone()),
+                    folder: w.name.clone(),
+                    path: w.path.display().to_string(),
+                    branch: w.branch.clone(),
+                    base: w.base.clone(),
+                })
+                .collect(),
             created_at: s.created_at,
             last_active: s.last_active,
             state: host.as_ref().map_or(SessionState::Stopped, |h| h.state()),
             term_title: host.as_ref().map(|h| h.title()).unwrap_or_default(),
             term_end: host.as_ref().map_or(0, |h| h.end()),
+        }
+    }
+
+    fn repo_info(&self, r: &RegisteredRepo, sessions: &SessionStore) -> RepoInfo {
+        let base = ide_core::Repo::open(&r.path)
+            .and_then(|repo| ide_core::detect_base(&repo, r.base_branch.as_deref()))
+            .map(|b| b.name)
+            .unwrap_or_default();
+        RepoInfo {
+            id: r.id.to_string(),
+            name: r.name.clone(),
+            path: r.path.display().to_string(),
+            base,
+            sessions: sessions.count_using_repo(&r.id) as u32,
+        }
+    }
+
+    fn parse_repo(&self, id: &str) -> Result<RepoId, ProtoError> {
+        RepoId::parse(id).map_err(|e| core_error(&e))
+    }
+
+    /// Repository registry requests.
+    fn handle_repos(&self, req: Request) -> Result<Response, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        match req {
+            Request::RepoList => {
+                let list: Vec<RegisteredRepo> = self.repos.lock().unwrap().list().to_vec();
+                let sessions = self.sessions.lock().unwrap();
+                Ok(Response::Repos(
+                    list.iter().map(|r| self.repo_info(r, &sessions)).collect(),
+                ))
+            }
+            Request::RepoRegister { path } => {
+                // Any folder the user picks (the folder picker is not limited); it must be a
+                // git repository. Its main checkout is registered.
+                let p = crate::jail::canonicalize(std::path::Path::new(path.trim())).map_err(|_| {
+                    ProtoError::new("fs-not-found").arg("path", path.clone())
+                })?;
+                let r = self.repos.lock().unwrap().register(&p).map_err(core)?;
+                self.audit("repo.register", &format!("{} {}", r.id, r.path.display()));
+                self.notify(Notify::ReposChanged);
+                let sessions = self.sessions.lock().unwrap();
+                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+            }
+            Request::RepoUnregister { id } => {
+                let rid = self.parse_repo(&id)?;
+                let sessions = self.sessions.lock().unwrap();
+                let mut repos = self.repos.lock().unwrap();
+                let name = repos.require(&rid).map_err(core)?.name.clone();
+                let count = sessions.count_using_repo(&rid);
+                if count > 0 {
+                    return Err(core(ide_core::Error::RepoInUse { name, count }));
+                }
+                repos.unregister(&rid).map_err(core)?;
+                drop((repos, sessions));
+                self.audit("repo.unregister", &id);
+                self.notify(Notify::ReposChanged);
+                Ok(Response::Unit)
+            }
+            Request::SessionAttachRepo { id, repo } => {
+                let s = self.resolve_session(&id)?;
+                let rid = self.parse_repo(&repo)?;
+                let r = self.repos.lock().unwrap().require(&rid).map_err(core)?.clone();
+                let mut updated = s.clone();
+                ide_core::attach_repo(&mut updated, &r).map_err(core)?;
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .upsert(updated.clone())
+                    .map_err(core)?;
+                self.refresh_root(&updated);
+                self.audit("session.attach_repo", &format!("{id} {repo}"));
+                self.notify(Notify::SessionsChanged);
+                self.notify(Notify::ReposChanged);
+                Ok(Response::Session(self.info(&updated)))
+            }
+            Request::SessionDetachRepo { id, repo } => {
+                let s = self.resolve_session(&id)?;
+                let rid = self.parse_repo(&repo)?;
+                let r = self.repos.lock().unwrap().get(&rid).cloned();
+                self.watchers.remove_key(&crate::watch::key(&id, &repo));
+                let mut updated = s.clone();
+                ide_core::detach_repo(&self.paths, &mut updated, &rid, r.as_ref()).map_err(core)?;
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .upsert(updated.clone())
+                    .map_err(core)?;
+                self.refresh_root(&updated);
+                self.audit("session.detach_repo", &format!("{id} {repo}"));
+                self.notify(Notify::SessionsChanged);
+                self.notify(Notify::ReposChanged);
+                Ok(Response::Session(self.info(&updated)))
+            }
+            other => self.handle_files(other),
+        }
+    }
+
+    /// Regenerate a workspace session's root files (guidance, skills) after its repos changed,
+    /// so a restarted agent sees them; the running agent keeps what it read at start.
+    fn refresh_root(&self, s: &Session) {
+        if s.is_workspace() && let Err(e) = self.launch_spec(s) {
+            tracing::warn!("session {}: regenerating its files failed: {e:?}", s.id);
         }
     }
 
@@ -554,6 +648,11 @@ impl UserCtx {
                         hooks: support(c.hooks),
                         resume: c.resume,
                         session_name: c.session_name,
+                        original_repo: ModeCaps {
+                            skills: support(c.original_repo.skills),
+                            mcp: support(c.original_repo.mcp),
+                            instructions: support(c.original_repo.instructions),
+                        },
                     },
                 }
             })
@@ -697,6 +796,20 @@ impl UserCtx {
                         .map_err(core)?,
                 );
                 self.audit("configuration.update", &c.slug);
+                // Workspace sessions of this configuration get their root files (skills,
+                // guidance) regenerated now; a running agent sees them on its next start.
+                let users: Vec<Session> = self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .list()
+                    .iter()
+                    .filter(|s| s.configuration == c.slug)
+                    .cloned()
+                    .collect();
+                for s in &users {
+                    self.refresh_root(s);
+                }
                 self.notify(Notify::ConfigurationsChanged);
                 Ok(Response::Configuration(c))
             }
@@ -714,7 +827,7 @@ impl UserCtx {
                 self.notify(Notify::ConfigurationsChanged);
                 Ok(Response::Unit)
             }
-            other => self.handle_files(other),
+            other => self.handle_repos(other),
         }
     }
 
@@ -784,7 +897,7 @@ impl UserCtx {
                     list.iter().map(|s| self.info(s)).collect(),
                 ))
             }
-            Request::SessionCreate(req) => self.session_create(req).map(Response::Session),
+            Request::SessionCreate(req) => self.session_create(req),
             Request::SessionStart { id } => {
                 let s = self.resolve_session(&id)?;
                 self.start(&s)?;
@@ -807,15 +920,16 @@ impl UserCtx {
             } => {
                 let s = self.resolve_session(&id)?;
                 self.stop(&s);
-                ide_core::delete_session(
-                    &self.paths,
-                    &mut self.sessions.lock().unwrap(),
-                    &s.id,
-                    remove_worktree,
-                )
-                .map_err(core)?;
-                self.hosts.lock().unwrap().remove(s.id.as_str());
+                // Watchers hold the worktree folders open: stop them before deleting.
                 self.watchers.remove(s.id.as_str());
+                {
+                    let repos = self.repos.lock().unwrap();
+                    ide_core::remove_session_files(&self.paths, &s, &repos, remove_worktree)
+                        .map_err(core)?;
+                }
+                self.sessions.lock().unwrap().remove(&s.id).map_err(core)?;
+                self.hosts.lock().unwrap().remove(s.id.as_str());
+                self.notify(Notify::ReposChanged);
                 self.audit(
                     "session.delete",
                     &format!("{id} remove_worktree={remove_worktree}"),
@@ -839,39 +953,47 @@ impl UserCtx {
         }
     }
 
-    /// Phase 2 requests: files, browsing, file search, git, go-to-definition.
+    /// Phase 2 requests: files, folder picker, file search, git, go-to-definition. Every
+    /// session request is confined to the worktree of `repo` in `session`.
     fn handle_files(&self, req: Request) -> Result<Response, ProtoError> {
         match req {
             Request::FsList {
                 session,
+                repo,
                 dir,
                 include_ignored,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 let rel = normalize_rel(&dir)?;
                 let badges = git::badges(j.root(), &rel);
                 fsops::list(&j, &rel, include_ignored, &badges).map(Response::Entries)
             }
-            Request::FsStat { session, path } => {
-                let (_, j) = self.session_root(&session)?;
+            Request::FsStat {
+                session,
+                repo,
+                path,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 fsops::stat(&j, &path).map(Response::Stat)
             }
             Request::FsRead {
                 session,
+                repo,
                 path,
                 max_bytes,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 fsops::read(&j, &path, max_bytes).map(Response::File)
             }
             Request::FsWrite {
                 session,
+                repo,
                 path,
                 content,
                 expected_version,
                 encoding,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 let version = {
                     let _g = self.write_lock.lock().unwrap();
                     fsops::write(
@@ -882,91 +1004,103 @@ impl UserCtx {
                         encoding.as_ref(),
                     )?
                 };
-                self.audit_fs("fs.write", &session, &normalize_rel(&path)?);
+                self.audit_fs("fs.write", &session, &repo, &normalize_rel(&path)?);
                 Ok(Response::Written { version })
             }
             Request::FsCreateFile {
                 session,
+                repo,
                 path,
                 content,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 let version = {
                     let _g = self.write_lock.lock().unwrap();
                     fsops::create_file(&j, &path, &content)?
                 };
-                self.audit_fs("fs.create_file", &session, &normalize_rel(&path)?);
+                self.audit_fs("fs.create_file", &session, &repo, &normalize_rel(&path)?);
                 Ok(Response::Written { version })
             }
-            Request::FsCreateDir { session, path } => {
-                let (_, j) = self.session_root(&session)?;
+            Request::FsCreateDir {
+                session,
+                repo,
+                path,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 fsops::create_dir(&j, &path)?;
-                self.audit_fs("fs.create_dir", &session, &normalize_rel(&path)?);
+                self.audit_fs("fs.create_dir", &session, &repo, &normalize_rel(&path)?);
                 Ok(Response::Unit)
             }
-            Request::FsRename { session, from, to } => {
-                let (_, j) = self.session_root(&session)?;
+            Request::FsRename {
+                session,
+                repo,
+                from,
+                to,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 {
                     let _g = self.write_lock.lock().unwrap();
                     fsops::rename(&j, &from, &to)?;
                 }
                 let target = format!("{} -> {}", normalize_rel(&from)?, normalize_rel(&to)?);
-                self.audit_fs("fs.rename", &session, &target);
+                self.audit_fs("fs.rename", &session, &repo, &target);
                 Ok(Response::Unit)
             }
             Request::FsDelete {
                 session,
+                repo,
                 path,
                 recursive,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 {
                     let _g = self.write_lock.lock().unwrap();
                     fsops::delete(&j, &path, recursive)?;
                 }
-                self.audit_fs("fs.delete", &session, &normalize_rel(&path)?);
+                self.audit_fs("fs.delete", &session, &repo, &normalize_rel(&path)?);
                 Ok(Response::Unit)
-            }
-            Request::BrowseRoots => Ok(Response::Roots(
-                self.browse_jail()
-                    .roots()
-                    .iter()
-                    .map(|r| r.display().to_string())
-                    .collect(),
-            )),
-            Request::BrowseList { abs_dir } => {
-                fsops::browse(&self.browse_jail(), &abs_dir).map(Response::Browse)
             }
             Request::BrowsePickList { abs_dir } => {
                 fsops::pick_list(abs_dir.as_deref(), home_dir().as_deref()).map(Response::Browse)
             }
-            Request::BrowseConfig => Ok(Response::BrowseConfig(self.browse_config())),
-            Request::BrowseSetRoots { roots } => {
-                self.set_browse_roots(roots).map(Response::BrowseConfig)
-            }
             Request::SearchFiles {
                 session,
+                repo,
                 query,
                 max_results,
             } => {
-                let (_, j) = self.session_root(&session)?;
-                Ok(Response::FileMatches(search::files(
-                    j.root(),
-                    &query,
-                    max_results,
-                )))
+                let s = self.resolve_session(&session)?;
+                let mut roots: Vec<(String, RootJail)> = Vec::new();
+                for wt in &s.worktrees {
+                    if repo.as_deref().is_some_and(|r| r != wt.repo.as_str()) {
+                        continue;
+                    }
+                    if let Ok(j) = RootJail::new(&wt.path) {
+                        roots.push((wt.repo.to_string(), j));
+                    }
+                }
+                let refs: Vec<(String, &std::path::Path)> =
+                    roots.iter().map(|(r, j)| (r.clone(), j.root())).collect();
+                Ok(Response::FileMatches(search::files(&refs, &query, max_results)))
             }
-            Request::GitStatus { session, base } => {
-                let (s, j) = self.session_root(&session)?;
-                git::status(j.root(), Some(&s.repo_path), base.as_deref()).map(Response::GitStatus)
+            Request::GitStatus {
+                session,
+                repo,
+                base,
+            } => {
+                let (_, wt, j) = self.worktree_root(&session, &repo)?;
+                let main = self.repo_path_of(&wt);
+                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
+                git::status(j.root(), main.as_deref(), base.as_deref()).map(Response::GitStatus)
             }
             Request::GitDiff {
                 session,
+                repo,
                 path,
                 against,
                 base,
             } => {
-                let (s, j) = self.session_root(&session)?;
+                let (_, wt, j) = self.worktree_root(&session, &repo)?;
                 let path = match path {
                     Some(p) => {
                         let n = normalize_rel(&p)?;
@@ -975,9 +1109,11 @@ impl UserCtx {
                     }
                     None => None,
                 };
+                let main = self.repo_path_of(&wt);
+                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
                 git::diff(
                     j.root(),
-                    Some(&s.repo_path),
+                    main.as_deref(),
                     path.as_deref(),
                     against,
                     base.as_deref(),
@@ -986,36 +1122,40 @@ impl UserCtx {
             }
             Request::GitFileAt {
                 session,
+                repo,
                 path,
                 rev,
                 base,
             } => {
-                let (s, j) = self.session_root(&session)?;
+                let (_, wt, j) = self.worktree_root(&session, &repo)?;
                 let rel = normalize_rel(&path)?;
                 if rel.is_empty() {
                     return Err(ProtoError::new("fs-is-a-dir").arg("path", ""));
                 }
                 j.resolve(&rel)?;
-                let blob = git::file_at(j.root(), Some(&s.repo_path), &rel, &rev, base.as_deref())?;
+                let main = self.repo_path_of(&wt);
+                let base = base.or_else(|| (!wt.base.is_empty()).then(|| wt.base.clone()));
+                let blob = git::file_at(j.root(), main.as_deref(), &rel, &rev, base.as_deref())?;
                 Ok(Response::FileAt(
                     blob.map(|b| fsops::content_from_bytes(&rel, &b, 0)),
                 ))
             }
             Request::DefLookup {
                 session,
+                repo,
                 path,
                 line,
                 col,
                 text,
             } => {
-                let (_, j) = self.session_root(&session)?;
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
                 def::lookup(&j, &path, line, col, text).map(Response::Def)
             }
             other => Err(ProtoError::new("bad-request").arg("method", other.method())),
         }
     }
 
-    fn session_create(&self, req: NewSession) -> Result<SessionInfo, ProtoError> {
+    fn session_create(&self, req: NewSession) -> Result<Response, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let p = self.provider(&req.provider)?;
         if let Some(slug) = &req.account {
@@ -1036,10 +1176,18 @@ impl UserCtx {
             .unwrap()
             .require(&req.configuration)
             .map_err(core)?;
-        // The repository must lie inside the browse roots (path jail).
-        let repo_path = self.browse_jail().resolve(&req.repo_path)?;
+        // Only registered repositories (the registry is the scope of what sessions reach).
+        let repo_ids = req
+            .repos
+            .iter()
+            .map(|r| self.parse_repo(r))
+            .collect::<Result<Vec<_>, _>>()?;
+        let original = req
+            .original_repo
+            .as_deref()
+            .map(|r| self.parse_repo(r))
+            .transpose()?;
         let core_req = ide_core::NewSession {
-            repo_path,
             target: SessionTarget {
                 provider: req.provider.clone(),
                 account: req.account.clone(),
@@ -1047,13 +1195,17 @@ impl UserCtx {
             },
             title: req.title.clone(),
             provider_name: p.display_name().to_owned(),
-            base_ref: req.base_ref.clone(),
+            repos: repo_ids,
+            original_repo: original,
         };
-        // The program must resolve before the worktree is created.
-        let session = ide_core::create_session(&self.paths, &core_req, |_| {
-            p.program_path(&self.launch_env).map(drop)
-        })
-        .map_err(core)?;
+        // The program must resolve before the folder and worktrees are created.
+        let (session, failures) = {
+            let repos = self.repos.lock().unwrap();
+            ide_core::create_session(&self.paths, &repos, &core_req, |_| {
+                p.program_path(&self.launch_env).map(drop)
+            })
+            .map_err(core)?
+        };
         self.sessions
             .lock()
             .unwrap()
@@ -1075,19 +1227,46 @@ impl UserCtx {
         self.audit(
             "session.create",
             &format!(
-                "{} {} provider={} account={} configuration={}",
+                "{} {} mode={:?} repos={} provider={} account={} configuration={}",
                 session.id,
-                session.worktree_path.display(),
+                session.root.display(),
+                session.mode,
+                session
+                    .worktrees
+                    .iter()
+                    .map(|w| w.repo.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
                 session.provider,
                 session.account.as_deref().unwrap_or("-"),
                 session.configuration
             ),
         );
+        for f in &failures {
+            self.audit(
+                "session.create.repo_failed",
+                &format!("{} {} {}", session.id, f.repo, f.error),
+            );
+        }
         self.notify(Notify::SessionsChanged);
+        self.notify(Notify::ReposChanged);
         if req.start {
             self.start(&session)?;
+        } else {
+            // Write the session folder's files now (guidance, skills), not only at start.
+            self.refresh_root(&session);
         }
-        Ok(self.info(&session))
+        Ok(Response::SessionCreated {
+            session: self.info(&session),
+            failures: failures
+                .iter()
+                .map(|f| RepoFailureInfo {
+                    repo: f.repo.to_string(),
+                    name: f.name.clone(),
+                    error: core_error(&f.error),
+                })
+                .collect(),
+        })
     }
 
     /// The launch spec of a session (generates its scratch files).
@@ -1108,8 +1287,7 @@ impl UserCtx {
         if s.kind == SessionKind::Login {
             let acct = account
                 .ok_or_else(|| core(ide_core::Error::ProviderNoLogin(s.provider.clone())))?;
-            return ide_agents::login_spec(p, &acct, &s.worktree_path, &self.launch_env)
-                .map_err(core);
+            return ide_agents::login_spec(p, &acct, &s.root, &self.launch_env).map_err(core);
         }
         let configuration = self
             .configs
@@ -1118,7 +1296,17 @@ impl UserCtx {
             .require(&s.configuration)
             .map_err(core)?
             .clone();
-        let input = SessionInput::for_session(&self.paths, s, account.as_ref(), &configuration);
+        let repos = self.repos.lock().unwrap();
+        let guidance = ide_core::session_guidance(s, &repos);
+        let input = SessionInput::for_session(
+            &self.paths,
+            s,
+            account.as_ref(),
+            &configuration,
+            &repos,
+            guidance,
+        );
+        drop(repos);
         let built = ide_agents::assemble(p, &input, &self.launch_env).map_err(core)?;
         for n in &built.notes {
             tracing::warn!("session {}: {n}", s.id);
@@ -1128,6 +1316,12 @@ impl UserCtx {
     }
 
     fn start(&self, s: &Session) -> Result<(), ProtoError> {
+        if self
+            .existing_host(s.id.as_str())
+            .is_some_and(|h| matches!(h.state(), SessionState::Exited(_)))
+        {
+            self.after_exit(s);
+        }
         let spec = self.launch_spec(s)?;
         let host = self.host(s);
         host.start(|cols, rows| {
@@ -1148,7 +1342,36 @@ impl UserCtx {
             if !stopped {
                 tracing::warn!("session {} did not stop within {STOP_TIMEOUT:?}", s.id);
             }
+            self.after_exit(s);
         }
+    }
+
+    /// The provider's [`ide_agents::AgentProvider::after_exit`] for a session that stopped
+    /// (here or, before a restart, by itself).
+    fn after_exit(&self, s: &Session) {
+        let Ok(p) = self.provider(&s.provider) else {
+            return;
+        };
+        let account = s.account.as_ref().and_then(|slug| {
+            self.accounts
+                .lock()
+                .unwrap()
+                .require(&s.provider, slug)
+                .ok()
+                .cloned()
+        });
+        let repos = self.repos.lock().unwrap();
+        let ctx = SessionInput::for_session(
+            &self.paths,
+            s,
+            None,
+            &ide_core::Configuration::empty("x", "x"),
+            &repos,
+            None,
+        )
+        .ctx;
+        drop(repos);
+        p.after_exit(&ctx, account.as_ref());
     }
 }
 
@@ -1159,41 +1382,22 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// A browse root as given by the client: an absolute path (no `..`, no NUL/control
-/// characters) of an existing folder that is not a filesystem root. Returns it canonical.
-pub fn validate_browse_root(raw: &str) -> Result<PathBuf, ProtoError> {
-    use std::path::Component;
-    let s = raw.trim();
-    let invalid = || ProtoError::new("path-invalid").arg("path", raw);
-    if s.is_empty() || s.chars().any(char::is_control) {
-        return Err(invalid());
-    }
-    let p = std::path::Path::new(s);
-    if !p.is_absolute() {
-        return Err(invalid());
-    }
-    if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(ProtoError::new("path-denied").arg("path", raw));
-    }
-    let canon = crate::jail::canonicalize(p).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ProtoError::new("fs-not-found").arg("path", raw),
-        std::io::ErrorKind::PermissionDenied => ProtoError::new("fs-permission").arg("path", raw),
-        _ => ProtoError::new("fs-io")
-            .arg("path", raw)
-            .arg("detail", e.to_string()),
-    })?;
-    if !canon.is_dir() {
-        return Err(ProtoError::new("fs-not-a-dir").arg("path", raw));
-    }
-    // A whole drive (`C:\`, `/`, `\\server\share`) would make the jail meaningless.
-    let normal = canon
-        .components()
-        .filter(|c| matches!(c, Component::Normal(_)))
-        .count();
-    if normal == 0 {
-        return Err(ProtoError::new("path-denied").arg("path", raw));
-    }
-    Ok(canon)
+/// The legacy `browse_roots` of `<data>/server.json` (only read by the registry migration).
+fn legacy_browse_roots(paths: &Paths) -> Vec<PathBuf> {
+    let cfg = paths.root().join(SERVER_CONFIG_FILE);
+    let Ok(text) = std::fs::read_to_string(&cfg) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("browse_roots")?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(PathBuf::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Map an `ide-core` error to a wire error (same ids, named args).
@@ -1245,6 +1449,12 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
             .arg("detail", detail),
         ErrorMessage::WorktreeExists { path } => p.arg("path", path.display().to_string()),
         ErrorMessage::ProgramNotFound { program } => p.arg("program", program),
+        ErrorMessage::RepoNotFound { id } => p.arg("id", id),
+        ErrorMessage::RepoInUse { name, count } => {
+            p.arg("name", name).arg("count", count.to_string())
+        }
+        ErrorMessage::RepoNotAttached { name } => p.arg("name", name),
+        ErrorMessage::NotAWorkspaceSession { id } => p.arg("id", id),
     }
 }
 
@@ -1276,6 +1486,10 @@ fn configuration_info(c: &ide_core::Configuration) -> ConfigurationInfo {
             })
             .collect(),
         instructions: c.instructions.clone(),
+        default_repos: c
+            .default_repos
+            .as_ref()
+            .map(|v| v.iter().map(|r| r.to_string()).collect()),
         created_at: c.created_at,
     }
 }
@@ -1304,6 +1518,11 @@ fn configuration_from_info(i: ConfigurationInfo) -> ide_core::Configuration {
             })
             .collect(),
         instructions: i.instructions,
+        default_repos: i.default_repos.map(|v| {
+            v.iter()
+                .filter_map(|r| ide_core::RepoId::parse(r).ok())
+                .collect()
+        }),
         created_at: i.created_at,
     }
 }

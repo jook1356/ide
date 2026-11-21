@@ -33,6 +33,19 @@ pub struct ProviderCaps {
     pub resume: bool,
     /// The session title is passed as the CLI's session name.
     pub session_name: bool,
+    /// Support in original-repo sessions (the fields above: workspace sessions).
+    pub original_repo: ModeCaps,
+}
+
+/// Support of the configuration parts in one session mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeCaps {
+    /// Skills.
+    pub skills: Support,
+    /// MCP servers.
+    pub mcp: Support,
+    /// Instructions.
+    pub instructions: Support,
 }
 
 /// Installed? Version?
@@ -117,8 +130,52 @@ pub struct ConfigurationInfo {
     pub mcp_servers: Vec<McpServerInfo>,
     /// Instructions text.
     pub instructions: String,
+    /// Repo ids pre-checked for new sessions; `None` = every registered repo.
+    pub default_repos: Option<Vec<String>>,
     /// Unix seconds.
     pub created_at: u64,
+}
+
+/// A registered repository (`repo.list`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoInfo {
+    /// Id (8 hex digits).
+    pub id: String,
+    /// Name (folder name of the main checkout).
+    pub name: String,
+    /// Main checkout (server path).
+    pub path: String,
+    /// Base branch new worktrees start from (empty if it cannot be determined).
+    pub base: String,
+    /// Sessions with this repo attached.
+    pub sessions: u32,
+}
+
+/// Where a session runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum SessionMode {
+    /// Session folder with one worktree per attached repo.
+    #[default]
+    Workspace,
+    /// The registered repository's own checkout.
+    OriginalRepo,
+}
+
+/// One repository attached to a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRepo {
+    /// Repo id.
+    pub repo: String,
+    /// Repo name.
+    pub name: String,
+    /// Folder name inside the session folder.
+    pub folder: String,
+    /// Worktree (server path).
+    pub path: String,
+    /// Branch at creation.
+    pub branch: String,
+    /// Base branch (empty for original-repo sessions).
+    pub base: String,
 }
 
 /// What a session runs.

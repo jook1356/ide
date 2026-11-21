@@ -47,20 +47,23 @@ impl Conn {
         self.mux.send_rpc(&RpcMessage::Notify(n).encode()).is_ok()
     }
 
-    /// `fs.watch`: idempotent per connection and session.
-    fn watch(self: &Arc<Self>, session: &str) -> Result<(), ProtoError> {
-        if self.watches.lock().unwrap().contains_key(session) {
+    /// `fs.watch`: idempotent per connection, session and repo.
+    fn watch(self: &Arc<Self>, session: &str, repo: &str) -> Result<(), ProtoError> {
+        let key = crate::watch::key(session, repo);
+        if self.watches.lock().unwrap().contains_key(&key) {
             return Ok(());
         }
-        let mut rx = self.ctx.watch(session)?;
+        let mut rx = self.ctx.watch(session, repo)?;
         let conn = self.clone();
         let sid = session.to_owned();
+        let rid = repo.to_owned();
         let task = tokio::spawn(async move {
             loop {
                 let n = match rx.recv().await {
                     Ok(n) => n,
                     Err(broadcast::error::RecvError::Lagged(_)) => Notify::FsChanged {
                         session: sid.clone(),
+                        repo: rid.clone(),
                         paths: Vec::new(),
                         rescan: true,
                     },
@@ -75,19 +78,20 @@ impl Conn {
             .watches
             .lock()
             .unwrap()
-            .insert(session.to_owned(), task.abort_handle());
+            .insert(key, task.abort_handle());
         if let Some(old) = old {
-            // A concurrent watch of the same session won the race: keep one reference.
+            // A concurrent watch of the same worktree won the race: keep one reference.
             old.abort();
-            self.ctx.unwatch(session);
+            self.ctx.unwatch(session, repo);
         }
         Ok(())
     }
 
-    fn unwatch(&self, session: &str) {
-        if let Some(h) = self.watches.lock().unwrap().remove(session) {
+    fn unwatch(&self, session: &str, repo: &str) {
+        let key = crate::watch::key(session, repo);
+        if let Some(h) = self.watches.lock().unwrap().remove(&key) {
             h.abort();
-            self.ctx.unwatch(session);
+            self.ctx.unwatch(session, repo);
         }
     }
 
@@ -101,7 +105,7 @@ impl Conn {
             let prepared = tokio::task::spawn_blocking(move || ctx.search_prepare(&q))
                 .await
                 .unwrap_or_else(|e| Err(ProtoError::internal(e)));
-            let (jail, prepared) = match prepared {
+            let (roots, prepared) = match prepared {
                 Ok(p) => p,
                 Err(e) => {
                     conn.reply(id, Err(e));
@@ -115,7 +119,9 @@ impl Conn {
             let c2 = conn.clone();
             let flag = cancel.clone();
             let summary = tokio::task::spawn_blocking(move || {
-                crate::search::run_text(jail.root(), &prepared, &flag, |hits| {
+                let refs: Vec<(String, &std::path::Path)> =
+                    roots.iter().map(|(r, j)| (r.clone(), j.root())).collect();
+                crate::search::run_text(&refs, &prepared, &flag, |hits| {
                     c2.notify(Notify::SearchHits { search, hits })
                 })
             })
@@ -218,7 +224,7 @@ where
                 "sessions",
                 "term",
                 "files",
-                "browse",
+                "repos",
                 "browse-pick",
                 "search",
                 "git",
@@ -285,12 +291,12 @@ where
                     server.request_shutdown();
                 });
             }
-            Request::FsWatch { session } => {
-                let r = conn.watch(&session).map(|_| Response::Unit);
+            Request::FsWatch { session, repo } => {
+                let r = conn.watch(&session, &repo).map(|_| Response::Unit);
                 conn.reply(id, r);
             }
-            Request::FsUnwatch { session } => {
-                conn.unwatch(&session);
+            Request::FsUnwatch { session, repo } => {
+                conn.unwatch(&session, &repo);
                 conn.reply(id, Ok(Response::Unit));
             }
             Request::SearchText { search, query } => conn.search(id, search, query),
@@ -324,8 +330,10 @@ where
         h.abort();
     }
     let watched: Vec<String> = conn.watches.lock().unwrap().keys().cloned().collect();
-    for s in watched {
-        conn.unwatch(&s);
+    for k in watched {
+        if let Some((s, r)) = k.split_once(':') {
+            conn.unwatch(s, r);
+        }
     }
     for (_, f) in conn.searches.lock().unwrap().drain() {
         f.store(true, Ordering::Relaxed);

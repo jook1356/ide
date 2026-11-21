@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    AccountInfo, AccountState, Attached, BrowseConfig, BrowseListing, ChunkDecoder,
+    AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
     GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
-    ProtoError, ProviderInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
+    ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
     SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -159,8 +159,8 @@ struct Inner {
     status: watch::Sender<Status>,
     next_id: AtomicU64,
     attachments: Mutex<HashMap<String, Arc<Attachment>>>,
-    /// Sessions watched with `fs.watch` (re-watched after a reconnect).
-    watched: Mutex<HashSet<String>>,
+    /// `(session, repo)` worktrees watched with `fs.watch` (re-watched after a reconnect).
+    watched: Mutex<HashSet<(String, String)>>,
     ctrl_tx: mpsc::UnboundedSender<ClientEvent>,
     term_tx: mpsc::Sender<ClientEvent>,
     events: EventSlot,
@@ -466,9 +466,69 @@ impl Client {
         })
     }
 
-    /// `session.create` (repo -> worktree -> optional start).
-    pub async fn create_session(&self, req: NewSession) -> Result<SessionInfo, ProtoError> {
-        expect_session(self.call(Request::SessionCreate(req)).await)
+    /// `session.create` (session folder + one worktree per repo, or an original-repo
+    /// session -> optional start). Returns the session and the repos whose worktree failed
+    /// (the session exists anyway, as in Hermes Desk).
+    pub async fn create_session(
+        &self,
+        req: NewSession,
+    ) -> Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError> {
+        expect(self.call(Request::SessionCreate(req)).await, |r| match r {
+            Response::SessionCreated { session, failures } => Some((session, failures)),
+            _ => None,
+        })
+    }
+
+    /// `session.attach_repo`: give a workspace session a worktree of a registered repo.
+    pub async fn attach_repo(&self, id: &str, repo: &str) -> Result<SessionInfo, ProtoError> {
+        expect_session(
+            self.call(Request::SessionAttachRepo {
+                id: id.into(),
+                repo: repo.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `session.detach_repo`: remove a repo's worktree from a workspace session (branch kept).
+    pub async fn detach_repo(&self, id: &str, repo: &str) -> Result<SessionInfo, ProtoError> {
+        self.inner()
+            .watched
+            .lock()
+            .unwrap()
+            .remove(&(id.to_owned(), repo.to_owned()));
+        expect_session(
+            self.call(Request::SessionDetachRepo {
+                id: id.into(),
+                repo: repo.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `repo.list`: registered repositories.
+    pub async fn repos(&self) -> Result<Vec<RepoInfo>, ProtoError> {
+        expect(self.call(Request::RepoList).await, |r| match r {
+            Response::Repos(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    /// `repo.register`: register the git repository containing `path` (server path).
+    pub async fn register_repo(&self, path: &str) -> Result<RepoInfo, ProtoError> {
+        expect(
+            self.call(Request::RepoRegister { path: path.into() })
+                .await,
+            |r| match r {
+                Response::Repo(r) => Some(r),
+                _ => None,
+            },
+        )
+    }
+
+    /// `repo.unregister` (`repo-in-use` while sessions have it attached).
+    pub async fn unregister_repo(&self, id: &str) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::RepoUnregister { id: id.into() }).await)
     }
 
     /// `session.start`.
@@ -595,20 +655,23 @@ impl Client {
         )
     }
 
-    // ---- Phase 2: files, browsing, search, git, go-to-definition ----
-    // Paths are root-relative to the session worktree (`/`-separated, `""` = root).
+    // ---- Phase 2: files, folder picker, search, git, go-to-definition ----
+    // `(session, repo)` names one worktree; paths are root-relative to it (`/`-separated,
+    // `""` = root).
 
     /// `fs.list`: entries of `dir` (directories first). `.git` is never listed; ignored
     /// entries only with `include_ignored` (flagged `ignored`).
     pub async fn fs_list(
         &self,
         session: &str,
+        repo: &str,
         dir: &str,
         include_ignored: bool,
     ) -> Result<Vec<FsEntry>, ProtoError> {
         expect(
             self.call(Request::FsList {
                 session: session.into(),
+                repo: repo.into(),
                 dir: dir.into(),
                 include_ignored,
             })
@@ -621,10 +684,11 @@ impl Client {
     }
 
     /// `fs.stat` (a symlink is reported as such, not followed).
-    pub async fn fs_stat(&self, session: &str, path: &str) -> Result<FsStat, ProtoError> {
+    pub async fn fs_stat(&self, session: &str, repo: &str, path: &str) -> Result<FsStat, ProtoError> {
         expect(
             self.call(Request::FsStat {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
             })
             .await,
@@ -640,12 +704,14 @@ impl Client {
     pub async fn fs_read(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         max_bytes: u64,
     ) -> Result<FileContent, ProtoError> {
         expect(
             self.call(Request::FsRead {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 max_bytes,
             })
@@ -663,6 +729,7 @@ impl Client {
     pub async fn fs_write(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         content: impl Into<String>,
         expected_version: Option<&str>,
@@ -671,6 +738,7 @@ impl Client {
         expect_written(
             self.call(Request::FsWrite {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 content: content.into(),
                 expected_version: expected_version.map(str::to_owned),
@@ -684,12 +752,14 @@ impl Client {
     pub async fn fs_create_file(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         content: impl Into<String>,
     ) -> Result<String, ProtoError> {
         expect_written(
             self.call(Request::FsCreateFile {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 content: content.into(),
             })
@@ -698,10 +768,11 @@ impl Client {
     }
 
     /// `fs.create_dir` (with parents; `fs-exists` if it exists).
-    pub async fn fs_create_dir(&self, session: &str, path: &str) -> Result<(), ProtoError> {
+    pub async fn fs_create_dir(&self, session: &str, repo: &str, path: &str) -> Result<(), ProtoError> {
         expect_unit(
             self.call(Request::FsCreateDir {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
             })
             .await,
@@ -709,10 +780,11 @@ impl Client {
     }
 
     /// `fs.rename` / move inside the session (`fs-exists` if `to` exists).
-    pub async fn fs_rename(&self, session: &str, from: &str, to: &str) -> Result<(), ProtoError> {
+    pub async fn fs_rename(&self, session: &str, repo: &str, from: &str, to: &str) -> Result<(), ProtoError> {
         expect_unit(
             self.call(Request::FsRename {
                 session: session.into(),
+                repo: repo.into(),
                 from: from.into(),
                 to: to.into(),
             })
@@ -724,12 +796,14 @@ impl Client {
     pub async fn fs_delete(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         recursive: bool,
     ) -> Result<(), ProtoError> {
         expect_unit(
             self.call(Request::FsDelete {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 recursive,
             })
@@ -740,59 +814,42 @@ impl Client {
     /// `fs.watch`: `Notify::FsChanged` / `Notify::GitChanged` for the session arrive as
     /// [`ClientEvent::Notify`]. Remembered: re-watched after a reconnect (refresh what is
     /// shown on `Connected`, changes during the gap are not replayed).
-    pub async fn fs_watch(&self, session: &str) -> Result<(), ProtoError> {
+    pub async fn fs_watch(&self, session: &str, repo: &str) -> Result<(), ProtoError> {
         self.inner()
             .watched
             .lock()
             .unwrap()
-            .insert(session.to_owned());
+            .insert((session.to_owned(), repo.to_owned()));
         expect_unit(
             self.call(Request::FsWatch {
                 session: session.into(),
+                repo: repo.into(),
             })
             .await,
         )
     }
 
-    /// Stop watching a session.
-    pub async fn fs_unwatch(&self, session: &str) -> Result<(), ProtoError> {
-        self.inner().watched.lock().unwrap().remove(session);
+    /// Stop watching a session's repo worktree.
+    pub async fn fs_unwatch(&self, session: &str, repo: &str) -> Result<(), ProtoError> {
+        self.inner()
+            .watched
+            .lock()
+            .unwrap()
+            .remove(&(session.to_owned(), repo.to_owned()));
         if !self.is_connected() {
             return Ok(());
         }
         expect_unit(
             self.call(Request::FsUnwatch {
                 session: session.into(),
+                repo: repo.into(),
             })
             .await,
         )
     }
 
-    /// `browse.roots`: absolute folders repositories can be picked from.
-    pub async fn browse_roots(&self) -> Result<Vec<String>, ProtoError> {
-        expect(self.call(Request::BrowseRoots).await, |r| match r {
-            Response::Roots(r) => Some(r),
-            _ => None,
-        })
-    }
-
-    /// `browse.list`: sub-folders of an absolute folder inside the browse roots (`""` = the
-    /// first root), with `is_git_repo` flags.
-    pub async fn browse_list(&self, abs_dir: &str) -> Result<BrowseListing, ProtoError> {
-        expect(
-            self.call(Request::BrowseList {
-                abs_dir: abs_dir.into(),
-            })
-            .await,
-            |r| match r {
-                Response::Browse(b) => Some(b),
-                _ => None,
-            },
-        )
-    }
-
-    /// `browse.pick_list`: folders anywhere the server's OS user can read, for choosing a new
-    /// browse root (`None` = the start list: drives or `/`, plus the home dir; path `""`).
+    /// `browse.pick_list`: folders anywhere the server's OS user can read, for choosing a
+    /// repository to register (`None` = the start list: drives or `/`, plus the home dir; path `""`).
     pub async fn browse_pick_list(
         &self,
         abs_dir: Option<&str>,
@@ -804,27 +861,6 @@ impl Client {
             .await,
             |r| match r {
                 Response::Browse(b) => Some(b),
-                _ => None,
-            },
-        )
-    }
-
-    /// `browse.config`: the home dir and the extra browse roots saved on the server.
-    pub async fn browse_config(&self) -> Result<BrowseConfig, ProtoError> {
-        expect(self.call(Request::BrowseConfig).await, |r| match r {
-            Response::BrowseConfig(c) => Some(c),
-            _ => None,
-        })
-    }
-
-    /// `browse.set_roots`: replace the extra browse roots (saved in the server's
-    /// `server.json`). Each root must be an existing absolute folder (`path-invalid`,
-    /// `fs-not-found`, `fs-not-a-dir`, `path-denied` for a filesystem root).
-    pub async fn browse_set_roots(&self, roots: Vec<String>) -> Result<BrowseConfig, ProtoError> {
-        expect(
-            self.call(Request::BrowseSetRoots { roots }).await,
-            |r| match r {
-                Response::BrowseConfig(c) => Some(c),
                 _ => None,
             },
         )
@@ -862,12 +898,14 @@ impl Client {
     pub async fn search_files(
         &self,
         session: &str,
+        repo: Option<&str>,
         query: &str,
         max_results: u32,
     ) -> Result<Vec<FileMatch>, ProtoError> {
         expect(
             self.call(Request::SearchFiles {
                 session: session.into(),
+                repo: repo.map(str::to_owned),
                 query: query.into(),
                 max_results,
             })
@@ -884,11 +922,13 @@ impl Client {
     pub async fn git_status(
         &self,
         session: &str,
+        repo: &str,
         base: Option<&str>,
     ) -> Result<GitStatus, ProtoError> {
         expect(
             self.call(Request::GitStatus {
                 session: session.into(),
+                repo: repo.into(),
                 base: base.map(str::to_owned),
             })
             .await,
@@ -903,6 +943,7 @@ impl Client {
     pub async fn git_diff(
         &self,
         session: &str,
+        repo: &str,
         path: Option<&str>,
         against: DiffAgainst,
         base: Option<&str>,
@@ -910,6 +951,7 @@ impl Client {
         expect(
             self.call(Request::GitDiff {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.map(str::to_owned),
                 against,
                 base: base.map(str::to_owned),
@@ -927,6 +969,7 @@ impl Client {
     pub async fn git_file_at(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         rev: GitRev,
         base: Option<&str>,
@@ -934,6 +977,7 @@ impl Client {
         expect(
             self.call(Request::GitFileAt {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 rev,
                 base: base.map(str::to_owned),
@@ -951,6 +995,7 @@ impl Client {
     pub async fn def_lookup(
         &self,
         session: &str,
+        repo: &str,
         path: &str,
         line: u32,
         col: u32,
@@ -959,6 +1004,7 @@ impl Client {
         expect(
             self.call(Request::DefLookup {
                 session: session.into(),
+                repo: repo.into(),
                 path: path.into(),
                 line,
                 col,
@@ -1320,8 +1366,9 @@ async fn run(inner: Arc<Inner>) {
                     s.last_error = None;
                 });
                 let _ = inner.ctrl_tx.send(ClientEvent::Connected(welcome));
-                let watched: Vec<String> = inner.watched.lock().unwrap().iter().cloned().collect();
-                for session in watched {
+                let watched: Vec<(String, String)> =
+                    inner.watched.lock().unwrap().iter().cloned().collect();
+                for (session, repo) in watched {
                     let (inner2, conn2) = (inner.clone(), conn.clone());
                     tokio::spawn(async move {
                         let r = conn2
@@ -1329,6 +1376,7 @@ async fn run(inner: Arc<Inner>) {
                                 inner2.next_id(),
                                 Request::FsWatch {
                                     session: session.clone(),
+                                    repo: repo.clone(),
                                 },
                                 inner2.opts.request_timeout,
                             )

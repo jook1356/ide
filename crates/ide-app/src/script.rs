@@ -5,6 +5,8 @@
 //!
 //! Environment:
 //! - `IDE_APP_TEST_REPO`: throwaway repo folder (created with `git init` + one commit if missing)
+//! - `IDE_APP_TEST_REPO2`: a second throwaway repo for the multi-repo checks (default: a
+//!   `lib-repo` folder beside the first)
 //! - `IDE_APP_EVIDENCE`: screenshot/log folder (default `<data dir>/evidence`)
 //! - `IDE_APP_SCRIPT_CLAUDE=1`: also open a Claude session (first-run screen only; never types)
 //!   with a script account under `<data>/accounts/claude/` (never the user's own login)
@@ -32,7 +34,7 @@ use iced::{Task, window};
 use ide_i18n::{Lang, LanguagePref, tr};
 use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMessage, TreeMessage};
 
-use crate::app::{App, Conn, McpField, Message, Modal, NewForm, RunState};
+use crate::app::{App, Conn, McpField, Message, Modal, RunState};
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
 use crate::ui_state::{CloseAction, Page, ServerPref};
 use ide_client::{AccountState, SessionKind};
@@ -70,8 +72,6 @@ enum Step {
     Submit,
     /// Wait for the dialog to close (session created) and remember the new session.
     WaitCreated(u64),
-    /// Wait for an inline error in the dialog containing the text.
-    ExpectNewError(&'static str, u64),
     CloseModal,
     WaitText(usize, &'static str, u64),
     /// Terminal input as typed keys (sent to the server).
@@ -128,8 +128,18 @@ enum Step {
     ExpectWorkToggle(bool, bool),
     /// The rail's server tooltip contains the text.
     ExpectServerTooltip(&'static str),
-    /// The repos page loaded the browse roots from the server.
-    WaitRootsLoaded(u64),
+    /// The registered repos arrived (repos page).
+    WaitReposLoaded(u64),
+    /// Repos page: type a path and register it.
+    RegisterTyped(Repo),
+    /// The repo is registered (listed on the repos page and in `repos.json`).
+    WaitRepoRegistered(Repo, u64),
+    /// The repos page shows an error containing the text.
+    ExpectReposError(&'static str, u64),
+    /// Repos page: unregister a repo (`Repo2`), first click + confirm.
+    Unregister(Repo),
+    /// The repo is no longer registered.
+    WaitRepoGone(Repo, u64),
     ExpectSettingsError(&'static str),
     /// Configurations page: add a configuration by name.
     CfgCreate(&'static str),
@@ -191,11 +201,6 @@ enum Step {
     Exit,
 
     // ---- phase 2: files, changes, search, definitions (on the phase 2 session)
-    /// Repos page: add a browse root (`None` = the test repo's parent folder).
-    AddRoot(Option<&'static str>),
-    /// The repos page lists the repo's parent as a browse root and `server.json` stores it.
-    WaitRoots(u64),
-    ExpectRootsError(&'static str, u64),
     /// The repos page's folder picker shows the start list with the test repo's drive.
     WaitPickStart(u64),
     /// Walk the picker from the drive (never the home shortcut) down to the test repo
@@ -204,19 +209,32 @@ enum Step {
     PickWalk(bool, u64),
     /// Highlight the test repo's entry in the picker (it lists the parent).
     PickHighlightRepo,
-    /// The repos page lists the test repo itself as a browse root and `server.json` stores it.
-    WaitRepoRoot(u64),
-    /// Open the new-session dialog with an empty folder, a Shell agent and a title.
-    OpenNewBlank(&'static str),
-    /// Open the dialog's folder browser.
-    BrowseOpen,
-    /// List the test repo's parent (like picking that root).
-    BrowseParent,
-    /// Wait until the browser lists the parent with the repo marked as git.
-    WaitBrowseRepo(u64),
-    /// Click the repo entry: it is listed and picked into the folder field.
-    BrowseIntoRepo,
-    ExpectRepoPicked(u64),
+    /// Phase 2 terminal: `cd` into the session's first worktree (the shell starts in the
+    /// session folder).
+    CdRepoP2,
+    /// ---- multi-repo: the second test repo exists.
+    EnsureRepo2,
+    /// Configurations page: open the editor and make both test repos the explicit defaults.
+    CfgDefaults(&'static str),
+    /// The saved configuration has both test repos as default repos.
+    WaitCfgDefaults(&'static str, u64),
+    /// The open new-session dialog has exactly the two test repos checked.
+    ExpectNewRepos(usize),
+    /// The phase 2 session has `n` repos, each a worktree folder on branch `ide/<id>`.
+    WaitSessionRepos(usize, u64),
+    /// Show repo 1 or 2 in the phase 2 session's Changes / Explore.
+    PickRepo(Repo),
+    /// Write a file into the phase 2 session's worktree of a repo (an external change).
+    WriteInRepo(Repo, &'static str),
+    /// The text search results come from `n` repos.
+    ExpectSearchRepos(usize),
+    /// Session repo dialog: detach / attach the second repo.
+    DetachRepo2,
+    AttachRepo2,
+    /// Remember the phase 2 session's folder, worktrees and branch for [`Step::ExpectCleaned`].
+    MarkCleanup,
+    /// The deleted session's folder, worktrees and branches are gone; the repos are intact.
+    ExpectCleaned,
     /// Remember the newest session as the phase 2 session.
     MarkP2,
     /// A detail message to the phase 2 session.
@@ -262,10 +280,12 @@ enum Step {
 /// SSH host that never resolves (`.invalid` is reserved).
 const UNREACHABLE: &str = "ide-test@unreachable.invalid";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Repo {
     Test,
-    NotARepo,
+    /// The second test repo (multi-repo checks).
+    Second,
+    PlainFolder,
 }
 
 pub struct Script {
@@ -291,6 +311,10 @@ pub struct Script {
     finished: bool,
     /// Index of the phase 2 session in `ids`.
     p2: Option<usize>,
+    /// Second test repo.
+    repo2: PathBuf,
+    /// [`Step::MarkCleanup`]: (session folder, worktrees, branch).
+    cleanup: Option<(PathBuf, Vec<PathBuf>, String)>,
 }
 
 fn data_url(html: &str) -> String {
@@ -344,6 +368,13 @@ impl Script {
         let repo = std::env::var_os("IDE_APP_TEST_REPO")
             .map(PathBuf::from)
             .unwrap_or_else(|| data.join("test-repo"));
+        let repo2 = std::env::var_os("IDE_APP_TEST_REPO2")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                repo.parent()
+                    .unwrap_or(data)
+                    .join("lib-repo")
+            });
         let claude = std::env::var("IDE_APP_SCRIPT_CLAUDE").is_ok_and(|v| v == "1");
         install_fake_provider(data);
         // `IDE_APP_SCRIPT_ONLY=p2`: startup, the phase 2 checks and the server stop only.
@@ -378,6 +409,8 @@ impl Script {
             children: None,
             finished: false,
             p2: None,
+            repo2,
+            cleanup: None,
         })
     }
 
@@ -388,6 +421,19 @@ impl Script {
     fn id(&self, i: usize) -> Option<String> {
         let i = if i == P2 { self.p2? } else { i };
         self.ids.get(i).cloned()
+    }
+
+    /// Folder of a test repo (`PlainFolder`: a plain folder, created on demand).
+    fn repo_path(&self, r: Repo) -> PathBuf {
+        match r {
+            Repo::Test => self.repo.clone(),
+            Repo::Second => self.repo2.clone(),
+            Repo::PlainFolder => {
+                let p = self.data.join("not-a-repo");
+                let _ = std::fs::create_dir_all(&p);
+                p
+            }
+        }
     }
 
     fn repo_parent(&self) -> String {
@@ -425,17 +471,15 @@ fn steps(claude: bool) -> Vec<Step> {
         EnsureRepo,
         Wait(500),
         Shot("01_empty"),
-        Log("--- error path: not a git repo (server error id -> translated message)"),
-        FillNew {
-            repo: Repo::NotARepo,
-            provider: "shell",
-            title: "",
-        },
-        Submit,
-        ExpectNewError("not a git repository", 15_000),
+        Log("--- repos page: register the test repo (error path: not a git repo)"),
+        GoPage(Page::Repos),
+        RegisterTyped(Repo::PlainFolder),
+        ExpectReposError("not a git repository", 15_000),
         Wait(300),
-        Shot("02_new_session_error"),
-        CloseModal,
+        Shot("02_register_not_a_repo"),
+        RegisterTyped(Repo::Test),
+        WaitRepoRegistered(Repo::Test, 15_000),
+        GoPage(Page::Work),
         Log("--- create two shell sessions through the dialog"),
         FillNew {
             repo: Repo::Test,
@@ -450,7 +494,8 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitText(0, ">", 15_000),
         Write(0, "echo hello from A\r"),
         WaitText(0, "hello from A", 5000),
-        Write(0, "dir\r"),
+        // The shell starts in the session folder; the repo is a worktree below it.
+        Write(0, "dir /b /s README.md\r"),
         WaitText(0, "README.md", 5000),
         FillNew {
             repo: Repo::Test,
@@ -462,7 +507,7 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitText(1, ">", 15_000),
         Write(1, "echo hello from B\r"),
         WaitText(1, "hello from B", 5000),
-        Write(1, "dir\r"),
+        Write(1, "dir /b /s README.md\r"),
         WaitText(1, "README.md", 5000),
         Wait(500),
         Shot("04_session_b"),
@@ -620,17 +665,13 @@ fn steps(claude: bool) -> Vec<Step> {
         Shot("ko_02_new_session_dialog"),
         Pause("ko_new_session_dialog"),
         CloseModal,
-        FillNew {
-            repo: Repo::NotARepo,
-            provider: "shell",
-            title: "",
-        },
-        Submit,
-        ExpectNewError("git 저장소가 아니에요", 15_000),
+        GoPage(Page::Repos),
+        RegisterTyped(Repo::PlainFolder),
+        ExpectReposError("git 저장소가 아니에요", 15_000),
         Wait(300),
-        Shot("ko_03_new_session_error"),
-        Pause("ko_new_session_error"),
-        CloseModal,
+        Shot("ko_03_register_error"),
+        Pause("ko_register_error"),
+        GoPage(Page::Work),
         Log("--- Korean pages of the navigation rail"),
         ExpectServerTooltip("서버: 로컬 · 연결됨 · "),
         Wait(300),
@@ -693,7 +734,7 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitReady(30_000),
         ExpectPage(Page::Repos),
         ExpectSessionsOpen(false),
-        WaitRootsLoaded(10_000),
+        WaitReposLoaded(10_000),
         GoPage(Page::Work),
         App(Message::Page(Page::Work)),
         ExpectSessionsOpen(true),
@@ -848,6 +889,10 @@ fn steps_p2_only() -> Vec<Step> {
         WaitReady(30_000),
         MarkDaemon,
         EnsureRepo,
+        GoPage(Page::Repos),
+        RegisterTyped(Repo::Test),
+        WaitRepoRegistered(Repo::Test, 15_000),
+        GoPage(Page::Work),
     ];
     s.extend(phase2());
     s.extend([
@@ -872,44 +917,36 @@ fn phase2() -> Vec<Step> {
     let renamed = "메모-바뀜.txt";
     let enter = |n: Named| TreeKey(n);
     vec![
-        Log("--- phase 2: browse roots on the repos page (browse.set_roots)"),
+        Log("--- phase 2: repos page folder picker (browse.pick_list) registers a repo"),
         GoPage(Page::Repos),
-        AddRoot(Some("relative\\folder")),
-        ExpectRootsError("Invalid path", 5000),
-        AddRoot(None),
-        WaitRoots(5000),
+        WaitRepoRegistered(Repo::Test, 5000),
         Wait(300),
-        Shot("30_settings_browse_roots"),
-        Pause("settings_browse_roots"),
-        Log("--- repos page: folder picker (browse.pick_list) from the drive list"),
+        Shot("30_repos_page"),
+        Pause("repos_page"),
         App(Message::PickOpen),
         WaitPickStart(10_000),
         Wait(200),
-        Shot("30a_root_picker_start"),
+        Shot("30a_repo_picker_start"),
         PickWalk(true, 20_000),
         Wait(200),
-        Shot("30b_root_picker_repo"),
+        Shot("30b_repo_picker_repo"),
         App(Message::PickConfirm),
-        WaitRepoRoot(5000),
-        Wait(200),
-        Shot("30c_root_picked"),
+        WaitRepoRegistered(Repo::Test, 5000),
         GoPage(Page::Work),
-        Log("--- new session through the server-side folder browser"),
-        OpenNewBlank("phase 2"),
-        BrowseOpen,
-        BrowseParent,
-        WaitBrowseRepo(10_000),
+        Log("--- new session with the registered repo"),
+        FillNew {
+            repo: Repo::Test,
+            provider: "shell",
+            title: "phase 2",
+        },
         Wait(200),
-        Shot("31_new_session_browser"),
-        Pause("new_session_browser"),
-        BrowseIntoRepo,
-        ExpectRepoPicked(10_000),
-        Wait(200),
-        Shot("32_new_session_repo_picked"),
+        Shot("31_new_session_repos"),
+        Pause("new_session_repos"),
         Submit,
         WaitCreated(20_000),
         MarkP2,
         WaitText(P2, ">", 15_000),
+        CdRepoP2,
         Log("--- explorer: lazy tree, open a file"),
         D(DetailMsg::Side(SideTab::Explore)),
         WaitDir("", 10_000),
@@ -1101,19 +1138,11 @@ fn phase2() -> Vec<Step> {
         WaitToast(10_000),
         Wait(200),
         Shot("ko_15_definition_none"),
-        OpenNewBlank(""),
-        BrowseOpen,
-        BrowseParent,
-        WaitBrowseRepo(10_000),
-        Wait(300),
-        Shot("ko_16_new_session_browser"),
-        Pause("ko_new_session_browser"),
-        CloseModal,
         GoPage(Page::Repos),
-        WaitRoots(5000),
+        WaitRepoRegistered(Repo::Test, 5000),
         Wait(300),
-        Shot("ko_17_settings_roots"),
-        Pause("ko_settings_roots"),
+        Shot("ko_17_repos_page"),
+        Pause("ko_repos_page"),
         App(Message::PickOpen),
         WaitPickStart(10_000),
         Wait(300),
@@ -1129,8 +1158,100 @@ fn phase2() -> Vec<Step> {
         PickWalk(true, 5000),
         CloseModal,
         GoPage(Page::Work),
+    ]
+    .into_iter()
+    .chain(multi_repo())
+    .chain([
         SetLang(LanguagePref::Fixed(Lang::En)),
         ExpectLang(Lang::En, "New session"),
+    ])
+    .collect()
+}
+
+/// Multi-repo (in Korean): a second repo registered, both as a configuration's default
+/// repos, a session with both worktrees, Changes / Explore switching repos, search over both,
+/// detach / attach, unregister refused while used, delete cleanup.
+fn multi_repo() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Log("--- multi-repo: register a second repo"),
+        EnsureRepo2,
+        GoPage(Page::Repos),
+        RegisterTyped(Repo::Second),
+        WaitRepoRegistered(Repo::Second, 15_000),
+        Wait(300),
+        Shot("ko_20_repos_page_two_repos"),
+        Pause("ko_repos_page_two_repos"),
+        Log("--- multi-repo: a configuration with both as default repos"),
+        GoPage(Page::Configurations),
+        CfgCreate("Multi"),
+        WaitConfig("multi", true, 5000),
+        CfgDefaults("multi"),
+        Wait(300),
+        Shot("ko_21_configuration_default_repos"),
+        Pause("ko_configuration_default_repos"),
+        CfgSave,
+        WaitCfgDefaults("multi", 5000),
+        GoPage(Page::Work),
+        Log("--- multi-repo: new session pre-checks the configuration's default repos"),
+        App(Message::OpenNew),
+        App(Message::NewProvider("shell".into())),
+        App(Message::NewConfiguration("multi".into())),
+        App(Message::NewTitle("멀티 레포".into())),
+        ExpectNewRepos(2),
+        Wait(300),
+        Shot("ko_22_new_session_default_repos"),
+        Pause("ko_new_session_default_repos"),
+        Submit,
+        WaitCreated(20_000),
+        MarkP2,
+        WaitSessionRepos(2, 15_000),
+        WaitText(P2, ">", 15_000),
+        Log("--- multi-repo: Changes / Explore switch repos"),
+        WriteInRepo(Repo::Second, "lib-change.txt"),
+        D(DetailMsg::Side(SideTab::Changes)),
+        PickRepo(Repo::Second),
+        WaitChange("lib-change.txt", 10_000),
+        Wait(400),
+        Shot("ko_23_multi_repo_changes"),
+        Pause("ko_multi_repo_changes"),
+        D(DetailMsg::Side(SideTab::Explore)),
+        WaitDir("", 10_000),
+        PickRepo(Repo::Test),
+        WaitDir("", 10_000),
+        Wait(300),
+        Shot("ko_24_multi_repo_explore"),
+        Log("--- multi-repo: search covers both repos"),
+        App(Message::FindInFiles),
+        D(DetailMsg::SearchInput("repo".into())),
+        D(DetailMsg::SearchSubmit),
+        WaitSearch(2, 10_000),
+        ExpectSearchRepos(2),
+        Wait(300),
+        Shot("ko_25_multi_repo_search"),
+        Log("--- multi-repo: detach / attach the second repo"),
+        DetachRepo2,
+        WaitSessionRepos(1, 15_000),
+        Wait(300),
+        Shot("ko_26_session_repos_detached"),
+        Pause("ko_session_repos"),
+        AttachRepo2,
+        WaitSessionRepos(2, 20_000),
+        Log("--- multi-repo: unregister refused while a session uses it"),
+        GoPage(Page::Repos),
+        Unregister(Repo::Second),
+        ExpectReposError("세션이 1개", 10_000),
+        GoPage(Page::Work),
+        Log("--- multi-repo: delete cleans every worktree and branch"),
+        MarkCleanup,
+        AskDelete(P2),
+        ConfirmDelete,
+        WaitDeleted(P2, 20_000),
+        ExpectCleaned,
+        GoPage(Page::Repos),
+        Unregister(Repo::Second),
+        WaitRepoGone(Repo::Second, 10_000),
+        GoPage(Page::Work),
     ]
 }
 
@@ -1269,13 +1390,78 @@ fn path_under(path: &str, dir: &str) -> bool {
     p == d || p.starts_with(&format!("{d}/"))
 }
 
+/// Id of a registered test repo.
+fn registered(sc: &Script, app: &App, r: Repo) -> Option<String> {
+    let p = sc.repo_path(r);
+    app.repos
+        .iter()
+        .find(|x| crate::app::same_path(&x.path, &p.display().to_string()))
+        .map(|x| x.id.clone())
+}
+
+/// The second test repo: a README and one source file (searchable "repo").
+fn ensure_repo2(repo: &Path) -> Result<(), String> {
+    if repo.join(".git").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(repo.join("lib")).map_err(|e| e.to_string())?;
+    git(repo, &["init", "-q", "-b", "main"])?;
+    std::fs::write(repo.join("README.md"), "# second test repo\n").map_err(|e| e.to_string())?;
+    std::fs::write(repo.join("lib").join("mod.ts"), "export const lib = 'lib'\n")
+        .map_err(|e| e.to_string())?;
+    git(repo, &["add", "."])?;
+    git(repo, &["commit", "-q", "-m", "init"])?;
+    Ok(())
+}
+
+/// A phase 2 path as an item path: qualified with the session's shown repo.
+fn qp(sc: &Script, app: &App, path: &str) -> String {
+    if !crate::detail::split_q(path).0.is_empty() {
+        return path.to_owned();
+    }
+    let repo = p2_detail(sc, app).map(|d| d.repo.clone()).unwrap_or_default();
+    crate::detail::qualify(&repo, path)
+}
+
+fn qk(sc: &Script, app: &App, key: ItemKey) -> ItemKey {
+    let repo = p2_detail(sc, app).map(|d| d.repo.clone());
+    key.clone().qualified(repo.as_deref()).unwrap_or(key)
+}
+
+/// A detail message of the script with its plain paths qualified.
+fn qmsg(sc: &Script, app: &App, m: DetailMsg) -> DetailMsg {
+    match m {
+        DetailMsg::Activate(k) => DetailMsg::Activate(qk(sc, app, k)),
+        DetailMsg::Close(k) => DetailMsg::Close(qk(sc, app, k)),
+        DetailMsg::Diff(k, x) => DetailMsg::Diff(qk(sc, app, k), x),
+        DetailMsg::BarCompare(p) => DetailMsg::BarCompare(qp(sc, app, &p)),
+        DetailMsg::BarOverwrite(p) => DetailMsg::BarOverwrite(qp(sc, app, &p)),
+        DetailMsg::BarReload(p) => DetailMsg::BarReload(qp(sc, app, &p)),
+        DetailMsg::BarDismiss(p) => DetailMsg::BarDismiss(qp(sc, app, &p)),
+        DetailMsg::Code(p, x) => DetailMsg::Code(qp(sc, app, &p), x),
+        DetailMsg::OpenAt(p, l, c) => DetailMsg::OpenAt(qp(sc, app, &p), l, c),
+        other => other,
+    }
+}
+
+/// The phase 2 session's worktree of its shown repo.
+fn p2_worktree(sc: &Script, app: &App) -> PathBuf {
+    let repo = p2_detail(sc, app).map(|d| d.repo.clone()).unwrap_or_default();
+    sc.id(P2)
+        .and_then(|s| app.live(&s))
+        .and_then(|l| l.info.repos.iter().find(|r| r.repo == repo))
+        .map(|r| PathBuf::from(&r.path))
+        .unwrap_or_default()
+}
+
 /// The phase 2 session's detail area.
 fn p2_detail<'a>(sc: &Script, app: &'a App) -> Option<&'a crate::detail::Detail> {
     sc.id(P2).and_then(|s| app.detail(&s))
 }
 
 fn p2_file<'a>(sc: &Script, app: &'a App, path: &str) -> Option<&'a crate::detail::FileItem> {
-    p2_detail(sc, app).and_then(|d| d.file(path))
+    let q = qp(sc, app, path);
+    p2_detail(sc, app).and_then(|d| d.file(&q))
 }
 
 /// Phase 2 steps: `(advance, task)`.
@@ -1298,47 +1484,6 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
         }};
     }
     let next = match st {
-        Step::AddRoot(v) => {
-            let v = v.map(str::to_owned).unwrap_or_else(|| sc.repo_parent());
-            log(&format!("settings: add browse root {v:?}"));
-            task = Task::batch([
-                app.update(Message::RootInput(v)),
-                app.update(Message::RootAdd),
-            ]);
-            true
-        }
-        Step::WaitRoots(ms) => {
-            let parent = sc.repo_parent();
-            let listed = app
-                .settings
-                .roots
-                .as_ref()
-                .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &parent)));
-            let stored = std::fs::read_to_string(sc.data.join("server.json"))
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|v| {
-                    v.get("browse_roots")?.as_array().map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str())
-                            .any(|r| crate::app::same_path(r, &parent))
-                    })
-                })
-                .unwrap_or(false);
-            wait!(
-                listed && stored,
-                ms,
-                format!("browse root {parent} listed={listed} in server.json={stored}")
-            )
-        }
-        Step::ExpectRootsError(needle, ms) => {
-            let err = app.settings.roots_error.clone();
-            wait!(
-                err.as_deref().is_some_and(|e| e.contains(needle)),
-                ms,
-                format!("browse root refused: {err:?}")
-            )
-        }
         Step::WaitPickStart(ms) => {
             let repo = sc.repo.display().to_string();
             let ok = match &app.modal {
@@ -1434,97 +1579,196 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             }
             true
         }
-        Step::WaitRepoRoot(ms) => {
-            let repo = sc.repo.display().to_string();
-            let listed = app
+        Step::CdRepoP2 => {
+            let wt = app
+                .live(&sid)
+                .and_then(|l| l.info.repos.first())
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
+            log(&format!("phase 2 terminal: cd {wt}"));
+            task = app.update(Message::TermInput(
+                sid,
+                format!("cd /d \"{wt}\"\r").into_bytes(),
+            ));
+            true
+        }
+        Step::EnsureRepo2 => {
+            let r = ensure_repo2(&sc.repo2);
+            sc.check(
+                r.is_ok(),
+                &format!("second test repo ready at {} {r:?}", sc.repo2.display()),
+            );
+            true
+        }
+        Step::CfgDefaults(slug) => {
+            let ids: Vec<String> = [Repo::Test, Repo::Second]
+                .iter()
+                .filter_map(|r| registered(sc, app, *r))
+                .collect();
+            let mut ts = vec![app.update(Message::CfgEdit(slug.into()))];
+            // `None` (= all) becomes an explicit list: uncheck everything, check both.
+            for r in app.repos.iter().map(|r| r.id.clone()).collect::<Vec<_>>() {
+                ts.push(app.update(Message::CfgDefaultRepo(r, false)));
+            }
+            for id in &ids {
+                ts.push(app.update(Message::CfgDefaultRepo(id.clone(), true)));
+            }
+            let got = app
                 .settings
-                .roots
+                .cfg_edit
                 .as_ref()
-                .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &repo)));
-            let stored = std::fs::read_to_string(sc.data.join("server.json"))
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|v| {
-                    v.get("browse_roots")?.as_array().map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str())
-                            .any(|r| crate::app::same_path(r, &repo))
-                    })
-                })
+                .and_then(|e| e.default_repos.clone());
+            sc.check(
+                got.as_ref().is_some_and(|g| g.len() == 2 && ids.iter().all(|i| g.contains(i))),
+                &format!("configuration editor default repos {got:?}"),
+            );
+            task = Task::batch(ts);
+            true
+        }
+        Step::WaitCfgDefaults(slug, ms) => {
+            let ids: Vec<String> = [Repo::Test, Repo::Second]
+                .iter()
+                .filter_map(|r| registered(sc, app, *r))
+                .collect();
+            let got = app
+                .configs
+                .iter()
+                .find(|c| c.slug == slug)
+                .and_then(|c| c.default_repos.clone());
+            let stored = std::fs::read_to_string(sc.data.join("configurations.json"))
+                .map(|t| ids.iter().all(|i| t.contains(i.as_str())))
                 .unwrap_or(false);
-            let closed = !matches!(app.modal, Some(Modal::PickRoot(_)));
             wait!(
-                listed && stored && closed && app.settings.root_input.is_empty(),
+                got.as_ref().is_some_and(|g| g.len() == 2) && stored,
                 ms,
-                format!("picked root {repo} listed={listed} in server.json={stored}")
+                format!("configuration {slug} default repos {got:?} (stored {stored})")
             )
         }
-        Step::OpenNewBlank(title) => {
-            task = Task::batch([
-                app.update(Message::OpenNew),
-                app.update(Message::NewRepo(String::new())),
-                app.update(Message::NewProvider("shell".into())),
-                app.update(Message::NewTitle(title.into())),
-            ]);
-            true
-        }
-        Step::BrowseOpen => {
-            task = app.update(Message::NewBrowse);
-            true
-        }
-        Step::BrowseParent => {
-            task = app.update(Message::BrowseGo(sc.repo_parent()));
-            true
-        }
-        Step::WaitBrowseRepo(ms) => {
-            let (parent, name) = (sc.repo_parent(), sc.repo_name());
-            let ok = match &app.modal {
-                Some(Modal::NewSession(NewForm {
-                    browser: Some(b), ..
-                })) => {
-                    b.listing.as_ref().is_some_and(|l| {
-                        crate::app::same_path(&l.path, &parent)
-                            && l.entries.iter().any(|e| e.name == name && e.is_git_repo)
-                    }) && !b.roots.is_empty()
-                }
-                _ => false,
+        Step::ExpectNewRepos(n) => {
+            let got = match &app.modal {
+                Some(Modal::NewSession(f)) => f.repos.clone(),
+                _ => Vec::new(),
             };
-            wait!(
-                ok,
-                ms,
-                format!("folder browser lists {parent} with {name} marked git")
-            )
+            let want: Vec<String> = [Repo::Test, Repo::Second]
+                .iter()
+                .filter_map(|r| registered(sc, app, *r))
+                .collect();
+            sc.check(
+                got.len() == n && want.iter().all(|w| got.contains(w)),
+                &format!("new-session dialog pre-checked the default repos {got:?}"),
+            );
+            true
         }
-        Step::BrowseIntoRepo => {
-            let name = sc.repo_name();
-            let path = match &app.modal {
-                Some(Modal::NewSession(NewForm {
-                    browser: Some(b), ..
-                })) => b.listing.as_ref().and_then(|l| {
-                    l.entries
+        Step::WaitSessionRepos(n, ms) => {
+            let info = app.live(&sid).map(|l| l.info.clone());
+            let ok = info.as_ref().is_some_and(|s| {
+                s.repos.len() == n
+                    && s.repos.iter().all(|r| {
+                        let p = Path::new(&r.path);
+                        p.join("README.md").is_file()
+                            && p.starts_with(&s.root)
+                            && r.branch == format!("ide/{}", s.id)
+                    })
+            });
+            let what = info
+                .map(|s| {
+                    s.repos
                         .iter()
-                        .find(|e| e.name == name)
-                        .map(|e| e.path.clone())
-                }),
-                _ => None,
-            };
-            match path {
-                Some(p) => task = app.update(Message::BrowseGo(p)),
-                None => sc.check(false, "repo entry not in the browser"),
+                        .map(|r| format!("{} {} {}", r.name, r.branch, r.path))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            wait!(ok, ms, format!("session has {n} worktree(s): {what:?}"))
+        }
+        Step::PickRepo(r) => {
+            match registered(sc, app, r) {
+                Some(id) => {
+                    task = app.update(Message::Detail(sid, DetailMsg::PickRepo(id)));
+                }
+                None => sc.check(false, &format!("{r:?} is not registered")),
             }
             true
         }
-        Step::ExpectRepoPicked(ms) => {
-            let repo = match &app.modal {
-                Some(Modal::NewSession(f)) => f.repo.clone(),
-                _ => String::new(),
-            };
-            let want = sc.repo.display().to_string();
-            wait!(
-                crate::app::same_path(&repo, &want),
-                ms,
-                format!("browsing into the repo picked it: {repo:?}")
-            )
+        Step::WriteInRepo(r, name) => {
+            let id = registered(sc, app, r).unwrap_or_default();
+            let wt = app
+                .live(&sid)
+                .and_then(|l| l.info.repos.iter().find(|x| x.repo == id))
+                .map(|x| PathBuf::from(&x.path));
+            match wt {
+                Some(wt) => {
+                    let ok = std::fs::write(wt.join(name), "changed in the second repo\n").is_ok();
+                    sc.check(ok, &format!("wrote {name} into {}", wt.display()));
+                }
+                None => sc.check(false, &format!("{r:?} has no worktree in the session")),
+            }
+            true
+        }
+        Step::ExpectSearchRepos(n) => {
+            let mut repos: Vec<String> = p2_detail(sc, app)
+                .map(|d| {
+                    d.search
+                        .groups
+                        .iter()
+                        .map(|(p, _)| crate::detail::split_q(p).0.to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            repos.dedup();
+            sc.check(
+                repos.len() == n,
+                &format!("search results grouped by repo: {repos:?}"),
+            );
+            true
+        }
+        Step::DetachRepo2 => {
+            let id = registered(sc, app, Repo::Second).unwrap_or_default();
+            task = Task::batch([
+                app.update(Message::SessionRepos(sid)),
+                app.update(Message::SessionRepoDetach(id)),
+            ]);
+            true
+        }
+        Step::AttachRepo2 => {
+            let id = registered(sc, app, Repo::Second).unwrap_or_default();
+            let open = matches!(app.modal, Some(Modal::SessionRepos(_)));
+            sc.check(open, "session repos dialog stays open after a detach");
+            task = Task::batch([
+                app.update(Message::SessionRepoAdd(id, true)),
+                app.update(Message::SessionReposSave),
+            ]);
+            true
+        }
+        Step::MarkCleanup => {
+            sc.cleanup = app.live(&sid).map(|l| {
+                (
+                    PathBuf::from(&l.info.root),
+                    l.info.repos.iter().map(|r| PathBuf::from(&r.path)).collect(),
+                    format!("ide/{}", l.info.id),
+                )
+            });
+            log(&format!("cleanup check for {:?}", sc.cleanup));
+            true
+        }
+        Step::ExpectCleaned => {
+            match sc.cleanup.clone() {
+                Some((root, wts, branch)) => {
+                    sc.check(!root.exists(), &format!("session folder {} removed", root.display()));
+                    for w in &wts {
+                        sc.check(!w.exists(), &format!("worktree {} removed", w.display()));
+                    }
+                    for r in [sc.repo.clone(), sc.repo2.clone()] {
+                        let b = git(&r, &["branch", "--list", &branch]).unwrap_or_default();
+                        let wl = git(&r, &["worktree", "list"]).unwrap_or_default();
+                        sc.check(
+                            b.is_empty() && !wl.contains(&branch) && r.join("README.md").is_file(),
+                            &format!("{}: branch {branch} and its worktree gone, repo kept", r.display()),
+                        );
+                    }
+                }
+                None => sc.check(false, "no session marked for the cleanup check"),
+            }
+            true
         }
         Step::MarkP2 => {
             sc.p2 = sc.ids.len().checked_sub(1);
@@ -1532,6 +1776,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::D(m) => {
+            let m = qmsg(sc, app, m);
             log(&format!("detail <- {m:?}"));
             task = app.update(Message::Detail(sid, m));
             true
@@ -1542,7 +1787,8 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::TreeReveal(p) => {
-            task = app.tree_reveal(&sid, p);
+            let q = qp(sc, app, p);
+            task = app.tree_reveal(&sid, &q);
             true
         }
         Step::TreeKey(k) => {
@@ -1553,7 +1799,8 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::TreeRename(from, to) => {
-            let t1 = app.tree_reveal(&sid, from);
+            let q = qp(sc, app, from);
+            let t1 = app.tree_reveal(&sid, &q);
             let m = |x| Message::Detail(sid.clone(), DetailMsg::Tree(x));
             let t2 = app.update(m(TreeMessage::Key(
                 Key::Named(Named::F2),
@@ -1572,7 +1819,8 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             wait!(ok, ms, format!("tree listed {dir:?} ({rows} rows shown)"))
         }
         Step::WaitFile(path, ms) => {
-            let active = p2_detail(sc, app).is_some_and(|d| d.active == ItemKey::File(path.into()));
+            let key = ItemKey::File(qp(sc, app, path));
+            let active = p2_detail(sc, app).is_some_and(|d| d.active == key);
             let f = p2_file(sc, app, path);
             let loaded = f.is_some_and(|f| f.view.is_some() || f.binary);
             let what = f
@@ -1596,9 +1844,10 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 } else {
                     Edit::Insert(c)
                 };
+                let q = qp(sc, app, path);
                 ts.push(app.update(Message::Detail(
                     sid.clone(),
-                    DetailMsg::Code(path.into(), CodeMessage::Action(Action::Edit(edit))),
+                    DetailMsg::Code(q, CodeMessage::Action(Action::Edit(edit))),
                 )));
             }
             log(&format!("typed {s:?} into {path}"));
@@ -1606,9 +1855,10 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::GoTo(path, l, c) => {
+            let q = qp(sc, app, path);
             if let Some(v) = app
                 .detail_mut(&sid)
-                .and_then(|d| d.file_mut(path))
+                .and_then(|d| d.file_mut(&q))
                 .and_then(|f| f.view.as_mut())
             {
                 task = v.go_to(l, c);
@@ -1627,15 +1877,16 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             match pos {
                 Some((l, c)) => {
                     log(&format!("ctrl+click {path}:{l}:{c} ({needle:?})"));
+                    let q = qp(sc, app, path);
                     let t = app
                         .detail_mut(&sid)
-                        .and_then(|d| d.file_mut(path))
+                        .and_then(|d| d.file_mut(&q))
                         .and_then(|f| f.view.as_mut())
                         .map(|v| v.go_to::<Message>(l, c))
                         .unwrap_or_else(Task::none);
                     let t2 = app.update(Message::Detail(
                         sid,
-                        DetailMsg::Code(path.into(), CodeMessage::CtrlClick),
+                        DetailMsg::Code(q, CodeMessage::CtrlClick),
                     ));
                     task = Task::batch([t, t2]);
                 }
@@ -1644,7 +1895,8 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::Code(path, m) => {
-            task = app.update(Message::Detail(sid, DetailMsg::Code(path.into(), m)));
+            let q = qp(sc, app, path);
+            task = app.update(Message::Detail(sid, DetailMsg::Code(q, m)));
             true
         }
         Step::ExpectDirty(path, want) => {
@@ -1655,10 +1907,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
         Step::WaitSaved(path, needle, present, ms) => {
             let f = p2_file(sc, app, path);
             let clean = f.is_some_and(|f| !f.dirty() && !f.saving && f.bar.is_none());
-            let wt = app
-                .live(&sid)
-                .map(|l| PathBuf::from(&l.info.worktree_path))
-                .unwrap_or_default();
+            let wt = p2_worktree(sc, app);
             let disk = std::fs::read_to_string(wt.join(path)).unwrap_or_default();
             wait!(
                 clean && disk.contains(needle) == present,
@@ -1686,6 +1935,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             )
         }
         Step::WaitActive(key, ms) => {
+            let key = qk(sc, app, key);
             let got = p2_detail(sc, app).map(|d| d.active.clone());
             let loaded = match p2_detail(sc, app).and_then(|d| d.item(&key)) {
                 Some(Item::File(f)) => f.view.is_some(),
@@ -1748,7 +1998,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 d.search
                     .groups
                     .iter()
-                    .find(|(p, _)| p == path)
+                    .find(|(p, _)| crate::detail::split_q(p).1 == path)
                     .and_then(|(_, h)| h.first().cloned())
             });
             match hit {
@@ -1756,7 +2006,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                     log(&format!("open search hit {}:{}:{}", h.path, h.line, h.col));
                     task = app.update(Message::Detail(
                         sid,
-                        DetailMsg::OpenAt(h.path, h.line, h.col),
+                        DetailMsg::OpenAt(crate::detail::qualify(&h.repo, &h.path), h.line, h.col),
                     ));
                 }
                 None => sc.check(false, &format!("no search hit in {path}")),
@@ -1789,18 +2039,20 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             wait!(t.is_some(), ms, format!("transient message {t:?}"))
         }
         Step::WaitExists(rel, want, ms) => {
-            let wt = app
-                .live(&sid)
-                .map(|l| PathBuf::from(&l.info.worktree_path))
-                .unwrap_or_default();
+            let wt = p2_worktree(sc, app);
             let exists = wt.join(rel).exists();
             wait!(exists == want, ms, format!("{rel} exists={exists}"))
         }
         Step::ExpectSavedDetail(key) => {
+            // `file:<path>` with the path qualified by the repo.
+            let key = match key.strip_prefix("file:") {
+                Some(p) => format!("file:{}", qp(sc, app, p)),
+                None => key.to_owned(),
+            };
             let saved = crate::ui_state::UiState::load(&app.data_dir);
             let open = saved.detail.get(&sid).map(|d| d.open.clone());
             sc.check(
-                open.as_ref().is_some_and(|o| o.iter().any(|k| k == key)),
+                open.as_ref().is_some_and(|o| o.contains(&key)),
                 &format!("ui.json remembers the open items: {open:?}"),
             );
             true
@@ -1811,6 +2063,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::ExpectOpen(key) => {
+            let key = qk(sc, app, key);
             let open = p2_detail(sc, app).is_some_and(|d| d.item(&key).is_some());
             wait!(open, 5000, format!("{key:?} is open"))
         }
@@ -1943,15 +2196,13 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 title,
             } => {
                 tasks.push(app.update(Message::OpenNew));
-                let path = match repo {
-                    Repo::Test => sc.repo.display().to_string(),
-                    Repo::NotARepo => {
-                        let p = sc.data.join("not-a-repo");
-                        let _ = std::fs::create_dir_all(&p);
-                        p.display().to_string()
-                    }
-                };
-                tasks.push(app.update(Message::NewRepo(path)));
+                // Only this repo checked (like unchecking the other defaults).
+                let want = registered(sc, app, repo);
+                sc.check(want.is_some(), &format!("{repo:?} is registered for the dialog"));
+                for id in app.repos.iter().map(|r| r.id.clone()).collect::<Vec<_>>() {
+                    let on = Some(&id) == want.as_ref();
+                    tasks.push(app.update(Message::NewRepoChecked(id, on)));
+                }
                 tasks.push(app.update(Message::NewProvider(provider.into())));
                 tasks.push(app.update(Message::NewTitle(title.into())));
             }
@@ -1986,17 +2237,6 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     sc.check(false, "timeout waiting for session creation");
                 } else {
                     next = false;
-                }
-            }
-            Step::ExpectNewError(needle, ms) => {
-                let err = match &app.modal {
-                    Some(Modal::NewSession(f)) => f.error.clone(),
-                    _ => None,
-                };
-                match err {
-                    Some(e) => sc.check(e.contains(needle), &format!("inline error shown: {e:?}")),
-                    None if timeout(ms) => sc.check(false, "no inline error shown"),
-                    None => next = false,
                 }
             }
             Step::CloseModal => tasks.push(app.update(Message::CloseModal)),
@@ -2354,11 +2594,76 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     &format!("rail work button: {icon:?}, tooltip {label:?}"),
                 );
             }
-            Step::WaitRootsLoaded(ms) => {
-                if let Some(c) = &app.settings.roots {
-                    sc.check(true, &format!("repos page loaded the roots: {:?}", c.roots));
+            Step::WaitReposLoaded(ms) => {
+                if registered(sc, app, Repo::Test).is_some() {
+                    sc.check(true, &format!("repos loaded: {} registered", app.repos.len()));
                 } else if timeout(ms) {
-                    sc.check(false, "repos page never loaded the roots");
+                    sc.check(false, "the registered repos never arrived");
+                } else {
+                    next = false;
+                }
+            }
+            Step::RegisterTyped(r) => {
+                let p = sc.repo_path(r).display().to_string();
+                log(&format!("repos page: register {p:?}"));
+                app.settings.repos_error = None;
+                tasks.push(app.update(Message::RepoInput(p)));
+                tasks.push(app.update(Message::RepoAdd));
+            }
+            Step::WaitRepoRegistered(r, ms) => {
+                let id = registered(sc, app, r);
+                let stored = id.as_ref().is_some_and(|id| {
+                    std::fs::read_to_string(sc.data.join("repos.json"))
+                        .is_ok_and(|t| t.contains(id.as_str()))
+                });
+                let shown = app.settings.repo_selected.is_some();
+                if id.is_some() && stored && shown && !app.settings.repos_busy {
+                    let base = app
+                        .repos
+                        .iter()
+                        .find(|x| Some(&x.id) == id.as_ref())
+                        .map(|x| x.base.clone());
+                    sc.check(
+                        base.as_deref() == Some("main"),
+                        &format!("{r:?} registered as {id:?} (base {base:?}, in repos.json)"),
+                    );
+                } else if timeout(ms) {
+                    sc.check(
+                        false,
+                        &format!(
+                            "{r:?} not registered (id {id:?}, stored {stored}, error {:?})",
+                            app.settings.repos_error
+                        ),
+                    );
+                } else {
+                    next = false;
+                }
+            }
+            Step::ExpectReposError(needle, ms) => {
+                let err = app.settings.repos_error.clone();
+                if err.as_deref().is_some_and(|e| e.contains(needle)) {
+                    sc.check(true, &format!("repos page error shown: {err:?}"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("repos page error {err:?} (want {needle:?})"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::Unregister(r) => match registered(sc, app, r) {
+                Some(id) => {
+                    app.settings.repos_error = None;
+                    tasks.push(app.update(Message::RepoSelect(id.clone())));
+                    tasks.push(app.update(Message::RepoConfirm(true)));
+                    tasks.push(app.update(Message::RepoUnregister(id)));
+                }
+                None => sc.check(false, &format!("{r:?} is not registered")),
+            },
+            Step::WaitRepoGone(r, ms) => {
+                let gone = registered(sc, app, r).is_none();
+                if gone && !app.settings.repos_busy {
+                    sc.check(true, &format!("{r:?} unregistered (files kept: {})", sc.repo_path(r).join("README.md").is_file()));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("{r:?} still registered ({:?})", app.settings.repos_error));
                 } else {
                     next = false;
                 }
@@ -2703,19 +3008,22 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 sc.check(saved == a, &format!("ui.json on_close {saved:?}"));
             }
             Step::Retry => tasks.push(app.update(Message::Retry)),
-            st @ (Step::AddRoot(_)
-            | Step::WaitRoots(_)
-            | Step::ExpectRootsError(..)
-            | Step::WaitPickStart(_)
+            st @ (Step::WaitPickStart(_)
             | Step::PickWalk(..)
             | Step::PickHighlightRepo
-            | Step::WaitRepoRoot(_)
-            | Step::OpenNewBlank(_)
-            | Step::BrowseOpen
-            | Step::BrowseParent
-            | Step::WaitBrowseRepo(_)
-            | Step::BrowseIntoRepo
-            | Step::ExpectRepoPicked(_)
+            | Step::CdRepoP2
+            | Step::EnsureRepo2
+            | Step::CfgDefaults(_)
+            | Step::WaitCfgDefaults(..)
+            | Step::ExpectNewRepos(_)
+            | Step::WaitSessionRepos(..)
+            | Step::PickRepo(_)
+            | Step::WriteInRepo(..)
+            | Step::ExpectSearchRepos(_)
+            | Step::DetachRepo2
+            | Step::AttachRepo2
+            | Step::MarkCleanup
+            | Step::ExpectCleaned
             | Step::MarkP2
             | Step::D(_)
             | Step::App(_)
