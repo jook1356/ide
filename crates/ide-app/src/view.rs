@@ -7,14 +7,14 @@ use iced::widget::{
     scrollable, space, stack, text, text_editor, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
-use ide_client::{AccountState, Support};
+use ide_client::{AccountState, BrowseEntry, Support};
 use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 
 use crate::app::{
     App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_REPO_ID,
-    NewForm, QuickForm, RAIL_W, RENAME_ID, ROOT_INPUT_ID, RunState, SIDEBAR_W, SSH_HOST_ID,
-    SettingsForm, TERM_ID, path_name, same_path,
+    NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, RENAME_ID, ROOT_INPUT_ID, RunState,
+    SIDEBAR_W, SSH_HOST_ID, SettingsForm, TERM_ID, path_name, same_path,
 };
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
@@ -92,6 +92,63 @@ fn card(content: El<'_>) -> El<'_> {
         .width(Fill)
         .style(style::card)
         .boxed()
+}
+
+/// Frame of a server-side folder list (new-session browser, repos page picker).
+fn browser_frame(content: El<'_>) -> El<'_> {
+    container(content)
+        .padding(8)
+        .width(Fill)
+        .style(|_| container::Style {
+            background: Some(style::SIDEBAR.into()),
+            border: iced::Border {
+                color: style::BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .boxed()
+}
+
+/// One folder of a server-side folder list: folder icon, name, optional tag (e.g. home) and
+/// a `git` badge for repositories.
+fn folder_entry_row(e: &BrowseEntry, tag: Option<String>) -> El<'_> {
+    let tint = if e.is_git_repo {
+        style::GREEN
+    } else {
+        style::DIM
+    };
+    let mut r = row![
+        ide_views::icons::folder_icon(e.is_git_repo, tint),
+        text(e.name.as_str())
+            .size(12)
+            .width(Fill)
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if let Some(t) = tag {
+        r = r.push(text(t).size(11).color(style::DIM).boxed());
+    }
+    if e.is_git_repo {
+        r = r.push(tip(
+            container(text("git").size(10).font(style::BOLD).color(style::GREEN))
+                .padding([0, 5])
+                .style(|_| container::Style {
+                    border: iced::Border {
+                        color: style::GREEN,
+                        width: 1.0,
+                        radius: 3.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .boxed(),
+            tr::browse_git(),
+        ));
+    }
+    r.boxed()
 }
 
 fn error_box<'a>(e: &'a str) -> El<'a> {
@@ -766,39 +823,7 @@ impl App {
                 );
             }
             for e in &l.entries {
-                let mut r = row![
-                    ide_views::icons::folder_icon(
-                        e.is_git_repo,
-                        if e.is_git_repo {
-                            style::GREEN
-                        } else {
-                            style::DIM
-                        }
-                    ),
-                    text(e.name.as_str())
-                        .size(12)
-                        .width(Fill)
-                        .wrapping(text::Wrapping::None)
-                        .ellipsis(text::Ellipsis::End),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center);
-                if e.is_git_repo {
-                    r = r.push(tip(
-                        container(text("git").size(10).font(style::BOLD).color(style::GREEN))
-                            .padding([0, 5])
-                            .style(|_| container::Style {
-                                border: iced::Border {
-                                    color: style::GREEN,
-                                    width: 1.0,
-                                    radius: 3.0.into(),
-                                },
-                                ..Default::default()
-                            })
-                            .boxed(),
-                        tr::browse_git(),
-                    ));
-                }
+                let r = folder_entry_row(e, None);
                 list = list.push(
                     button(r)
                         .padding([3, 6])
@@ -811,23 +836,146 @@ impl App {
         } else if b.loading {
             list = list.push(text(tr::tree_loading()).size(12).color(style::DIM).boxed());
         }
+        let list = list.padding(iced::Padding {
+            right: 12.0,
+            ..iced::Padding::ZERO
+        });
         let mut c = column![head, scrollable(list).height(200)].spacing(6);
         if let Some(e) = &b.error {
             c = c.push(error_box(e));
         }
-        container(c)
-            .padding(8)
-            .width(Fill)
-            .style(|_| container::Style {
-                background: Some(style::SIDEBAR.into()),
-                border: iced::Border {
-                    color: style::BORDER,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            })
-            .boxed()
+        browser_frame(c.boxed())
+    }
+
+    /// The repos page's folder picker (`browse.pick_list`: any folder the server's OS user
+    /// can read; server-side, so it also works over SSH).
+    fn pick_root_card<'a>(&'a self, f: &'a PickRootForm) -> El<'a> {
+        let current = f.listing.as_ref();
+        let home = self.settings.roots.as_ref().and_then(|c| c.home.as_deref());
+        // Up: the parent folder, or the start list from a drive / `/`.
+        let up = current
+            .filter(|l| !l.path.is_empty())
+            .map(|l| Message::PickGo(l.parent.clone()));
+        let mut path_row = row![
+            button(text(tr::pick_start()).size(12))
+                .padding([2, 6])
+                .style(style::row(current.is_some_and(|l| l.path.is_empty())))
+                .on_press(Message::PickGo(None)),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center);
+        if let Some(l) = current {
+            let parts = crate::app::crumbs(&l.path);
+            let last = parts.len().saturating_sub(1);
+            for (i, (label, path)) in parts.into_iter().enumerate() {
+                path_row = path_row.push(text("›").size(12).color(style::FAINT).boxed());
+                path_row = path_row.push(
+                    button(text(label).size(12).wrapping(text::Wrapping::None))
+                        .padding([2, 6])
+                        .style(style::row(i == last))
+                        .on_press(Message::PickGo(Some(path)))
+                        .boxed(),
+                );
+            }
+        }
+        let head = row![
+            icon_button("↑", up, tr::browse_up()),
+            scrollable(path_row)
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new().width(3).scroller_width(3)
+                ))
+                .width(Fill),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let mut list: Column<El<'a>> = Column::new().spacing(1);
+        if let Some(l) = current {
+            if l.entries.is_empty() {
+                list = list.push(
+                    text(tr::browse_empty())
+                        .size(12)
+                        .color(style::FAINT)
+                        .boxed(),
+                );
+            }
+            for (i, e) in l.entries.iter().enumerate() {
+                let tag = (l.path.is_empty()
+                    && home.is_some_and(|h| crate::app::same_path(h, &e.path)))
+                .then(tr::browse_home);
+                let selected = f.selected == Some(i);
+                let r = container(folder_entry_row(e, tag))
+                    .padding([3, 6])
+                    .width(Fill)
+                    .style(move |_| container::Style {
+                        background: selected.then(|| style::SELECTED.into()),
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                list = list.push(
+                    mouse_area(r)
+                        .on_press(Message::PickHighlight(i))
+                        .on_double_click(Message::PickGo(Some(e.path.clone())))
+                        .interaction(mouse::Interaction::Pointer)
+                        .boxed(),
+                );
+            }
+        } else if f.loading {
+            list = list.push(text(tr::tree_loading()).size(12).color(style::DIM).boxed());
+        }
+        let list = list.padding(iced::Padding {
+            right: 12.0,
+            ..iced::Padding::ZERO
+        });
+        let mut body = column![head, scrollable(list).id(PICK_LIST_ID).height(320)].spacing(6);
+        if current.is_some_and(|l| l.truncated) {
+            body = body.push(
+                text(tr::pick_truncated())
+                    .size(11)
+                    .color(style::AMBER)
+                    .boxed(),
+            );
+        }
+        let target = f.target();
+        let mut c = column![
+            text(tr::pick_root_title()).size(18).font(style::BOLD),
+            text(tr::pick_root_note()).size(12).color(style::DIM),
+            browser_frame(body.boxed()),
+        ]
+        .spacing(10);
+        if let Some(e) = &f.error {
+            c = c.push(error_box(e));
+        }
+        c = c.push(
+            row![
+                text(target.unwrap_or_default())
+                    .size(11)
+                    .font(style::MONO)
+                    .color(style::DIM)
+                    .width(Fill)
+                    .wrapping(text::Wrapping::None)
+                    .ellipsis(text::Ellipsis::Start),
+                button(text(tr::cancel()).size(13))
+                    .padding([6, 14])
+                    .style(style::secondary)
+                    .on_press(Message::CloseModal),
+                button(text(tr::pick_select()).size(13))
+                    .padding([6, 14])
+                    .style(style::primary)
+                    .on_press_maybe(
+                        target
+                            .is_some()
+                            .then_some(Message::PickConfirm)
+                            .filter(|_| self.connected() && !self.settings.roots_busy)
+                    ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .boxed(),
+        );
+        c.width(600).boxed()
     }
 
     /// Ctrl+P: files of the selected session by name.
@@ -1113,6 +1261,14 @@ impl App {
                     .padding([5, 8])
                     .style(style::input)
                     .width(Fill),
+                tip(
+                    button(icons::icon(Icon::FolderOpen, 16.0, style::DIM))
+                        .padding([5, 7])
+                        .style(style::secondary)
+                        .on_press_maybe((online && !f.roots_busy).then_some(Message::PickOpen))
+                        .boxed(),
+                    tr::pick_root_open()
+                ),
                 button(text(tr::add()).size(13))
                     .padding([5, 12])
                     .style(style::secondary)
@@ -1727,6 +1883,7 @@ impl App {
                 c.width(560).boxed()
             }
             Modal::QuickOpen(f) => self.quick_open_card(f),
+            Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::DefPicker(f) => {
                 let mut list = Column::new().spacing(2);
                 for (i, t) in f.targets.iter().enumerate() {

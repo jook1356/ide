@@ -196,6 +196,16 @@ enum Step {
     /// The repos page lists the repo's parent as a browse root and `server.json` stores it.
     WaitRoots(u64),
     ExpectRootsError(&'static str, u64),
+    /// The repos page's folder picker shows the start list with the test repo's drive.
+    WaitPickStart(u64),
+    /// Walk the picker from the drive (never the home shortcut) down to the test repo
+    /// (`true`) or its parent (`false`) by opening one listed folder per level, like
+    /// double-clicks.
+    PickWalk(bool, u64),
+    /// Highlight the test repo's entry in the picker (it lists the parent).
+    PickHighlightRepo,
+    /// The repos page lists the test repo itself as a browse root and `server.json` stores it.
+    WaitRepoRoot(u64),
     /// Open the new-session dialog with an empty folder, a Shell agent and a title.
     OpenNewBlank(&'static str),
     /// Open the dialog's folder browser.
@@ -871,6 +881,18 @@ fn phase2() -> Vec<Step> {
         Wait(300),
         Shot("30_settings_browse_roots"),
         Pause("settings_browse_roots"),
+        Log("--- repos page: folder picker (browse.pick_list) from the drive list"),
+        App(Message::PickOpen),
+        WaitPickStart(10_000),
+        Wait(200),
+        Shot("30a_root_picker_start"),
+        PickWalk(true, 20_000),
+        Wait(200),
+        Shot("30b_root_picker_repo"),
+        App(Message::PickConfirm),
+        WaitRepoRoot(5000),
+        Wait(200),
+        Shot("30c_root_picked"),
         GoPage(Page::Work),
         Log("--- new session through the server-side folder browser"),
         OpenNewBlank("phase 2"),
@@ -1092,6 +1114,20 @@ fn phase2() -> Vec<Step> {
         Wait(300),
         Shot("ko_17_settings_roots"),
         Pause("ko_settings_roots"),
+        App(Message::PickOpen),
+        WaitPickStart(10_000),
+        Wait(300),
+        Shot("ko_18_root_picker_drives"),
+        Pause("ko_root_picker_drives"),
+        PickWalk(false, 20_000),
+        PickHighlightRepo,
+        Wait(300),
+        Shot("ko_19_root_picker_folder"),
+        Pause("ko_root_picker_folder"),
+        // Enter opens the highlighted folder.
+        App(Message::PickEnter),
+        PickWalk(true, 5000),
+        CloseModal,
         GoPage(Page::Work),
         SetLang(LanguagePref::Fixed(Lang::En)),
         ExpectLang(Lang::En, "New session"),
@@ -1225,6 +1261,14 @@ impl Probe {
     }
 }
 
+/// `path` is `dir` or below it (either separator, case-insensitive like Windows paths).
+fn path_under(path: &str, dir: &str) -> bool {
+    let norm = |p: &str| p.replace('\\', "/").to_lowercase();
+    let (p, d) = (norm(path), norm(dir));
+    let d = d.trim_end_matches('/');
+    p == d || p.starts_with(&format!("{d}/"))
+}
+
 /// The phase 2 session's detail area.
 fn p2_detail<'a>(sc: &Script, app: &'a App) -> Option<&'a crate::detail::Detail> {
     sc.id(P2).and_then(|s| app.detail(&s))
@@ -1293,6 +1337,126 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 err.as_deref().is_some_and(|e| e.contains(needle)),
                 ms,
                 format!("browse root refused: {err:?}")
+            )
+        }
+        Step::WaitPickStart(ms) => {
+            let repo = sc.repo.display().to_string();
+            let ok = match &app.modal {
+                Some(Modal::PickRoot(f)) => f.listing.as_ref().is_some_and(|l| {
+                    l.path.is_empty()
+                        && l.entries
+                            .iter()
+                            .any(|e| crate::app::is_fs_root(&e.path) && path_under(&repo, &e.path))
+                }),
+                _ => false,
+            };
+            wait!(
+                ok,
+                ms,
+                format!("folder picker start list has the drive of {repo}")
+            )
+        }
+        Step::PickWalk(to_repo, ms) => {
+            let target = if to_repo {
+                sc.repo.display().to_string()
+            } else {
+                sc.repo_parent()
+            };
+            let Some(Modal::PickRoot(f)) = &app.modal else {
+                sc.check(false, "folder picker is not open");
+                return (true, task);
+            };
+            enum Walk {
+                Wait,
+                Reached(bool),
+                Open(String),
+                Stuck(String),
+            }
+            let walk = match &f.listing {
+                _ if f.loading => Walk::Wait,
+                None => Walk::Wait,
+                Some(l) if !l.path.is_empty() && crate::app::same_path(&l.path, &target) => {
+                    Walk::Reached(l.is_git_repo)
+                }
+                // The listed folder on the way (at the start list: the drive, the shortest
+                // match, so the walk does not take the home shortcut).
+                Some(l) => l
+                    .entries
+                    .iter()
+                    .filter(|e| path_under(&target, &e.path))
+                    .min_by_key(|e| e.path.len())
+                    .map(|e| Walk::Open(e.path.clone()))
+                    .unwrap_or_else(|| Walk::Stuck(l.path.clone())),
+            };
+            match walk {
+                Walk::Wait => wait!(false, ms, format!("folder picker walks to {target}")),
+                Walk::Reached(git) => {
+                    sc.check(
+                        !to_repo || git,
+                        &format!("folder picker reached {target} (git {git})"),
+                    );
+                    true
+                }
+                Walk::Open(p) => {
+                    log(&format!("picker: open {p:?}"));
+                    task = app.update(Message::PickGo(Some(p)));
+                    false
+                }
+                Walk::Stuck(at) => {
+                    sc.check(
+                        false,
+                        &format!("folder picker: no way to {target} from {at:?}"),
+                    );
+                    true
+                }
+            }
+        }
+        Step::PickHighlightRepo => {
+            let name = sc.repo_name();
+            let i = match &app.modal {
+                Some(Modal::PickRoot(f)) => f.listing.as_ref().and_then(|l| {
+                    l.entries
+                        .iter()
+                        .position(|e| e.name == name && e.is_git_repo)
+                }),
+                _ => None,
+            };
+            sc.check(
+                i.is_some(),
+                &format!("folder picker lists {name} marked git"),
+            );
+            if let Some(i) = i {
+                // Like a click, then an arrow-key no-op that scrolls the row into view.
+                task = Task::batch([
+                    app.update(Message::PickHighlight(i)),
+                    app.update(Message::PickMove(0)),
+                ]);
+            }
+            true
+        }
+        Step::WaitRepoRoot(ms) => {
+            let repo = sc.repo.display().to_string();
+            let listed = app
+                .settings
+                .roots
+                .as_ref()
+                .is_some_and(|c| c.roots.iter().any(|r| crate::app::same_path(r, &repo)));
+            let stored = std::fs::read_to_string(sc.data.join("server.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| {
+                    v.get("browse_roots")?.as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .any(|r| crate::app::same_path(r, &repo))
+                    })
+                })
+                .unwrap_or(false);
+            let closed = !matches!(app.modal, Some(Modal::PickRoot(_)));
+            wait!(
+                listed && stored && closed && app.settings.root_input.is_empty(),
+                ms,
+                format!("picked root {repo} listed={listed} in server.json={stored}")
             )
         }
         Step::OpenNewBlank(title) => {
@@ -2542,6 +2706,10 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             st @ (Step::AddRoot(_)
             | Step::WaitRoots(_)
             | Step::ExpectRootsError(..)
+            | Step::WaitPickStart(_)
+            | Step::PickWalk(..)
+            | Step::PickHighlightRepo
+            | Step::WaitRepoRoot(_)
             | Step::OpenNewBlank(_)
             | Step::BrowseOpen
             | Step::BrowseParent

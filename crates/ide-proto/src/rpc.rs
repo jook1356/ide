@@ -294,6 +294,13 @@ pub enum Request {
     BrowseList {
         abs_dir: String,
     },
+    /// Folders anywhere the server's OS user can read, only for choosing a new browse root
+    /// (not limited to the browse roots). `None` = the start list: the drives (Windows) or
+    /// `/` (Unix) plus the home dir, with the listing path `""`. Directories only, hidden and
+    /// system folders skipped, sorted, capped ([`BrowseListing::truncated`]).
+    BrowsePickList {
+        abs_dir: Option<String>,
+    },
     /// The home dir and the extra browse roots stored in `server.json`.
     BrowseConfig,
     /// Replace the extra browse roots stored in `server.json` (absolute existing folders;
@@ -388,6 +395,7 @@ impl Request {
             Request::FsUnwatch { .. } => "fs.unwatch",
             Request::BrowseRoots => "browse.roots",
             Request::BrowseList { .. } => "browse.list",
+            Request::BrowsePickList { .. } => "browse.pick_list",
             Request::BrowseConfig => "browse.config",
             Request::BrowseSetRoots { .. } => "browse.set_roots",
             Request::SearchText { .. } => "search.text",

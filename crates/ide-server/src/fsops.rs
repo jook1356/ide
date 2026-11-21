@@ -671,7 +671,142 @@ pub fn browse(jail: &PathJail, abs_dir: &str) -> Result<BrowseListing, ProtoErro
         path: shown,
         parent,
         entries,
+        truncated: false,
     })
+}
+
+/// Most folders one `browse.pick_list` listing returns (sorted first, the rest dropped).
+pub const PICK_MAX_ENTRIES: usize = 2000;
+
+/// `browse.pick_list`: folders anywhere the server's OS user can read, used only to choose a
+/// new browse root. Not jailed: the server runs as the user, so the OS permissions decide what
+/// can be listed (and nothing is read or written besides directory entries). `None` / `""` =
+/// the start list (drives or `/`, plus `home`).
+pub fn pick_list(abs_dir: Option<&str>, home: Option<&Path>) -> Result<BrowseListing, ProtoError> {
+    pick_list_capped(abs_dir, home, PICK_MAX_ENTRIES)
+}
+
+fn pick_list_capped(
+    abs_dir: Option<&str>,
+    home: Option<&Path>,
+    max: usize,
+) -> Result<BrowseListing, ProtoError> {
+    let Some(raw) = abs_dir.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(pick_start(home));
+    };
+    let p = Path::new(raw);
+    if raw.chars().any(char::is_control) || !p.is_absolute() {
+        return Err(crate::jail::invalid(raw));
+    }
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(crate::jail::denied(raw));
+    }
+    let dir = canonicalize(p).map_err(|e| io_error(raw, &e))?;
+    if !dir.is_dir() {
+        return Err(ProtoError::new("fs-not-a-dir").arg("path", raw));
+    }
+    let shown = dir.display().to_string();
+    let rd = std::fs::read_dir(&dir).map_err(|e| io_error(&shown, &e))?;
+    let mut found: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || hidden_or_system(&ent) {
+            continue;
+        }
+        let Ok(ft) = ent.file_type() else { continue };
+        let p = ent.path();
+        // Directories, and links / junctions whose target is a directory.
+        let is_dir = if ft.is_dir() && !is_link(&p) {
+            true
+        } else if ft.is_symlink() || is_junction(&ft) || is_link(&p) {
+            std::fs::metadata(&p).is_ok_and(|m| m.is_dir())
+        } else {
+            false
+        };
+        if is_dir {
+            found.push((name, p));
+        }
+    }
+    found.sort_by(|a, b| {
+        a.0.to_lowercase()
+            .cmp(&b.0.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let truncated = found.len() > max;
+    found.truncate(max);
+    let entries = found
+        .into_iter()
+        .map(|(name, p)| BrowseEntry {
+            is_git_repo: has_git(&p),
+            path: p.display().to_string(),
+            name,
+        })
+        .collect();
+    Ok(BrowseListing {
+        is_git_repo: has_git(&dir),
+        parent: dir.parent().map(|p| p.display().to_string()),
+        path: shown,
+        entries,
+        truncated,
+    })
+}
+
+/// The start list of `browse.pick_list`: the home dir, then the drives (`C:\\`, ...) on
+/// Windows or `/` elsewhere.
+fn pick_start(home: Option<&Path>) -> BrowseListing {
+    let mut entries = Vec::new();
+    if let Some(h) = home
+        .and_then(|h| canonicalize(h).ok())
+        .filter(|h| h.is_dir())
+    {
+        let path = h.display().to_string();
+        entries.push(BrowseEntry {
+            is_git_repo: has_git(&h),
+            name: path.clone(),
+            path,
+        });
+    }
+    #[cfg(windows)]
+    for letter in 'A'..='Z' {
+        let root = format!("{letter}:\\");
+        if Path::new(&root).is_dir() {
+            entries.push(BrowseEntry {
+                name: format!("{letter}:"),
+                path: root,
+                is_git_repo: false,
+            });
+        }
+    }
+    #[cfg(not(windows))]
+    entries.push(BrowseEntry {
+        name: "/".into(),
+        path: "/".into(),
+        is_git_repo: false,
+    });
+    BrowseListing {
+        path: String::new(),
+        parent: None,
+        is_git_repo: false,
+        entries,
+        truncated: false,
+    }
+}
+
+/// A hidden or system entry (Windows attributes; dot names are checked by the caller).
+#[cfg(windows)]
+fn hidden_or_system(ent: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    ent.metadata()
+        .is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0)
+}
+
+#[cfg(not(windows))]
+fn hidden_or_system(_: &std::fs::DirEntry) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -965,6 +1100,91 @@ mod tests {
             "path-denied"
         );
         remove_dir_link(&home.join("out-link"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn pick_list_lists_anywhere_dirs_only() {
+        let t = tmp("pick");
+        let top = t.join("위 top");
+        init_repo(&top.join("repo1"), &[("a", "a")]);
+        std::fs::create_dir_all(top.join("Beta/deeper")).unwrap();
+        std::fs::create_dir_all(top.join("alpha")).unwrap();
+        std::fs::create_dir_all(top.join(".hidden")).unwrap();
+        std::fs::write(top.join("file.txt"), "f").unwrap();
+        std::fs::create_dir_all(t.join("target")).unwrap();
+        assert!(make_dir_link(&t.join("target"), &top.join("link")));
+        #[cfg(windows)]
+        {
+            std::fs::create_dir_all(top.join("attr-hidden")).unwrap();
+            let st = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(top.join("attr-hidden"))
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let shown = top.display().to_string();
+        let l = pick_list(Some(&shown), None).unwrap();
+        let names: Vec<_> = l
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_git_repo))
+            .collect();
+        // Sorted case-insensitively; files, dot dirs and hidden dirs skipped; links followed.
+        assert_eq!(
+            names,
+            [
+                ("alpha", false),
+                ("Beta", false),
+                ("link", false),
+                ("repo1", true)
+            ]
+        );
+        assert!(!l.truncated && !l.is_git_repo);
+        assert!(
+            crate::jail::canonicalize(Path::new(l.parent.as_deref().unwrap()))
+                .is_ok_and(|p| p == crate::jail::canonicalize(&t).unwrap())
+        );
+        let repo = pick_list(Some(&l.entries[3].path), None).unwrap();
+        assert!(repo.is_git_repo && repo.entries.is_empty());
+        // Cap: sorted first, then cut.
+        let capped = pick_list_capped(Some(&shown), None, 2).unwrap();
+        assert!(capped.truncated);
+        assert_eq!(capped.entries.len(), 2);
+        assert_eq!(capped.entries[1].name, "Beta");
+        // Errors.
+        assert_eq!(
+            pick_list(Some("relative"), None).unwrap_err().id,
+            "path-invalid"
+        );
+        let up = format!("{shown}{}..", std::path::MAIN_SEPARATOR);
+        assert_eq!(pick_list(Some(&up), None).unwrap_err().id, "path-denied");
+        let missing = top.join("missing").display().to_string();
+        assert_eq!(
+            pick_list(Some(&missing), None).unwrap_err().id,
+            "fs-not-found"
+        );
+        let file = top.join("file.txt").display().to_string();
+        assert_eq!(pick_list(Some(&file), None).unwrap_err().id, "fs-not-a-dir");
+        // Start list: the home dir first, then the drives / `/`; parent of a root is `None`.
+        let start = pick_list(None, Some(&top)).unwrap();
+        assert_eq!(start.path, "");
+        assert!(start.parent.is_none());
+        assert_eq!(
+            start.entries[0].path,
+            crate::jail::canonicalize(&top)
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert!(start.entries.len() >= 2);
+        let fs_root = &start.entries[1].path;
+        let r = pick_list(Some(fs_root), None).unwrap();
+        assert!(r.parent.is_none(), "{r:?}");
+        assert!(!r.entries.is_empty());
+        assert_eq!(pick_list(Some("  "), None).unwrap().path, "");
+        remove_dir_link(&top.join("link"));
         let _ = std::fs::remove_dir_all(&t);
     }
 }

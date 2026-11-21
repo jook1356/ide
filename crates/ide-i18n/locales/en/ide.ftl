@@ -293,6 +293,12 @@ browse-roots-label = REPOSITORY FOLDERS
 browse-roots-note = The new-session dialog can browse these folders on the server. Your home folder is always included.
 browse-root-placeholder = Absolute folder path on the server
 browse-home = home
+pick-root-open = Choose a folder on the server
+pick-root-title = Add a repository folder
+pick-root-note = Folders on the server. Double-click a folder (or press Enter) to open it.
+pick-start = Computer
+pick-select = Select this folder
+pick-truncated = Too many folders: only the first ones are shown.
 remove = Remove
 
 # Phase 2 server errors

@@ -591,6 +591,7 @@ async fn handshake_errors() {
                     "term",
                     "files",
                     "browse",
+                    "browse-pick",
                     "search",
                     "git",
                     "def"

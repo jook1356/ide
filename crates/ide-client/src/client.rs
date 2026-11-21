@@ -791,6 +791,24 @@ impl Client {
         )
     }
 
+    /// `browse.pick_list`: folders anywhere the server's OS user can read, for choosing a new
+    /// browse root (`None` = the start list: drives or `/`, plus the home dir; path `""`).
+    pub async fn browse_pick_list(
+        &self,
+        abs_dir: Option<&str>,
+    ) -> Result<BrowseListing, ProtoError> {
+        expect(
+            self.call(Request::BrowsePickList {
+                abs_dir: abs_dir.map(str::to_owned),
+            })
+            .await,
+            |r| match r {
+                Response::Browse(b) => Some(b),
+                _ => None,
+            },
+        )
+    }
+
     /// `browse.config`: the home dir and the extra browse roots saved on the server.
     pub async fn browse_config(&self) -> Result<BrowseConfig, ProtoError> {
         expect(self.call(Request::BrowseConfig).await, |r| match r {

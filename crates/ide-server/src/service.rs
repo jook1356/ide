@@ -937,6 +937,9 @@ impl UserCtx {
             Request::BrowseList { abs_dir } => {
                 fsops::browse(&self.browse_jail(), &abs_dir).map(Response::Browse)
             }
+            Request::BrowsePickList { abs_dir } => {
+                fsops::pick_list(abs_dir.as_deref(), home_dir().as_deref()).map(Response::Browse)
+            }
             Request::BrowseConfig => Ok(Response::BrowseConfig(self.browse_config())),
             Request::BrowseSetRoots { roots } => {
                 self.set_browse_roots(roots).map(Response::BrowseConfig)

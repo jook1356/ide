@@ -268,6 +268,12 @@ browse-roots-label = 저장소 폴더
 browse-roots-note = 새 세션 대화상자에서 서버의 이 폴더들을 둘러볼 수 있어요. 홈 폴더는 항상 포함돼요.
 browse-root-placeholder = 서버의 절대 폴더 경로
 browse-home = 홈
+pick-root-open = 서버에서 폴더 선택
+pick-root-title = 저장소 폴더 추가
+pick-root-note = 서버에 있는 폴더예요. 폴더를 두 번 클릭하거나 Enter를 누르면 열려요.
+pick-start = 내 컴퓨터
+pick-select = 이 폴더 선택
+pick-truncated = 폴더가 너무 많아서 앞부분만 보여요.
 remove = 제거
 
 # 2단계 서버 오류

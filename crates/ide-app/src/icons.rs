@@ -18,9 +18,10 @@ pub enum Icon {
     ActivityHeartbeat,
     SidebarCollapse,
     SidebarExpand,
+    FolderOpen,
 }
 
-const SOURCES: [&str; 8] = [
+const SOURCES: [&str; 9] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -29,6 +30,7 @@ const SOURCES: [&str; 8] = [
     include_str!("../assets/icons/activity-heartbeat.svg"),
     include_str!("../assets/icons/layout-sidebar-left-collapse.svg"),
     include_str!("../assets/icons/layout-sidebar-left-expand.svg"),
+    include_str!("../assets/icons/folder-open.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -67,6 +69,6 @@ mod tests {
             assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::SidebarExpand as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::FolderOpen as usize + 1);
     }
 }

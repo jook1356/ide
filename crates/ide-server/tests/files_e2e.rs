@@ -123,6 +123,27 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
     assert_eq!(c.browse_list(&e.path).await.unwrap().entries[0].name, "src");
     let outside = root.parent().unwrap().display().to_string();
     assert_eq!(c.browse_list(&outside).await.unwrap_err().id, "path-denied");
+    // The root picker is not jailed (OS permissions only): start list, then any folder.
+    assert!(caps.iter().any(|x| x == "browse-pick"));
+    let start = c.browse_pick_list(None).await.unwrap();
+    assert_eq!(start.path, "");
+    assert!(start.parent.is_none() && !start.entries.is_empty());
+    let picked = c.browse_pick_list(Some(&outside)).await.unwrap();
+    let root_name = root.file_name().unwrap().to_string_lossy();
+    let e = picked.entries.iter().find(|e| e.name == root_name).unwrap();
+    assert!(!e.is_git_repo);
+    let inside = c.browse_pick_list(Some(&e.path)).await.unwrap();
+    assert!(
+        inside
+            .entries
+            .iter()
+            .any(|e| e.name == "저장소 repo" && e.is_git_repo)
+    );
+    assert!(inside.parent.is_some());
+    assert_eq!(
+        c.browse_pick_list(Some("relative")).await.unwrap_err().id,
+        "path-invalid"
+    );
     let bad = c
         .create_session(NewSession {
             provider: "shell".into(),

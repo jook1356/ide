@@ -276,6 +276,20 @@ absolute, existing, a folder and not a filesystem root -> canonical, deduplicate
 `path-invalid` / `path-denied` / `fs-not-found` / `fs-not-a-dir`; other keys of `server.json`
 are kept; written atomically; audited as `browse.set_roots`).
 
+New roots are chosen with a server-side folder picker (the repos page's folder button; works
+over SSH, never a local OS dialog): `browse.pick_list{abs_dir: Option<String>}` (capability
+`browse-pick`) lists folders **anywhere the server's OS user can read**, not only inside the
+browse roots, because a root that is not yet a root has to be reachable. `None`/`""` = the start
+list (path `""`): the home dir, then the drives `A:\`..`Z:\` that exist (Windows) or `/` (Unix).
+A folder listing returns directories only (links/junctions followed when the target is a
+folder), skips dot names and Windows hidden/system folders, sorts case-insensitively, keeps at
+most 2000 entries (`truncated`), flags `is_git_repo`, and has `parent = None` at a filesystem
+root. Errors: `path-invalid` (relative, control chars), `path-denied` (`..`), `fs-not-found`,
+`fs-permission`, `fs-not-a-dir`. This is safe under the per-user-server model: the server runs
+as the user, so it shows only what the user's OS account could list anyway, it returns names
+only (no file contents), and every other RPC stays jailed. Choosing a folder in the picker
+still goes through `browse.set_roots` (validated, audited as before).
+
 Known gaps (phase 2): no file-list cache for `search.files` (walks per call); text search is
 single-threaded; diff lines strip a trailing `\r` (CRLF is not shown); `fs.list` badges run one
 `git status` per listing; no trash/recycle bin; the watcher does not follow links; writes are not

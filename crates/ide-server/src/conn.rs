@@ -219,6 +219,7 @@ where
                 "term",
                 "files",
                 "browse",
+                "browse-pick",
                 "search",
                 "git",
                 "def",

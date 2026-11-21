@@ -48,6 +48,8 @@ pub const URL_ID: &str = "ide-url";
 pub const CONFIG_NAME_ID: &str = "ide-config-name";
 pub const SSH_HOST_ID: &str = "ide-ssh-host";
 pub const ROOT_INPUT_ID: &str = "ide-root-input";
+/// The folder list of the repos page's folder picker.
+pub const PICK_LIST_ID: &str = "ide-pick-list";
 
 /// Process state of a session as shown in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +176,108 @@ pub struct FolderBrowser {
     pub dir: String,
 }
 
+/// The repos page's folder picker: any folder the server's OS user can read
+/// (`browse.pick_list`), to add as a browse root. Server-side, so it works over SSH too.
+#[derive(Default)]
+pub struct PickRootForm {
+    pub listing: Option<BrowseListing>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Incremented per request; older answers are dropped.
+    pub seq: u64,
+    /// The folder last asked for (`None` = the start list: drives / `/` and the home dir).
+    pub dir: Option<String>,
+    /// Highlighted entry of the listing (click, arrow keys).
+    pub selected: Option<usize>,
+}
+
+impl PickRootForm {
+    /// The folder "Select this folder" adds: the highlighted entry, else the listed folder.
+    /// `None` for the start list without a highlight and for filesystem roots (refused as
+    /// browse roots).
+    pub fn target(&self) -> Option<&str> {
+        let l = self.listing.as_ref()?;
+        let p = match self.selected.and_then(|i| l.entries.get(i)) {
+            Some(e) => e.path.as_str(),
+            None if l.path.is_empty() || l.parent.is_none() => return None,
+            None => l.path.as_str(),
+        };
+        (!is_fs_root(p)).then_some(p)
+    }
+}
+
+/// `C:\`, `C:`, `/`, `\\server\share` (a whole drive or share; refused as a browse root).
+pub fn is_fs_root(p: &str) -> bool {
+    let t = p.trim_end_matches(['\\', '/']);
+    if t.is_empty() {
+        return true;
+    }
+    let b = t.as_bytes();
+    if b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return true;
+    }
+    // `\\server\share`: two parts after the leading separators.
+    if let Some(rest) = t.strip_prefix(r"\\").or_else(|| t.strip_prefix("//")) {
+        return rest.split(['\\', '/']).filter(|s| !s.is_empty()).count() <= 2;
+    }
+    false
+}
+
+/// Scroll the folder picker's list to a relative position (0 = top, 1 = bottom).
+fn pick_scroll(y: f32) -> Task<Message> {
+    iced::widget::operation::scrollable::snap_to(
+        PICK_LIST_ID,
+        iced::widget::operation::scrollable::RelativeOffset {
+            x: None,
+            y: Some(y),
+        },
+        iced::widget::operation::Animation::Instant,
+    )
+}
+
+/// Breadcrumb of a server path: `(label, path)` per level, the drive / `/` first.
+/// `C:\Users\me` -> `C:`, `Users`, `me`; `/home/me` -> `/`, `home`, `me`.
+pub fn crumbs(path: &str) -> Vec<(String, String)> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    // Server OS syntax: Windows paths use `\`, Unix ones start with `/`.
+    let unix = path.starts_with('/') && !path.contains('\\');
+    let sep = if unix { '/' } else { '\\' };
+    let (root, rest): (String, &str) = if unix {
+        ("/".into(), &path[1..])
+    } else if let Some(r) = path.strip_prefix(r"\\") {
+        // UNC: `\\server\share\` is one level.
+        let mut it = r.splitn(3, '\\');
+        let server = it.next().unwrap_or_default();
+        let share = it.next().unwrap_or_default();
+        (
+            format!(r"\\{server}\{share}\"),
+            it.next().unwrap_or_default(),
+        )
+    } else {
+        match path.split_once('\\') {
+            Some((d, r)) => (format!("{d}\\"), r),
+            None => (format!("{path}\\"), ""),
+        }
+    };
+    let label = if unix {
+        "/".to_owned()
+    } else {
+        root.trim_end_matches('\\').to_owned()
+    };
+    let mut out = vec![(label, root.clone())];
+    let mut acc = root;
+    for part in rest.split(sep).filter(|s| !s.is_empty()) {
+        if !acc.ends_with(sep) {
+            acc.push(sep);
+        }
+        acc.push_str(part);
+        out.push((part.to_owned(), acc.clone()));
+    }
+    out
+}
+
 /// Ctrl+P: files of the session by fuzzy name.
 #[derive(Default)]
 pub struct QuickForm {
@@ -298,6 +402,8 @@ pub enum Modal {
     DefPicker(DefPickerForm),
     DeleteEntry(DeleteEntryForm),
     CloseDirty(CloseDirtyForm),
+    /// Repos page: choose a folder on the server to add as a browse root.
+    PickRoot(PickRootForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -545,6 +651,19 @@ pub enum Message {
     RootAdd,
     RootRemove(usize),
     RootsSaved(Result<BrowseConfig, ProtoError>),
+    /// Open the repos page's folder picker (at the typed path if it is listable).
+    PickOpen,
+    /// List a folder in the picker (`None` = the start list).
+    PickGo(Option<String>),
+    PickListed(u64, Result<BrowseListing, ProtoError>),
+    /// Highlight an entry of the picker.
+    PickHighlight(usize),
+    /// Arrow keys in the picker.
+    PickMove(i32),
+    /// Enter in the picker: open the highlighted folder.
+    PickEnter,
+    /// "Select this folder": fill the path field and add the root.
+    PickConfirm,
 
     WindowOpened(Option<window::Id>),
     WindowResized(Size),
@@ -1700,6 +1819,103 @@ impl App {
                     }
                 }
             }),
+            Message::PickOpen => {
+                if self.online().is_none() {
+                    return Task::none();
+                }
+                self.rename = None;
+                self.modal = Some(Modal::PickRoot(PickRootForm::default()));
+                // Start at the typed folder when it is listable, else at the start list.
+                let typed = self.settings.root_input.trim().trim_matches('"').to_owned();
+                self.pick_go((!typed.is_empty()).then_some(typed))
+            }
+            Message::PickGo(dir) => self.pick_go(dir),
+            Message::PickListed(seq, r) => {
+                let Some(Modal::PickRoot(f)) = &mut self.modal else {
+                    return Task::none();
+                };
+                if seq != f.seq {
+                    return Task::none();
+                }
+                f.loading = false;
+                match r {
+                    Ok(l) => {
+                        crate::script::log(&format!(
+                            "pick {:?} (git repo {}, {} folder(s), truncated {})",
+                            l.path,
+                            l.is_git_repo,
+                            l.entries.len(),
+                            l.truncated
+                        ));
+                        f.error = None;
+                        f.selected = None;
+                        f.listing = Some(l);
+                        pick_scroll(0.0)
+                    }
+                    // A typed path that cannot be listed: show the start list instead.
+                    Err(_) if f.listing.is_none() && f.dir.is_some() => self.pick_go(None),
+                    Err(e) => {
+                        f.error = Some(i18n::proto_error(&e));
+                        Task::none()
+                    }
+                }
+            }
+            Message::PickHighlight(i) => {
+                if let Some(Modal::PickRoot(f)) = &mut self.modal
+                    && f.listing.as_ref().is_some_and(|l| i < l.entries.len())
+                {
+                    f.selected = Some(i);
+                }
+                Task::none()
+            }
+            Message::PickMove(d) => {
+                if let Some(Modal::PickRoot(f)) = &mut self.modal
+                    && let Some(l) = &f.listing
+                    && !l.entries.is_empty()
+                {
+                    let n = l.entries.len() as i64;
+                    let i = match f.selected {
+                        Some(i) => (i as i64 + i64::from(d)).clamp(0, n - 1),
+                        None if d < 0 => n - 1,
+                        None => 0,
+                    };
+                    f.selected = Some(i as usize);
+                    // Keep the highlighted row in view (row i of n at the relative offset
+                    // i / (n - 1) is always inside the viewport).
+                    return pick_scroll(if n > 1 {
+                        i as f32 / (n - 1) as f32
+                    } else {
+                        0.0
+                    });
+                }
+                Task::none()
+            }
+            Message::PickEnter => {
+                let dir = match &self.modal {
+                    Some(Modal::PickRoot(f)) => f
+                        .selected
+                        .and_then(|i| f.listing.as_ref()?.entries.get(i))
+                        .map(|e| e.path.clone()),
+                    _ => None,
+                };
+                match dir {
+                    Some(d) => self.pick_go(Some(d)),
+                    None => Task::none(),
+                }
+            }
+            Message::PickConfirm => {
+                let target = match &self.modal {
+                    Some(Modal::PickRoot(f)) => f.target().map(str::to_owned),
+                    _ => None,
+                };
+                let Some(path) = target else {
+                    return Task::none();
+                };
+                crate::script::log(&format!("pick: add root {path:?}"));
+                self.modal = None;
+                self.settings.root_input = path;
+                self.update(Message::RootAdd)
+            }
             Message::AcctProvider(p) => self.with_settings(|f| f.acct_provider = p),
             Message::AcctName(v) => self.with_settings(|f| f.acct_name = v),
             Message::AcctAdd => {
@@ -2311,6 +2527,24 @@ impl App {
         iced::exit()
     }
 
+    /// List `dir` in the repos page's folder picker (`None` = the start list).
+    fn pick_go(&mut self, dir: Option<String>) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let Some(Modal::PickRoot(f)) = &mut self.modal else {
+            return Task::none();
+        };
+        f.seq += 1;
+        f.loading = true;
+        f.dir = dir.clone();
+        let seq = f.seq;
+        Task::perform(
+            async move { c.browse_pick_list(dir.as_deref()).await },
+            move |r| Message::PickListed(seq, r),
+        )
+    }
+
     /// List `dir` in the new-session dialog's folder browser.
     fn browse_go(&mut self, dir: String) -> Task<Message> {
         let Some(c) = self.online() else {
@@ -2508,7 +2742,20 @@ impl App {
                 _ => None,
             }));
         }
-        if matches!(self.modal, Some(Modal::QuickOpen(_))) {
+        if matches!(self.modal, Some(Modal::PickRoot(_))) {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(named),
+                    ..
+                }) => match named {
+                    keyboard::key::Named::ArrowDown => Some(Message::PickMove(1)),
+                    keyboard::key::Named::ArrowUp => Some(Message::PickMove(-1)),
+                    keyboard::key::Named::Enter => Some(Message::PickEnter),
+                    _ => None,
+                },
+                _ => None,
+            }));
+        } else if matches!(self.modal, Some(Modal::QuickOpen(_))) {
             subs.push(event::listen_with(|e, _, _| match e {
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowDown),
@@ -2626,7 +2873,85 @@ pub fn path_name(p: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_url, path_name, same_path};
+    use super::{PickRootForm, crumbs, is_fs_root, normalize_url, path_name, same_path};
+    use ide_client::{BrowseEntry, BrowseListing};
+
+    fn c(path: &str) -> Vec<(&'static str, &'static str)> {
+        crumbs(path)
+            .into_iter()
+            .map(|(a, b)| (&*a.leak(), &*b.leak()))
+            .collect()
+    }
+
+    #[test]
+    fn breadcrumbs() {
+        assert!(crumbs("").is_empty());
+        assert_eq!(c(r"C:\"), [("C:", r"C:\")]);
+        assert_eq!(
+            c(r"C:\Users\사용자"),
+            [
+                ("C:", r"C:\"),
+                ("Users", r"C:\Users"),
+                ("사용자", r"C:\Users\사용자")
+            ]
+        );
+        assert_eq!(c("/"), [("/", "/")]);
+        assert_eq!(
+            c("/home/me"),
+            [("/", "/"), ("home", "/home"), ("me", "/home/me")]
+        );
+        assert_eq!(
+            c(r"\\srv\share\x"),
+            [(r"\\srv\share", r"\\srv\share\"), ("x", r"\\srv\share\x")]
+        );
+    }
+
+    #[test]
+    fn filesystem_roots() {
+        for p in [r"C:\", "C:", "d:/", "/", r"\\srv\share", r"\\srv\share\"] {
+            assert!(is_fs_root(p), "{p}");
+        }
+        for p in [r"C:\src", "/home", r"\\srv\share\x"] {
+            assert!(!is_fs_root(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn pick_target() {
+        let entry = |p: &str| BrowseEntry {
+            name: p.into(),
+            path: p.into(),
+            is_git_repo: false,
+        };
+        let mut f = PickRootForm {
+            listing: Some(BrowseListing {
+                path: String::new(),
+                parent: None,
+                is_git_repo: false,
+                entries: vec![entry(r"C:\Users\me"), entry(r"C:\")],
+                truncated: false,
+            }),
+            ..PickRootForm::default()
+        };
+        // Start list: nothing without a highlight; a drive is refused; home is fine.
+        assert_eq!(f.target(), None);
+        f.selected = Some(1);
+        assert_eq!(f.target(), None);
+        f.selected = Some(0);
+        assert_eq!(f.target(), Some(r"C:\Users\me"));
+        // A folder: the listed folder itself unless an entry is highlighted.
+        f.listing = Some(BrowseListing {
+            path: r"D:\repository".into(),
+            parent: Some(r"D:\".into()),
+            is_git_repo: false,
+            entries: vec![entry(r"D:\repository\a")],
+            truncated: false,
+        });
+        f.selected = None;
+        assert_eq!(f.target(), Some(r"D:\repository"));
+        f.selected = Some(0);
+        assert_eq!(f.target(), Some(r"D:\repository\a"));
+    }
 
     #[test]
     fn urls() {

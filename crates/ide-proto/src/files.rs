@@ -131,12 +131,16 @@ pub struct BrowseEntry {
 pub struct BrowseListing {
     /// The listed folder (absolute, canonical, server OS syntax).
     pub path: String,
-    /// Parent folder if it is still inside a browse root.
+    /// Parent folder if it is still inside a browse root (`browse.pick_list`: the parent
+    /// folder, `None` at a filesystem root; the drive/start list has the path `""`).
     pub parent: Option<String>,
     /// The listed folder itself is a repository root.
     pub is_git_repo: bool,
     /// Sub-folders, sorted by name (case-insensitive).
     pub entries: Vec<BrowseEntry>,
+    /// `browse.pick_list` only: more folders than the server's cap; the rest were dropped.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// `browse.config` / `browse.set_roots` result: the folders repositories can be picked from.
