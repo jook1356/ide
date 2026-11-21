@@ -1,6 +1,7 @@
 //! The per-session detail area (Hermes Desk `DetailTabs` + `ChangesPanel`): open items (the
 //! session's web page, files, diffs) shown one at a time under a header with an "open items"
-//! switcher, and a side panel with Changes / Explore / Search.
+//! switcher, and a side panel with Changes / Explore (Explore has the file-name and text search
+//! on top of its tree).
 //!
 //! All state lives in [`Detail`], one per session ([`crate::app::Live::detail`]); switching
 //! sessions switches the detail area. Everything on disk is reached through the server
@@ -12,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use iced::Task;
 use ide_client::{
-    ChangeKind, Client, DefResult, DiffAgainst, EntryKind, FileContent, FsEntry, ProtoError,
-    SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
+    ChangeKind, Client, DefResult, DiffAgainst, EntryKind, FileContent, FileMatch, FsEntry,
+    ProtoError, SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
 };
 use ide_views::{
     ChangeEntry, ChangeGroup, ChangesEvent, ChangesList, ChangesMessage, CodeEvent, CodeMessage,
@@ -25,24 +26,29 @@ use crate::app::{App, Message, Modal};
 use crate::i18n::{self, tr};
 use crate::ui_state::DetailUi;
 
-/// Width of the side panel (Changes / Explore / Search).
+/// Width of the side panel (Changes / Explore).
 pub const SIDE_W: f32 = 290.0;
 /// How long a transient message stays.
 pub const TOAST_FOR: Duration = Duration::from_secs(5);
-/// Widget ids.
+/// Widget ids (`SEARCH_ID`: Explore's search input).
 pub const SEARCH_ID: &str = "ide-search";
 pub const QUICK_ID: &str = "ide-quick-open";
 /// Most quick-open results.
 const QUICK_MAX: u32 = 60;
+/// Most file-name matches shown in Explore.
+const FIND_FILES_MAX: u32 = 200;
+/// Typing pause before Explore's text search starts (file names are matched at once).
+const SEARCH_DELAY: Duration = Duration::from_millis(250);
 /// Largest file the editor opens (bytes; bigger files show the first part read-only).
 const READ_MAX: u64 = 4 * 1024 * 1024;
 
-/// Side panel tab.
+/// Side panel tab, in tab-bar order (Hermes Desk: Changes | History | Explore; History is not
+/// built yet). A new tab: add the variant here in Desk order, its `code` / `parse` arm (the
+/// `ui.json` value), and its `tab(..)` + content arm in `detail_view.rs::side_panel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideTab {
     Changes,
     Explore,
-    Search,
 }
 
 impl SideTab {
@@ -50,14 +56,13 @@ impl SideTab {
         match self {
             SideTab::Changes => "changes",
             SideTab::Explore => "explore",
-            SideTab::Search => "search",
         }
     }
 
+    /// `ui.json` value; the old `"search"` tab is now part of Explore.
     fn parse(s: &str) -> Self {
         match s {
             "changes" => SideTab::Changes,
-            "search" => SideTab::Search,
             _ => SideTab::Explore,
         }
     }
@@ -212,10 +217,19 @@ pub enum Item {
     Diff(DiffItem),
 }
 
-/// Text search of the side panel.
+/// Explore's search (Hermes Desk's 파일 찾기 plus the text search): a non-empty query shows
+/// the file-name matches of the shown repo and the text matches of every repo instead of the
+/// tree.
 #[derive(Default)]
 pub struct SearchState {
     pub query: String,
+    /// File-name matches in the shown repo (`search.files`), best first.
+    pub files: Vec<FileMatch>,
+    pub files_error: Option<String>,
+    /// Incremented per file-name query; older answers are dropped.
+    files_seq: u64,
+    /// Incremented per typed query; only the last one's pause starts the text search.
+    typed: u64,
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub regex: bool,
@@ -233,6 +247,26 @@ pub struct SearchState {
 impl SearchState {
     pub fn hit_count(&self) -> usize {
         self.groups.iter().map(|(_, h)| h.len()).sum()
+    }
+
+    /// The results replace Explore's tree.
+    pub fn active(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// Empty query: back to the tree.
+    fn clear(&mut self) {
+        self.stop();
+        self.query.clear();
+        self.generation += 1;
+        self.files_seq += 1;
+        self.typed += 1;
+        self.groups.clear();
+        self.collapsed.clear();
+        self.files.clear();
+        self.files_error = None;
+        self.summary = None;
+        self.error = None;
     }
 
     fn stop(&mut self) {
@@ -455,7 +489,12 @@ pub enum DetailMsg {
     ),
     /// A tree operation in repo `.0` finished.
     FsDone(String, FsOp, Result<(), ProtoError>),
+    /// Explore's search input changed (file names at once, text after [`SEARCH_DELAY`]).
     SearchInput(String),
+    /// The typing pause of query `.0` ended.
+    SearchTyped(u64),
+    /// File-name matches of query `.0`.
+    Files(u64, Result<Vec<FileMatch>, ProtoError>),
     SearchCase,
     SearchWord,
     SearchRegex,
@@ -1145,9 +1184,6 @@ impl App {
                 let d = self.detail_mut(sid).expect("session");
                 d.side = tab;
                 self.persist_detail(sid);
-                if tab == SideTab::Search {
-                    return iced::widget::operation::focus(SEARCH_ID);
-                }
                 Task::none()
             }
             DetailMsg::Tree(tm) => {
@@ -1164,7 +1200,8 @@ impl App {
                 let d = self.detail_mut(sid).expect("session");
                 d.set_repo(repo.clone());
                 crate::script::log(&format!("detail {sid}: repo {repo}"));
-                self.sync_detail()
+                // File names are matched in the shown repo.
+                Task::batch([self.sync_detail(), self.find_files(sid)])
             }
             DetailMsg::Listed(repo, dir, r) => {
                 let d = self.detail_mut(sid).expect("session");
@@ -1326,7 +1363,43 @@ impl App {
             }
             DetailMsg::FsDone(repo, op, r) => self.on_fs_done(sid, &repo, op, r),
             DetailMsg::SearchInput(q) => {
-                self.detail_mut(sid).expect("session").search.query = q;
+                let s = &mut self.detail_mut(sid).expect("session").search;
+                if q.is_empty() {
+                    s.clear();
+                    crate::script::log("explore search cleared");
+                    return Task::none();
+                }
+                s.query = q;
+                s.typed += 1;
+                let typed = s.typed;
+                let sid2 = sid.to_owned();
+                let pause = Task::perform(tokio::time::sleep(SEARCH_DELAY), move |_| {
+                    msg(&sid2, DetailMsg::SearchTyped(typed))
+                });
+                Task::batch([self.find_files(sid), pause])
+            }
+            DetailMsg::SearchTyped(typed) => {
+                if self.detail(sid).expect("session").search.typed != typed {
+                    return Task::none();
+                }
+                self.start_search(sid)
+            }
+            DetailMsg::Files(seq, r) => {
+                let s = &mut self.detail_mut(sid).expect("session").search;
+                if seq != s.files_seq {
+                    return Task::none();
+                }
+                match r {
+                    Ok(files) => {
+                        crate::script::log(&format!("file-name matches: {}", files.len()));
+                        s.files = files;
+                        s.files_error = None;
+                    }
+                    Err(e) => {
+                        s.files.clear();
+                        s.files_error = Some(i18n::proto_error(&e));
+                    }
+                }
                 Task::none()
             }
             DetailMsg::SearchCase | DetailMsg::SearchWord | DetailMsg::SearchRegex => {
@@ -1342,7 +1415,11 @@ impl App {
                     self.start_search(sid)
                 }
             }
-            DetailMsg::SearchSubmit => self.start_search(sid),
+            DetailMsg::SearchSubmit => {
+                // Enter: the text search starts without waiting for the typing pause.
+                self.detail_mut(sid).expect("session").search.typed += 1;
+                self.start_search(sid)
+            }
             DetailMsg::Search(generation, item) => {
                 let s = &mut self.detail_mut(sid).expect("session").search;
                 if generation != s.generation {
@@ -1889,13 +1966,47 @@ impl App {
         task
     }
 
+    /// Explore's file-name matches for the current query in the shown repo (Hermes Desk's
+    /// 파일 찾기; the server matches fuzzily).
+    fn find_files(&mut self, sid: &str) -> Task<Message> {
+        let c = self.online();
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        let s = &mut d.search;
+        s.files_seq += 1;
+        s.files.clear();
+        s.files_error = None;
+        if s.query.is_empty() || d.repo.is_empty() {
+            return Task::none();
+        }
+        let Some(c) = c else {
+            s.files_error = Some(tr::err_disconnected());
+            return Task::none();
+        };
+        let (seq, q, repo, sid2) = (s.files_seq, s.query.clone(), d.repo.clone(), sid.to_owned());
+        Task::perform(
+            async move {
+                c.search_files(&sid2, Some(&repo), &q, FIND_FILES_MAX)
+                    .await
+            },
+            {
+                let sid = sid.to_owned();
+                move |r| msg(&sid, DetailMsg::Files(seq, r))
+            },
+        )
+    }
+
     /// Select `path` ([`qualify`]d) in the tree, expanding (and listing) its folders; shows its
-    /// repo first.
+    /// repo first. Like Hermes Desk, revealing clears Explore's search so the tree is shown.
     pub fn tree_reveal(&mut self, sid: &str, path: &str) -> Task<Message> {
         let (repo, rel) = split_q(path);
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
+        if d.search.active() {
+            d.search.clear();
+        }
         let mut switched = Task::none();
         if !repo.is_empty() && d.repo != repo {
             d.set_repo(repo.to_owned());
@@ -1944,7 +2055,7 @@ impl App {
         )
     }
 
-    /// Ctrl+Shift+F: show the search tab with its input focused.
+    /// Ctrl+Shift+F: show Explore with its search input focused.
     pub fn open_search(&mut self) -> Task<Message> {
         let Some(sid) = self.selected.clone() else {
             return Task::none();
@@ -1959,7 +2070,8 @@ impl App {
             self.sync_web();
             tasks.push(self.sync_detail());
         }
-        tasks.push(self.on_detail(sid, DetailMsg::Side(SideTab::Search)));
+        tasks.push(self.on_detail(sid, DetailMsg::Side(SideTab::Explore)));
+        tasks.push(iced::widget::operation::focus(SEARCH_ID));
         Task::batch(tasks)
     }
 }
@@ -2048,6 +2160,44 @@ mod tests {
         assert_eq!(d.repo, "0123abcd");
         // Without a repo they cannot be opened.
         assert_eq!(Detail::new(Some(&ui), None).items.len(), 1);
+    }
+
+    #[test]
+    fn old_search_tab_opens_explore() {
+        for (saved, side) in [
+            ("search", SideTab::Explore),
+            ("explore", SideTab::Explore),
+            ("changes", SideTab::Changes),
+            ("", SideTab::Explore),
+        ] {
+            let ui = DetailUi {
+                side: saved.into(),
+                ..DetailUi::default()
+            };
+            assert_eq!(Detail::new(Some(&ui), None).side, side, "{saved:?}");
+        }
+        assert_eq!(SideTab::parse(SideTab::Changes.code()), SideTab::Changes);
+        assert_eq!(SideTab::parse(SideTab::Explore.code()), SideTab::Explore);
+    }
+
+    #[test]
+    fn clearing_the_query_shows_the_tree() {
+        let mut s = SearchState {
+            query: "greet".into(),
+            ..SearchState::default()
+        };
+        s.files.push(FileMatch {
+            repo: "0123abcd".into(),
+            path: "src/greet.ts".into(),
+            score: 1,
+            indices: Vec::new(),
+        });
+        assert!(s.active());
+        let (g, f, t) = (s.generation, s.files_seq, s.typed);
+        s.clear();
+        assert!(!s.active() && s.files.is_empty() && s.groups.is_empty());
+        // Late answers of the old query are dropped.
+        assert!(s.generation > g && s.files_seq > f && s.typed > t);
     }
 
     #[test]

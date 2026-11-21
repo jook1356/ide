@@ -266,6 +266,10 @@ enum Step {
     OpenChange(ChangeGroup, &'static str),
     WaitDiff(u64),
     WaitSearch(usize, u64),
+    /// Explore is shown with a query and its file-name matches include the path.
+    WaitExploreFiles(&'static str, u64),
+    /// Explore is shown without a query: the tree, no search results.
+    ExpectExploreTree,
     OpenFirstHit(&'static str),
     ExpectCursorLine(&'static str, usize),
     WaitQuick(&'static str, u64),
@@ -1101,8 +1105,22 @@ fn phase2() -> Vec<Step> {
         Shot("41_open_items"),
         Pause("open_items"),
         App(Message::CloseOpenItems),
-        Log("--- text search (streamed), open a result at its line"),
+        Log("--- Explore search: file names + text, cleared -> tree"),
         App(Message::FindInFiles),
+        ExpectExploreTree,
+        // Typing only (no Enter): file names at once, the text search after the pause.
+        D(DetailMsg::SearchInput("util".into())),
+        WaitExploreFiles(util, 10_000),
+        WaitSearch(1, 10_000),
+        Wait(300),
+        Shot("41a_explore_search"),
+        Pause("explore_search"),
+        D(DetailMsg::SearchInput(String::new())),
+        ExpectExploreTree,
+        WaitDir("", 10_000),
+        Wait(300),
+        Shot("41b_explore_cleared"),
+        Log("--- text search (streamed), open a result at its line"),
         D(DetailMsg::SearchInput("greet".into())),
         D(DetailMsg::SearchSubmit),
         WaitSearch(2, 10_000),
@@ -1177,9 +1195,15 @@ fn phase2() -> Vec<Step> {
         Wait(300),
         Shot("ko_10_changes_diff"),
         Pause("ko_changes_diff"),
-        D(DetailMsg::Side(SideTab::Search)),
+        App(Message::FindInFiles),
+        D(DetailMsg::SearchInput("util".into())),
+        WaitExploreFiles(util, 10_000),
+        WaitSearch(1, 10_000),
         Wait(300),
-        Shot("ko_11_search"),
+        Shot("ko_11_explore_search"),
+        Pause("ko_explore_search"),
+        D(DetailMsg::SearchInput(String::new())),
+        ExpectExploreTree,
         D(DetailMsg::Activate(ItemKey::File(main.into()))),
         WaitFile(main, 5000),
         GoTo(main, 1, 1),
@@ -2302,6 +2326,29 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 format!("search streamed (files, hits, error) = {got:?}")
             )
         }
+        Step::WaitExploreFiles(path, ms) => {
+            let d = p2_detail(sc, app);
+            let files: Vec<String> = d
+                .map(|d| d.search.files.iter().map(|f| f.path.clone()).collect())
+                .unwrap_or_default();
+            let shown = d.is_some_and(|d| d.side == SideTab::Explore && d.search.active());
+            wait!(
+                shown && files.iter().any(|f| f == path),
+                ms,
+                format!("explore file-name matches {files:?}")
+            )
+        }
+        Step::ExpectExploreTree => {
+            let d = p2_detail(sc, app);
+            let ok = d.is_some_and(|d| {
+                d.side == SideTab::Explore
+                    && !d.search.active()
+                    && d.search.files.is_empty()
+                    && d.search.groups.is_empty()
+            });
+            sc.check(ok, "explore shows the tree (no query, no results)");
+            true
+        }
         Step::OpenFirstHit(path) => {
             let hit = p2_detail(sc, app).and_then(|d| {
                 d.search
@@ -3374,6 +3421,8 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             | Step::OpenChange(..)
             | Step::WaitDiff(_)
             | Step::WaitSearch(..)
+            | Step::WaitExploreFiles(..)
+            | Step::ExpectExploreTree
             | Step::OpenFirstHit(_)
             | Step::ExpectCursorLine(..)
             | Step::WaitQuick(..)

@@ -20,9 +20,10 @@ pub enum Icon {
     SidebarExpand,
     FolderOpen,
     ArrowsSort,
+    Search,
 }
 
-const SOURCES: [&str; 10] = [
+const SOURCES: [&str; 11] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -33,6 +34,7 @@ const SOURCES: [&str; 10] = [
     include_str!("../assets/icons/layout-sidebar-left-expand.svg"),
     include_str!("../assets/icons/folder-open.svg"),
     include_str!("../assets/icons/arrows-sort.svg"),
+    include_str!("../assets/icons/search.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -71,6 +73,6 @@ mod tests {
             assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::ArrowsSort as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Search as usize + 1);
     }
 }

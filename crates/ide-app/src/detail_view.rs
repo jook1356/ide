@@ -1,5 +1,5 @@
 //! Drawing of the detail area: header (document identity or web navigation, "open items",
-//! collapse), the shown item, and the side panel (Changes / Explore / Search).
+//! collapse), the shown item, and the side panel (Changes / Explore; Explore's search on top).
 
 use iced::widget::{
     Column, button, column, container, pick_list, popover, row, scrollable, space, stack, text,
@@ -501,6 +501,8 @@ impl App {
             .width(Fill)
             .boxed()
         };
+        // Hermes Desk order: Changes | History | Explore (History: its tab goes between these
+        // two, with a content arm below).
         let tabs = container(row![
             tab(
                 SideTab::Changes,
@@ -508,7 +510,6 @@ impl App {
                 Some(d.changes.total())
             ),
             tab(SideTab::Explore, tr::side_explore(), None),
-            tab(SideTab::Search, tr::side_search(), None),
         ])
         .style(style::bg(style::HEADER));
         let content: El<'a> = match d.side {
@@ -544,7 +545,9 @@ impl App {
             }
             SideTab::Explore => column![
                 self.repo_selector(live),
+                self.explore_search_input(live),
                 match &d.tree_error {
+                    _ if d.search.active() => self.explore_results(live),
                     Some(e) => message_body(e.clone(), true),
                     None => {
                         let s = sid.clone();
@@ -556,7 +559,6 @@ impl App {
                 },
             ]
             .boxed(),
-            SideTab::Search => self.search_panel(live),
         };
         container(column![tabs, hline(), content])
             .width(SIDE_W)
@@ -615,7 +617,9 @@ impl App {
         .boxed()
     }
 
-    fn search_panel<'a>(&'a self, live: &'a Live) -> El<'a> {
+    /// Hermes Desk's Explore 파일 찾기 input: a search icon on the left, the text search's
+    /// case / word / regex toggles on the right (where Desk has its settings button).
+    fn explore_search_input<'a>(&'a self, live: &'a Live) -> El<'a> {
         let s = &live.detail.search;
         let sid = live.info.id.clone();
         let m = |x: DetailMsg| Message::Detail(sid.clone(), x);
@@ -623,46 +627,124 @@ impl App {
             tip(
                 button(
                     text(glyph)
-                        .size(12)
+                        .size(11)
                         .font(style::MONO)
-                        .width(20)
+                        .width(18)
                         .align_x(Alignment::Center),
                 )
-                .padding([3, 3])
+                .padding([2, 2])
                 .style(style::choice(on))
                 .on_press(msg)
                 .boxed(),
                 label,
             )
         };
-        let input = row![
-            text_input(tr::search_placeholder(), &s.query)
-                .id(SEARCH_ID)
-                .on_input({
-                    let sid = sid.clone();
-                    move |v| Message::Detail(sid.clone(), DetailMsg::SearchInput(v))
-                })
-                .on_submit(m(DetailMsg::SearchSubmit))
-                .size(12)
-                .padding([5, 8])
-                .style(style::input)
-                .width(Fill),
-            toggle(
-                "Aa",
-                s.case_sensitive,
-                m(DetailMsg::SearchCase),
-                tr::search_case()
-            ),
-            toggle(
-                "ab",
-                s.whole_word,
-                m(DetailMsg::SearchWord),
-                tr::search_word()
-            ),
-            toggle(".*", s.regex, m(DetailMsg::SearchRegex), tr::search_regex()),
-        ]
-        .spacing(3)
+        let input = text_input(tr::explore_find_placeholder(), &s.query)
+            .id(SEARCH_ID)
+            .on_input({
+                let sid = sid.clone();
+                move |v| Message::Detail(sid.clone(), DetailMsg::SearchInput(v))
+            })
+            .on_submit(m(DetailMsg::SearchSubmit))
+            .size(12)
+            .padding(Padding {
+                top: 5.0,
+                right: 76.0,
+                bottom: 5.0,
+                left: 28.0,
+            })
+            .style(style::input)
+            .width(Fill);
+        let icon = container(crate::icons::icon(
+            crate::icons::Icon::Search,
+            14.0,
+            style::DIM,
+        ))
+        .padding(Padding {
+            left: 9.0,
+            ..Padding::ZERO
+        })
+        .height(Fill)
         .align_y(Alignment::Center);
+        let toggles = container(
+            row![
+                toggle(
+                    "Aa",
+                    s.case_sensitive,
+                    m(DetailMsg::SearchCase),
+                    tr::search_case()
+                ),
+                toggle(
+                    "ab",
+                    s.whole_word,
+                    m(DetailMsg::SearchWord),
+                    tr::search_word()
+                ),
+                toggle(".*", s.regex, m(DetailMsg::SearchRegex), tr::search_regex()),
+            ]
+            .spacing(1)
+            .align_y(Alignment::Center),
+        )
+        .padding(Padding {
+            right: 4.0,
+            ..Padding::ZERO
+        })
+        .width(Fill)
+        .height(Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::Center);
+        container(stack![input, icon, toggles])
+            .padding([8, 10])
+            .width(Fill)
+            .boxed()
+    }
+
+    /// Explore with a query (instead of the tree): file-name matches of the shown repo like
+    /// Desk's filtered tree, then the text matches of every repo under a section label.
+    fn explore_results<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let s = &live.detail.search;
+        let sid = live.info.id.clone();
+        let mut list = Column::new().spacing(0).padding([0, 0]);
+        for f in &s.files {
+            let label = f.path.trim_end_matches('/').to_owned();
+            list = list.push(
+                tip(
+                    button(
+                        row![
+                            icons::file_icon(file_name(&label)),
+                            text(label.clone())
+                                .size(12)
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::Start)
+                                .width(Fill),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding(Padding {
+                        top: 3.0,
+                        right: 8.0,
+                        bottom: 3.0,
+                        left: 24.0,
+                    })
+                    .width(Fill)
+                    .style(style::row(false))
+                    .on_press(Message::Detail(
+                        sid.clone(),
+                        DetailMsg::OpenAt(crate::detail::qualify(&f.repo, &f.path), 0, 0),
+                    ))
+                    .boxed(),
+                    label,
+                ),
+            );
+        }
+        if let Some(e) = &s.files_error {
+            list = list.push(
+                container(text(e.clone()).size(11).color(style::RED))
+                    .padding([4, 10])
+                    .boxed(),
+            );
+        }
         let status: Option<(String, Color)> = if let Some(e) = &s.error {
             Some((e.clone(), style::RED))
         } else if s.running {
@@ -680,15 +762,37 @@ impl App {
                 (t, style::DIM)
             })
         };
-        let mut col = column![container(input).padding([8, 8])];
+        let mut label = row![
+            text(tr::explore_contents())
+                .size(11)
+                .font(style::BOLD)
+                .color(style::DIM)
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
         if let Some((t, c)) = status {
-            col = col.push(
-                container(text(t).size(11).color(c))
-                    .padding([0, 10])
+            label = label.push(
+                text(t)
+                    .size(11)
+                    .color(c)
+                    .wrapping(text::Wrapping::None)
+                    .ellipsis(text::Ellipsis::End)
+                    .width(Fill)
                     .boxed(),
             );
         }
-        let mut list = Column::new().spacing(0).padding([4, 0]);
+        list = list.push(
+            container(label)
+                .padding(Padding {
+                    top: if s.files.is_empty() { 2.0 } else { 10.0 },
+                    right: 10.0,
+                    bottom: 4.0,
+                    left: 10.0,
+                })
+                .width(Fill)
+                .boxed(),
+        );
+
         let mut last_repo: Option<&str> = None;
         let multi = live.info.repos.len() > 1;
         for (path, hits) in &s.groups {
@@ -782,7 +886,9 @@ impl App {
                 );
             }
         }
-        col.push(scrollable(list).height(Fill).boxed()).boxed()
+        scrollable(list.push(space().height(24).boxed()))
+            .height(Fill)
+            .boxed()
     }
 }
 

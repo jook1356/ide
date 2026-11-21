@@ -240,7 +240,6 @@ open-items = Open items
 group-browser = Browser
 side-changes = Changes
 side-explore = Explore
-side-search = Search
 changes-count = { $count ->
     [one] 1 changed file
    *[other] { $count } changed files
@@ -257,7 +256,8 @@ file-deleted-on-disk = The file was deleted on disk.
 bar-reload = Reload from disk (discard my edits)
 bar-overwrite = Save my version
 bar-compare = Compare with the disk
-search-placeholder = Search in files
+explore-find-placeholder = Find files
+explore-contents = Contents
 search-case = Match case
 search-word = Whole word
 search-regex = Regular expression
