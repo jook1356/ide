@@ -422,3 +422,25 @@ err-remote-list-failed = 원격 브랜치 목록을 가져오지 못했어요: {
 err-invalid-base-branch = 기준 브랜치가 유효하지 않거나 로컬에 없어요: { $branch }
 err-origin-branch-missing = origin에 { $branch } 브랜치가 없어요 (기준 브랜치 최신화를 켜 보세요).
 err-origin-branch-unknown = origin에 { $branch } 브랜치가 없어요 (fetch 후 다시 시도하세요).
+
+## 세션 목록: 구성 필터(전체)와 정렬
+
+configurations-all = 전체
+group-fold = “{ $name }” 접기
+group-unfold = “{ $name }” 펼치기
+session-sort = 세션 정렬
+session-sort-tooltip = 세션 정렬: { $summary }
+session-sort-default = 기본 순서
+session-sort-reset = 기본 순서로
+session-sort-default-note = 기본 순서입니다. 기준을 추가하면 자동 정렬로 바뀌어요.
+session-sort-add = 정렬 기준 추가
+session-sort-help = 위 기준부터 적용하고, 화살표로 우선순위를 바꿔요. 구성 그룹은 유지되며, 같은 값은 기존 순서로, 정보가 없는 항목은 마지막에 표시돼요.
+sort-key-name = 이름
+sort-key-updated = 마지막 활동
+sort-key-created = 생성 시각
+sort-key-activity = 실행 상태
+sort-asc = 오름차순
+sort-desc = 내림차순
+sort-move-up = 우선순위 올리기
+sort-move-down = 우선순위 내리기
+sort-remove = 정렬 기준 제거

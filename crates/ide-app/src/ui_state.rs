@@ -3,11 +3,13 @@
 //! which server to use (local / SSH), what closing the window does, each session's open
 //! detail items, the page chosen in the navigation rail and whether the session list is open.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ide_i18n::LanguagePref;
 use serde::{Deserialize, Serialize};
+
+use crate::session_sort::SortCriterion;
 
 /// Default share of the centre (terminal) in the centre+detail area.
 pub const DEFAULT_SPLIT: f32 = 0.5;
@@ -114,7 +116,18 @@ pub struct UiState {
     pub page: Page,
     /// The session list column of the work page is open.
     pub sessions_open: bool,
+    /// The session list shows every configuration (Hermes Desk's 전체), grouped by configuration.
+    pub sessions_all: bool,
+    /// Session list sort criteria (empty = server order).
+    #[serde(deserialize_with = "lenient")]
+    pub session_sort: Vec<SortCriterion>,
+    /// Folded groups of the session list: configuration slugs, or [`LOGIN_GROUP`].
+    #[serde(deserialize_with = "lenient")]
+    pub folded_groups: BTreeSet<String>,
 }
+
+/// Key of the login-terminal group in [`UiState::folded_groups`] (not a valid slug).
+pub const LOGIN_GROUP: &str = ":login";
 
 impl Default for UiState {
     fn default() -> Self {
@@ -131,6 +144,9 @@ impl Default for UiState {
             detail: BTreeMap::new(),
             page: Page::Work,
             sessions_open: true,
+            sessions_all: false,
+            session_sort: Vec::new(),
+            folded_groups: BTreeSet::new(),
         }
     }
 }
@@ -154,6 +170,7 @@ impl UiState {
             state.split_ratio = DEFAULT_SPLIT;
         }
         state.split_ratio = state.split_ratio.clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
+        state.session_sort = crate::session_sort::normalized(&state.session_sort);
         state
     }
 
@@ -195,6 +212,12 @@ mod tests {
             on_close: CloseAction::Keep,
             page: Page::Repos,
             sessions_open: false,
+            sessions_all: true,
+            session_sort: vec![crate::session_sort::SortCriterion {
+                key: crate::session_sort::SortKey::Updated,
+                dir: crate::session_sort::SortDir::Desc,
+            }],
+            folded_groups: [LOGIN_GROUP.to_owned()].into(),
             server: ServerPref::Ssh {
                 host: "me@devbox".into(),
                 command: "/opt/ide/ide-server --stdio".into(),

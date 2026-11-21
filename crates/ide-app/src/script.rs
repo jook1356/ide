@@ -34,9 +34,10 @@ use iced::{Task, window};
 use ide_i18n::{Lang, LanguagePref, tr};
 use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMessage, TreeMessage};
 
-use crate::app::{App, Conn, McpField, Message, Modal, RunState};
+use crate::app::{ALL_CONFIGURATIONS, App, Conn, McpField, Message, Modal, RunState, SortChange};
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
-use crate::ui_state::{CloseAction, Page, ServerPref};
+use crate::session_sort::SortKey;
+use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
 use ide_client::{AccountState, SessionKind};
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
@@ -121,6 +122,8 @@ enum Step {
     ExpectPage(Page),
     /// The session list is open (or hidden) and the terminal's width follows.
     ExpectSessionsOpen(bool),
+    /// The session list's groups (key, titles in order); an empty title list skips the titles.
+    ExpectSidebar(&'static [(&'static str, &'static [&'static str])]),
     /// `ui.json` stores this page and session-list state.
     ExpectSavedRail(Page, bool),
     /// The rail's work button on the work page: (session list open, hovered) -> the
@@ -665,6 +668,29 @@ fn steps(claude: bool) -> Vec<Step> {
         Shot("09c_accounts"),
         Pause("accounts"),
         GoPage(Page::Work),
+        Log("--- session list: 전체 groups by configuration, sort criteria, folding"),
+        App(Message::ConfigurationPicked(ALL_CONFIGURATIONS.into())),
+        ExpectSidebar(&[("default", &["shell A", "shell B"]), (LOGIN_GROUP, &[])]),
+        App(Message::Sort(SortChange::Add(SortKey::Name))),
+        App(Message::Sort(SortChange::Flip(SortKey::Name))),
+        ExpectSidebar(&[("default", &["shell B", "shell A"]), (LOGIN_GROUP, &[])]),
+        App(Message::Sort(SortChange::Add(SortKey::Created))),
+        App(Message::Sort(SortChange::Move(SortKey::Created, -1))),
+        App(Message::Sort(SortChange::Flip(SortKey::Created))),
+        ExpectSidebar(&[("default", &["shell A", "shell B"]), (LOGIN_GROUP, &[])]),
+        App(Message::ToggleSortMenu),
+        Wait(400),
+        Shot("09d_session_sort_menu"),
+        Pause("session_sort_menu"),
+        App(Message::CloseSortMenu),
+        App(Message::ToggleGroupFold(LOGIN_GROUP.into())),
+        Wait(300),
+        Shot("09e_session_groups_folded"),
+        Pause("session_groups"),
+        App(Message::ToggleGroupFold(LOGIN_GROUP.into())),
+        App(Message::Sort(SortChange::Reset)),
+        App(Message::ConfigurationPicked("default".into())),
+        ExpectSidebar(&[("", &["shell A", "shell B"]), (LOGIN_GROUP, &[])]),
         AskDelete(2),
         ConfirmDelete,
         WaitDeleted(2, 15_000),
@@ -683,6 +709,16 @@ fn steps(claude: bool) -> Vec<Step> {
         Wait(500),
         Shot("ko_01_main"),
         Pause("ko_main"),
+        App(Message::ConfigurationPicked(ALL_CONFIGURATIONS.into())),
+        App(Message::Sort(SortChange::Add(SortKey::Updated))),
+        App(Message::Sort(SortChange::Add(SortKey::Name))),
+        App(Message::ToggleSortMenu),
+        Wait(400),
+        Shot("ko_01b_session_sort"),
+        Pause("ko_session_sort"),
+        App(Message::CloseSortMenu),
+        App(Message::Sort(SortChange::Reset)),
+        App(Message::ConfigurationPicked("default".into())),
         FillNew {
             repo: Repo::Test,
             provider: "shell",
@@ -2829,6 +2865,18 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::ExpectPage(p) => {
                 sc.check(app.ui.page == p, &format!("page {:?} shown", app.ui.page));
+            }
+            Step::ExpectSidebar(want) => {
+                let got: Vec<(String, Vec<String>)> = app
+                    .sidebar_groups()
+                    .into_iter()
+                    .map(|(k, _, v)| (k, v.iter().map(|l| l.info.title.clone()).collect()))
+                    .collect();
+                let ok = got.len() == want.len()
+                    && got.iter().zip(want.iter()).all(|((k, t), (wk, wt))| {
+                        k == wk && (wt.is_empty() || t.iter().map(String::as_str).eq(wt.iter().copied()))
+                    });
+                sc.check(ok, &format!("session list groups {got:?} (want {want:?})"));
             }
             Step::ExpectSessionsOpen(open) => {
                 let left = crate::app::RAIL_W

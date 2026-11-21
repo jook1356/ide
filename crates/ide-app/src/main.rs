@@ -19,6 +19,7 @@ mod detail_view;
 mod i18n;
 mod icons;
 mod script;
+mod session_sort;
 mod style;
 mod ui_state;
 mod view;

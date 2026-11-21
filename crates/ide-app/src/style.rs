@@ -132,6 +132,29 @@ pub fn icon(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Icon button that shows a setting is on (Hermes Desk's `variant="light" color="violet"`).
+pub fn icon_toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut s = if on {
+            flat(Some(RAIL_ACTIVE), RAIL_ACTIVE_ICON)
+        } else {
+            icon(theme, status)
+        };
+        s.border.radius = 4.0.into();
+        s
+    }
+}
+
+/// Session list group divider: no background, a faint tint on hover.
+pub fn divider(_: &Theme, status: button::Status) -> button::Style {
+    let mut s = match status {
+        button::Status::Hovered | button::Status::Pressed => flat(Some(HOVER), TEXT),
+        _ => flat(None, DIM),
+    };
+    s.border.radius = 4.0.into();
+    s
+}
+
 /// A 44 x 44 navigation rail button: hover tint, the active page in violet.
 pub fn rail_link(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {

@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use crate::detail::{Detail, DetailMsg, ItemKey};
 use crate::i18n::{self, tr};
 use crate::script::Script;
+use crate::session_sort::{SortCriterion, SortDir, SortKey};
 use crate::ui_state::{CloseAction, DetailUi, Page, SPLIT_RANGE, ServerPref, UiState};
 
 /// Width of the navigation rail in logical pixels, its right border included.
@@ -592,6 +593,22 @@ impl std::fmt::Display for Choice {
     }
 }
 
+/// Key of the session list picker's "every configuration" entry (not a valid slug).
+pub const ALL_CONFIGURATIONS: &str = ":all";
+
+/// A change made in the session list's sort menu.
+#[derive(Debug, Clone, Copy)]
+pub enum SortChange {
+    Add(SortKey),
+    Remove(SortKey),
+    /// Ascending <-> descending.
+    Flip(SortKey),
+    /// One place up (-1) or down (+1).
+    Move(SortKey, i32),
+    /// Back to the server order.
+    Reset,
+}
+
 /// An account / configuration change requested from the accounts / configurations page.
 #[derive(Debug, Clone)]
 pub enum SettingsOp {
@@ -722,6 +739,12 @@ pub enum Message {
     Detail(String, DetailMsg),
     ToggleOpenItems,
     CloseOpenItems,
+    /// Session list sort menu (header button).
+    ToggleSortMenu,
+    CloseSortMenu,
+    Sort(SortChange),
+    /// Fold / unfold a session list group (configuration slug or `LOGIN_GROUP`).
+    ToggleGroupFold(String),
     QuickOpen,
     QuickInput(String),
     QuickResults(u64, Result<Vec<FileMatch>, ProtoError>),
@@ -943,6 +966,8 @@ pub struct App {
     pub server_instance: Option<String>,
     /// The "open items" list of the detail header is open.
     pub open_items: bool,
+    /// The session list's sort menu is open.
+    pub sort_open: bool,
 }
 
 impl App {
@@ -998,6 +1023,7 @@ impl App {
             modal_web_unsafe: false,
             server_instance: None,
             open_items: false,
+            sort_open: false,
         }
     }
 
@@ -1120,10 +1146,12 @@ impl App {
             .unwrap_or_else(|| DEFAULT_CONFIGURATION.to_owned())
     }
 
-    /// Whether the sidebar lists a session: sessions of the current configuration, and login
-    /// terminals always.
+    /// Whether the sidebar lists a session: every session under 전체, else sessions of the
+    /// current configuration, and login terminals always.
     pub fn in_filter(&self, info: &SessionInfo) -> bool {
-        info.kind == SessionKind::Login || info.configuration == self.current_configuration()
+        self.ui.sessions_all
+            || info.kind == SessionKind::Login
+            || info.configuration == self.current_configuration()
     }
 
     /// Sessions using a configuration: (total, running).
@@ -1997,8 +2025,12 @@ impl App {
             }
 
             Message::ConfigurationPicked(p) => {
-                if self.configs.iter().any(|x| x.slug == p) {
-                    self.ui.configuration = Some(p.clone());
+                let all = p == ALL_CONFIGURATIONS;
+                if all || self.configs.iter().any(|x| x.slug == p) {
+                    self.ui.sessions_all = all;
+                    if !all {
+                        self.ui.configuration = Some(p.clone());
+                    }
                     let shown = self
                         .selected_live()
                         .is_some_and(|l| self.in_filter(&l.info));
@@ -2767,6 +2799,50 @@ impl App {
                 self.open_items = false;
                 Task::none()
             }
+            Message::ToggleSortMenu => {
+                self.sort_open = !self.sort_open;
+                Task::none()
+            }
+            Message::CloseSortMenu => {
+                self.sort_open = false;
+                Task::none()
+            }
+            Message::Sort(change) => {
+                let list = &mut self.ui.session_sort;
+                match change {
+                    SortChange::Add(key) => {
+                        if !list.iter().any(|c| c.key == key) {
+                            list.push(SortCriterion {
+                                key,
+                                dir: key.default_dir(),
+                            });
+                        }
+                    }
+                    SortChange::Remove(key) => list.retain(|c| c.key != key),
+                    SortChange::Flip(key) => {
+                        for c in list.iter_mut().filter(|c| c.key == key) {
+                            c.dir = match c.dir {
+                                SortDir::Asc => SortDir::Desc,
+                                SortDir::Desc => SortDir::Asc,
+                            };
+                        }
+                    }
+                    SortChange::Move(key, delta) => {
+                        crate::session_sort::move_criterion(list, key, delta)
+                    }
+                    SortChange::Reset => list.clear(),
+                }
+                crate::script::log(&format!("session sort: {:?}", self.ui.session_sort));
+                self.save_ui();
+                Task::none()
+            }
+            Message::ToggleGroupFold(key) => {
+                if !self.ui.folded_groups.remove(&key) {
+                    self.ui.folded_groups.insert(key);
+                }
+                self.save_ui();
+                Task::none()
+            }
             Message::QuickOpen => {
                 if self.modal.is_some() || !self.on_work_page() {
                     return Task::none();
@@ -3404,6 +3480,14 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::CloseOpenItems),
+                _ => None,
+            }));
+        } else if self.sort_open {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::CloseSortMenu),
                 _ => None,
             }));
         }

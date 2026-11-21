@@ -456,3 +456,25 @@ err-remote-list-failed = Could not list the remote branches: { $detail }
 err-invalid-base-branch = The base branch is not valid or not present locally: { $branch }
 err-origin-branch-missing = origin has no branch { $branch } (turn on refreshing the base branch).
 err-origin-branch-unknown = origin has no branch { $branch } (fetch and try again).
+
+## Session list: configuration filter (all) and sorting
+
+configurations-all = All
+group-fold = Collapse “{ $name }”
+group-unfold = Expand “{ $name }”
+session-sort = Sort sessions
+session-sort-tooltip = Sort sessions: { $summary }
+session-sort-default = Default order
+session-sort-reset = Default order
+session-sort-default-note = Default order. Add a criterion to sort automatically.
+session-sort-add = Add sort criterion
+session-sort-help = Criteria apply from the top; use the arrows to change priority. Configuration groups stay, equal values keep their previous order and items without a value come last.
+sort-key-name = Name
+sort-key-updated = Last activity
+sort-key-created = Created
+sort-key-activity = Run state
+sort-asc = Ascending
+sort-desc = Descending
+sort-move-up = Raise priority
+sort-move-down = Lower priority
+sort-remove = Remove criterion

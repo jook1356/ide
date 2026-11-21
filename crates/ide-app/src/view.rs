@@ -3,8 +3,8 @@
 //! which stays in the widget tree. Modal dialogs on top.
 
 use iced::widget::{
-    Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, row,
-    scrollable, space, stack, text, text_editor, text_input, tooltip,
+    Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, popover,
+    row, scrollable, space, stack, text, text_editor, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
 use ide_client::{AccountState, BrowseEntry, Support};
@@ -12,14 +12,16 @@ use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 
 use crate::app::{
-    App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message, Modal, NEW_TITLE_ID,
-    NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, REPO_INPUT_ID, RENAME_ID, RunState,
-    SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, TERM_ID,
+    ALL_CONFIGURATIONS, App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message,
+    Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, REPO_INPUT_ID,
+    RENAME_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
+    TERM_ID,
 };
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
+use crate::session_sort::{SortDir, SortItem, SortKey};
 use crate::style;
-use crate::ui_state::{CloseAction, Page, ServerPref};
+use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
 
 type El<'a> = Element<'a, Message>;
 
@@ -151,19 +153,72 @@ fn folder_entry_row(e: &BrowseEntry, tag: Option<String>) -> El<'_> {
     r.boxed()
 }
 
-/// The sidebar group of a session: its repos' names (`ide, lib`), or "no repositories".
-fn session_repos_label(s: &ide_client::SessionInfo) -> String {
-    if s.kind == ide_client::SessionKind::Login {
-        return tr::group_login();
+/// What the session list sorts a session by.
+fn sort_item(l: &Live) -> SortItem<'_> {
+    SortItem {
+        name: l.info.title.as_str(),
+        updated: l.info.last_active,
+        created: l.info.created_at,
+        // Hermes Desk's 실행·응답 상태: what needs attention first.
+        activity: match l.state {
+            RunState::Failed => 0,
+            RunState::Running => 1,
+            RunState::Starting => 2,
+            RunState::Exited(_) => 3,
+            RunState::Stopped => 4,
+        },
     }
-    if s.repos.is_empty() {
-        return tr::no_repos();
+}
+
+fn sort_key_label(key: SortKey) -> String {
+    match key {
+        SortKey::Name => tr::sort_key_name(),
+        SortKey::Updated => tr::sort_key_updated(),
+        SortKey::Created => tr::sort_key_created(),
+        SortKey::Activity => tr::sort_key_activity(),
     }
-    s.repos
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+}
+
+/// Hermes Desk's `AgentDivider`: "▾ name ───── 3", folding the group's rows on click.
+fn group_divider<'a>(key: String, name: String, count: usize, folded: bool) -> El<'a> {
+    let tooltip = if folded {
+        tr::group_unfold(&name)
+    } else {
+        tr::group_fold(&name)
+    };
+    let body = row![
+        text(if folded { "▸" } else { "▾" })
+            .size(11)
+            .color(style::DIM)
+            .width(10),
+        text(name)
+            .size(11)
+            .font(style::BOLD)
+            .color(style::DIM)
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End),
+        container(container(space()).width(Fill).height(1).style(style::bg(style::BORDER)))
+            .width(Fill)
+            .padding(iced::Padding {
+                left: 4.0,
+                right: 4.0,
+                ..iced::Padding::ZERO
+            }),
+        text(count.to_string()).size(11).color(style::FAINT),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let b = button(body)
+        .padding(iced::Padding {
+            top: 8.0,
+            bottom: 3.0,
+            left: 4.0,
+            right: 6.0,
+        })
+        .width(Fill)
+        .style(style::divider)
+        .on_press(Message::ToggleGroupFold(key));
+    tip(b.boxed(), tooltip)
 }
 
 fn vline_full<'a>() -> El<'a> {
@@ -401,8 +456,17 @@ impl App {
     // ------------------------------------------------------------------ sidebar
 
     fn sidebar(&self) -> El<'_> {
-        let configs = self.config_choices();
-        let current = self.current_configuration();
+        // Hermes Desk's agent select: 전체 (every configuration) or one configuration.
+        let mut configs = vec![Choice {
+            key: ALL_CONFIGURATIONS.to_owned(),
+            label: tr::configurations_all(),
+        }];
+        configs.extend(self.config_choices());
+        let current = if self.ui.sessions_all {
+            ALL_CONFIGURATIONS.to_owned()
+        } else {
+            self.current_configuration()
+        };
         let selected = configs.iter().find(|c| c.key == current).cloned();
         let profile = row![
             label(tr::configuration_label()),
@@ -417,45 +481,31 @@ impl App {
         let sessions_header = row![
             label(tr::sessions_label()),
             space().width(Fill),
+            self.sort_control(),
             icon_button(
                 I_PLUS,
                 self.when_connected(Message::OpenNew),
                 tr::new_session()
             ),
         ]
+        .spacing(2)
         .align_y(Alignment::Center);
 
         let mut list: Column<El<'_>> = Column::new().spacing(2);
-        let mine: Vec<&Live> = self
-            .sessions
-            .iter()
-            .filter(|l| self.in_filter(&l.info))
-            .collect();
-        // Group by the session's repositories, in order of first appearance.
-        let mut groups: Vec<(String, Vec<&Live>)> = Vec::new();
-        for l in &mine {
-            let key = session_repos_label(&l.info);
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => v.push(l),
-                None => groups.push((key, vec![l])),
+        let groups = self.sidebar_groups();
+        let empty = groups.is_empty();
+        for (key, name, members) in groups {
+            let folded = !key.is_empty() && self.ui.folded_groups.contains(&key);
+            if !key.is_empty() {
+                list = list.push(group_divider(key, name, members.len(), folded));
+            }
+            if !folded {
+                for l in members {
+                    list = list.push(self.session_row(l));
+                }
             }
         }
-        for (repo_name, members) in groups {
-            list = list.push(
-                container(
-                    text(repo_name.to_uppercase())
-                        .size(11)
-                        .font(style::BOLD)
-                        .color(style::DIM),
-                )
-                .padding([6, 4])
-                .boxed(),
-            );
-            for l in members {
-                list = list.push(self.session_row(l));
-            }
-        }
-        if mine.is_empty() && self.loaded {
+        if empty && self.loaded {
             list = list.push(
                 container(text(tr::no_sessions()).size(12).color(style::DIM))
                     .padding([8, 4])
@@ -478,6 +528,175 @@ impl App {
             .width(SIDEBAR_W)
             .height(Fill)
             .style(style::bg(style::SIDEBAR))
+            .boxed()
+    }
+
+    /// The session list's groups in display order: (key, divider label, sessions sorted by
+    /// the sort criteria). As Hermes Desk: under 전체 one block per configuration (in the
+    /// configurations page's order, empty ones left out); one configuration is a single block
+    /// with key "" (no divider). Login terminals always form their own last block.
+    pub(crate) fn sidebar_groups(&self) -> Vec<(String, String, Vec<&Live>)> {
+        let mut mine: Vec<&Live> = self
+            .sessions
+            .iter()
+            .filter(|l| self.in_filter(&l.info))
+            .collect();
+        crate::session_sort::sort_by(&mut mine, &self.ui.session_sort, |l| sort_item(l));
+        let mut groups: Vec<(String, String, Vec<&Live>)> = Vec::new();
+        if self.ui.sessions_all {
+            for c in &self.configs {
+                groups.push((c.slug.clone(), c.name.clone(), Vec::new()));
+            }
+        }
+        for l in mine {
+            let (key, name) = if l.info.kind == ide_client::SessionKind::Login {
+                (LOGIN_GROUP.to_owned(), tr::group_login())
+            } else if self.ui.sessions_all {
+                (l.info.configuration.clone(), l.info.configuration.clone())
+            } else {
+                (String::new(), String::new())
+            };
+            match groups.iter_mut().find(|(k, _, _)| *k == key) {
+                Some((_, _, v)) => v.push(l),
+                None => groups.push((key, name, vec![l])),
+            }
+        }
+        groups.retain(|(_, _, v)| !v.is_empty());
+        groups.sort_by_key(|(k, _, _)| k == LOGIN_GROUP);
+        groups
+    }
+
+    /// Hermes Desk's `SessionSortControl`: a header icon (tinted while criteria are set) opening
+    /// the criteria list: priority, direction, remove, add, back to the default order.
+    fn sort_control(&self) -> El<'_> {
+        let crit = &self.ui.session_sort;
+        let on = !crit.is_empty();
+        let arrow = |d: SortDir| if d == SortDir::Asc { "↑" } else { "↓" };
+        let summary = if on {
+            crit.iter()
+                .map(|c| format!("{} {}", sort_key_label(c.key), arrow(c.dir)))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        } else {
+            tr::session_sort_default()
+        };
+        let icon_color = if on {
+            style::RAIL_ACTIVE_ICON
+        } else {
+            style::DIM
+        };
+        let trigger = tip(
+            button(icons::icon(Icon::ArrowsSort, 16.0, icon_color))
+                .padding(3)
+                .style(style::icon_toggle(on))
+                .on_press(Message::ToggleSortMenu)
+                .boxed(),
+            tr::session_sort_tooltip(&summary),
+        );
+        let popup = self.sort_open.then(|| {
+            let mut col: Column<El<'_>> = Column::new().spacing(8);
+            col = col.push(
+                row![
+                    text(tr::session_sort()).size(13).font(style::BOLD),
+                    space().width(Fill),
+                    button(text(tr::session_sort_reset()).size(11))
+                        .padding([2, 8])
+                        .style(style::secondary)
+                        .on_press_maybe(on.then_some(Message::Sort(SortChange::Reset))),
+                ]
+                .align_y(Alignment::Center)
+                .boxed(),
+            );
+            if !on {
+                col = col.push(
+                    text(tr::session_sort_default_note())
+                        .size(11)
+                        .color(style::DIM)
+                        .boxed(),
+                );
+            }
+            let last = crit.len().saturating_sub(1);
+            for (i, c) in crit.iter().enumerate() {
+                let key = c.key;
+                let dir = if c.dir == SortDir::Asc {
+                    tr::sort_asc()
+                } else {
+                    tr::sort_desc()
+                };
+                col = col.push(
+                    row![
+                        icon_button(
+                            "▲",
+                            (i > 0).then_some(Message::Sort(SortChange::Move(key, -1))),
+                            tr::sort_move_up()
+                        ),
+                        icon_button(
+                            "▼",
+                            (i < last).then_some(Message::Sort(SortChange::Move(key, 1))),
+                            tr::sort_move_down()
+                        ),
+                        text(format!("{}. {}", i + 1, sort_key_label(key)))
+                            .size(12)
+                            .width(Fill),
+                        button(text(format!("{} {}", arrow(c.dir), dir)).size(11))
+                            .padding([2, 8])
+                            .width(92)
+                            .style(style::secondary)
+                            .on_press(Message::Sort(SortChange::Flip(key))),
+                        icon_button(
+                            I_DELETE,
+                            Some(Message::Sort(SortChange::Remove(key))),
+                            tr::sort_remove()
+                        ),
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .boxed(),
+                );
+            }
+            let available: Vec<SortKey> = SortKey::ALL
+                .into_iter()
+                .filter(|k| !crit.iter().any(|c| c.key == *k))
+                .collect();
+            if !available.is_empty() {
+                let mut adds = row![].spacing(4);
+                for k in available {
+                    adds = adds.push(
+                        button(text(format!("+ {}", sort_key_label(k))).size(11))
+                            .padding([2, 8])
+                            .style(style::secondary)
+                            .on_press(Message::Sort(SortChange::Add(k))),
+                    );
+                }
+                col = col.push(
+                    column![
+                        text(tr::session_sort_add()).size(11).color(style::DIM),
+                        adds.wrap(),
+                    ]
+                    .spacing(4)
+                    .boxed(),
+                );
+            }
+            col = col.push(
+                column![
+                    container(space()).width(Fill).height(1).style(style::bg(style::BORDER)),
+                    text(tr::session_sort_help())
+                        .size(11)
+                        .color(style::DIM)
+                        .line_height(1.6),
+                ]
+                .spacing(10)
+                .boxed(),
+            );
+            container(col)
+                .padding(12)
+                .width(330)
+                .style(style::modal_card)
+        });
+        popover(trigger, popup)
+            .position(iced::widget::popover::Position::Bottom)
+            .gap(4)
+            .on_close(Message::CloseSortMenu)
             .boxed()
     }
 
