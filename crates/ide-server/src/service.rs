@@ -33,6 +33,8 @@ use crate::{def, fsops, git, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Env var naming the `gh` program ([`ServerConfig::gh`]).
+pub const GH_ENV: &str = "IDE_GH";
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 30;
 
@@ -48,6 +50,9 @@ pub struct ServerConfig {
     pub audit: Arc<dyn Audit>,
     /// Program resolution environment (`None` = the process environment).
     pub launch_env: Option<LaunchEnv>,
+    /// The GitHub CLI for the `pr.*` requests (`IDE_GH`; `None` = `gh` on `PATH`, else its
+    /// usual install folders).
+    pub gh: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -68,6 +73,9 @@ impl ServerConfig {
             paths,
             user,
             launch_env: None,
+            gh: std::env::var_os(GH_ENV)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         }
     }
 }
@@ -129,6 +137,7 @@ impl Server {
                 .launch_env
                 .clone()
                 .unwrap_or_else(LaunchEnv::from_process),
+            self.config.gh.clone(),
         )?);
         users.insert(user.id.clone(), ctx.clone());
         Ok(ctx)
@@ -239,6 +248,7 @@ pub struct UserCtx {
     launch_env: LaunchEnv,
     watchers: Watchers,
     write_lock: Mutex<()>,
+    gh: Option<PathBuf>,
 }
 
 impl UserCtx {
@@ -248,6 +258,7 @@ impl UserCtx {
         runner: Arc<dyn Runner>,
         audit: Arc<dyn Audit>,
         launch_env: LaunchEnv,
+        gh: Option<PathBuf>,
     ) -> Result<Self, ProtoError> {
         let report = ide_core::migrate_profiles(&paths).map_err(|e| core_error(&e))?;
         if report != Default::default() {
@@ -302,6 +313,7 @@ impl UserCtx {
             launch_env,
             watchers: Watchers::default(),
             write_lock: Mutex::new(()),
+            gh,
         })
     }
 
@@ -392,6 +404,38 @@ impl UserCtx {
             .unwrap()
             .get(&wt.repo)
             .map(|r| r.path.clone())
+    }
+
+    /// The session's base branch for a worktree (short name, `""` if none): what
+    /// `git.status` compares with and 새 브랜치로 이어가기 starts from.
+    pub(crate) fn session_base(&self, s: &Session, wt: &SessionWorktree) -> String {
+        s.base_of(self.repos.lock().unwrap().get(&wt.repo), wt)
+    }
+
+    /// Record the branch a session worktree is now on (Desk's `setWorktreeBranch`, after
+    /// 새 브랜치로 이어가기): saved, the session's instructions regenerated, `SessionsChanged`.
+    pub(crate) fn set_worktree_branch(
+        &self,
+        s: &Session,
+        wt: &SessionWorktree,
+        branch: &str,
+    ) -> Result<(), ProtoError> {
+        let mut updated = self.resolve_session(s.id.as_str())?;
+        let Some(w) = updated.worktrees.iter_mut().find(|w| w.repo == wt.repo) else {
+            return Ok(());
+        };
+        if w.branch == branch {
+            return Ok(());
+        }
+        w.branch = branch.to_owned();
+        self.sessions
+            .lock()
+            .unwrap()
+            .upsert(updated.clone())
+            .map_err(|e| core_error(&e))?;
+        self.refresh_root(&updated);
+        self.notify(Notify::SessionsChanged);
+        Ok(())
     }
 
     /// Start (or join) the watcher of a session's repo worktree for one connection.
@@ -1304,6 +1348,22 @@ impl UserCtx {
                 let path = path.map(|p| normalize_rel(&p)).transpose()?;
                 git::commit_diff(j.root(), &sha, path.as_deref()).map(Response::Diff)
             }
+            // --- local git actions (Changes / History footer)
+            req @ (Request::GitDiscard { .. }
+            | Request::GitStashList { .. }
+            | Request::GitStashPush { .. }
+            | Request::GitStashAction { .. }
+            | Request::GitCommitAction { .. }
+            | Request::GitSyncStatus { .. }
+            | Request::GitPush { .. }
+            | Request::GitPull { .. }
+            | Request::GitBranches { .. }
+            | Request::GitFetchRemotes { .. }
+            | Request::GitSwitchBranch { .. }
+            | Request::GitCreateBranch { .. }
+            | Request::GitBranchRefreshInfo { .. }
+            | Request::GitBranchRefreshCheck { .. }
+            | Request::GitRefreshBranch { .. }) => self.handle_git_actions(req),
             Request::DefLookup {
                 session,
                 repo,
@@ -1315,6 +1375,25 @@ impl UserCtx {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 def::lookup(&j, &path, line, col, text).map(Response::Def)
             }
+            // --- pull requests and agent prompts
+            req @ (Request::PrStatus { .. }
+            | Request::PrGate { .. }
+            | Request::PrFindOpen { .. }
+            | Request::PrRemoteBranches { .. }
+            | Request::PrPendingWork { .. }
+            | Request::PrLeftover { .. }
+            | Request::PrResetFile { .. }
+            | Request::PrDrift { .. }
+            | Request::PrUnmerged { .. }
+            | Request::PrCommitPreview { .. }
+            | Request::PrCommitText { .. }
+            | Request::PrCreate { .. }
+            | Request::PrMerge { .. }
+            | Request::PrClose { .. }
+            | Request::PrUpdateBranch { .. }
+            | Request::PromptCommit { .. }
+            | Request::PromptPr { .. }
+            | Request::SessionSendPrompt { .. }) => crate::pr::handle(self, req),
             other => Err(ProtoError::new("bad-request").arg("method", other.method())),
         }
     }
@@ -1563,6 +1642,51 @@ impl UserCtx {
         .ctx;
         drop(repos);
         p.after_exit(&ctx, account.as_ref());
+    }
+}
+
+// --- pull requests and agent prompts
+impl UserCtx {
+    /// A `(session, repo)` worktree as `crate::pr` sees it (jailed like every git request).
+    pub(crate) fn pr_target(
+        &self,
+        session: &str,
+        repo: &str,
+    ) -> Result<crate::pr::PrTarget, ProtoError> {
+        let (s, wt, j) = self.worktree_root(session, repo)?;
+        let repos = self.repos.lock().unwrap();
+        let reg = repos.get(&wt.repo);
+        let repo_name = reg.map_or_else(|| wt.name.clone(), |r| r.name.clone());
+        Ok(crate::pr::PrTarget {
+            dir: j.root().to_path_buf(),
+            session_base: s.base_of(reg, &wt),
+            branch: wt.branch.clone(),
+            pr_file: s
+                .is_workspace()
+                .then(|| ide_core::pr_file_path(&s.root, &repo_name)),
+            repo_name,
+        })
+    }
+
+    /// The `gh` CLI (`gh-missing` when it cannot be found).
+    pub(crate) fn gh_cli(&self) -> Result<crate::pr::GhCli, ProtoError> {
+        Ok(crate::pr::GhCli {
+            program: crate::pr::resolve_gh(self.gh.as_deref(), &self.launch_env)?,
+            env: self.launch_env.clone(),
+        })
+    }
+
+    /// `session.send_prompt`: submit `text` to a running session the way its provider takes
+    /// a prompt ([`ide_agents::AgentProvider::prompt_input`]).
+    pub(crate) fn send_prompt(&self, session: &str, text: &str) -> Result<(), ProtoError> {
+        let s = self.resolve_session(session)?;
+        let host = self
+            .existing_host(s.id.as_str())
+            .ok_or_else(|| ProtoError::new("session-not-running").arg("id", session))?;
+        let input = self.provider(&s.provider)?.prompt_input();
+        crate::pr::send_prompt(&host, input, text)?;
+        self.audit("session.send_prompt", &format!("{session} {} bytes", text.len()));
+        Ok(())
     }
 }
 

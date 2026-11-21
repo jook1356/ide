@@ -65,6 +65,13 @@ impl AgentProvider for Codex {
         // `--no-daemon` and the config keys below were verified on 0.160.1.
         Some("0.160.0")
     }
+    fn prompt_input(&self) -> crate::PromptInput {
+        // A full-screen TUI: one bracketed paste, then Enter (not verified against the real
+        // CLI: no prompts are sent to it from tests).
+        crate::PromptInput::Paste {
+            submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
+        }
+    }
     fn capabilities(&self) -> Caps {
         Caps {
             accounts: true,

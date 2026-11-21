@@ -25,6 +25,10 @@
 //!
 //! [mcp]
 //! mechanism = "unsupported"     # MCP servers are not passed on (noted at launch)
+//!
+//! [prompt]                      # optional: how `session.send_prompt` submits a prompt
+//! mode = "paste"                # "paste" (TUI: bracketed paste + Enter) | "lines" (default)
+//! submit_delay_ms = 300         # paste only: pause before Enter
 //! ```
 //!
 //! Placeholders in `args` and `[env]` values: `{account_dir}` (empty without an account),
@@ -123,6 +127,10 @@ pub struct DeclarativeSpec {
     /// MCP mechanism.
     #[serde(default)]
     pub mcp: McpSpec,
+    /// How the CLI takes a prompt (`[prompt] mode = "paste"` (+ `submit_delay_ms`) for a TUI
+    /// with bracketed paste, `"lines"` = typed lines, the default).
+    #[serde(default)]
+    pub prompt: Option<crate::PromptInput>,
 }
 
 fn default_version_args() -> Vec<String> {
@@ -221,6 +229,9 @@ impl AgentProvider for DeclarativeProvider {
     }
     fn min_version(&self) -> Option<&str> {
         self.spec.min_version.as_deref()
+    }
+    fn prompt_input(&self) -> crate::PromptInput {
+        self.spec.prompt.unwrap_or(crate::PromptInput::Lines)
     }
     fn capabilities(&self) -> Caps {
         let instructions = match self.spec.instructions.mechanism {

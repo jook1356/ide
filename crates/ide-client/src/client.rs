@@ -13,6 +13,17 @@ use ide_proto::{
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
     SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
 };
+// --- local git actions (Changes / History footer)
+use ide_proto::git_actions::{
+    BranchRefreshCheck, BranchRefreshInfo, BranchRefreshOptions, BranchRefreshResult, CommitAction,
+    GitBranches, PullMode, PushExpected, RemoteFetchStatus, StashAction, StashActionResult,
+    StashEntry, SwitchMode, SyncStatus,
+};
+// --- pull requests and agent prompts
+use ide_proto::pr::{
+    CommitPrPreview, CommitPrTextOptions, PendingWork, PrClosed, PrDrift, PrExclusions, PrGate,
+    PrLeftover, PrMergeMethod, PrMerged, PrStatus, PrTargets, PullRequestResult, UnmergedWork,
+};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::transport::Transport;
@@ -1191,6 +1202,321 @@ impl Client {
         )
     }
 
+    // --- local git actions (Changes / History footer)
+
+    /// `git.discard`: discard one file's uncommitted change (`file` as listed by `git.status`;
+    /// `kind` decides how: untracked deleted, added removed, renamed undone, else restored).
+    pub async fn git_discard(
+        &self,
+        session: &str,
+        repo: &str,
+        file: GitChange,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::GitDiscard {
+                session: session.into(),
+                repo: repo.into(),
+                file,
+            })
+            .await,
+        )
+    }
+
+    /// `git.stash_list`: every stash of the repository, newest first.
+    pub async fn git_stash_list(
+        &self,
+        session: &str,
+        repo: &str,
+    ) -> Result<Vec<StashEntry>, ProtoError> {
+        expect(
+            self.call(Request::GitStashList {
+                session: session.into(),
+                repo: repo.into(),
+            })
+            .await,
+            |r| match r {
+                Response::GitStashes(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.stash_push`: stash every change (`paths` `None`) or only `paths` (both sides of a
+    /// rename), untracked files included; `message` may be empty.
+    pub async fn git_stash_push(
+        &self,
+        session: &str,
+        repo: &str,
+        message: &str,
+        paths: Option<Vec<String>>,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::GitStashPush {
+                session: session.into(),
+                repo: repo.into(),
+                message: message.into(),
+                paths,
+            })
+            .await,
+        )
+    }
+
+    /// `git.stash_action`: pop / apply / drop the stash `sha`; conflicted paths if pop/apply
+    /// conflicted (the stash is kept then).
+    pub async fn git_stash_action(
+        &self,
+        session: &str,
+        repo: &str,
+        sha: &str,
+        action: StashAction,
+    ) -> Result<StashActionResult, ProtoError> {
+        expect(
+            self.call(Request::GitStashAction {
+                session: session.into(),
+                repo: repo.into(),
+                sha: sha.into(),
+                action,
+            })
+            .await,
+            |r| match r {
+                Response::GitStashResult(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.commit_action`: checkout (detached) / new branch at / revert / cherry-pick commit
+    /// `sha` (full id).
+    pub async fn git_commit_action(
+        &self,
+        session: &str,
+        repo: &str,
+        sha: &str,
+        action: CommitAction,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::GitCommitAction {
+                session: session.into(),
+                repo: repo.into(),
+                sha: sha.into(),
+                action,
+            })
+            .await,
+        )
+    }
+
+    /// `git.sync_status`: ahead / behind / publish state; `fetch` updates the upstream first.
+    pub async fn git_sync_status(
+        &self,
+        session: &str,
+        repo: &str,
+        fetch: bool,
+        merged_head: Option<String>,
+    ) -> Result<SyncStatus, ProtoError> {
+        expect(
+            self.call(Request::GitSyncStatus {
+                session: session.into(),
+                repo: repo.into(),
+                fetch,
+                merged_head,
+            })
+            .await,
+            |r| match r {
+                Response::GitSyncStatus(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.push`: push / publish the checked-out branch; returns the branch.
+    pub async fn git_push(
+        &self,
+        session: &str,
+        repo: &str,
+        force: bool,
+        expected: Option<PushExpected>,
+    ) -> Result<String, ProtoError> {
+        expect(
+            self.call(Request::GitPush {
+                session: session.into(),
+                repo: repo.into(),
+                force,
+                expected,
+            })
+            .await,
+            |r| match r {
+                Response::GitBranchName(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.pull`: merge / rebase / reset to the upstream; returns the branch.
+    pub async fn git_pull(
+        &self,
+        session: &str,
+        repo: &str,
+        mode: PullMode,
+    ) -> Result<String, ProtoError> {
+        expect(
+            self.call(Request::GitPull {
+                session: session.into(),
+                repo: repo.into(),
+                mode,
+            })
+            .await,
+            |r| match r {
+                Response::GitBranchName(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.branches`: local branches (with who has them checked out) and remote-tracking
+    /// branches, from local refs.
+    pub async fn git_branches(&self, session: &str, repo: &str) -> Result<GitBranches, ProtoError> {
+        expect(
+            self.call(Request::GitBranches {
+                session: session.into(),
+                repo: repo.into(),
+            })
+            .await,
+            |r| match r {
+                Response::GitBranches(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.fetch_remotes`: throttled `git fetch --prune` of every remote (never an error:
+    /// failures are in the status).
+    pub async fn git_fetch_remotes(
+        &self,
+        session: &str,
+        repo: &str,
+    ) -> Result<RemoteFetchStatus, ProtoError> {
+        expect(
+            self.call(Request::GitFetchRemotes {
+                session: session.into(),
+                repo: repo.into(),
+            })
+            .await,
+            |r| match r {
+                Response::GitFetchStatus(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.switch_branch`: switch to local `branch`, or (with `remote`) to that remote's
+    /// branch.
+    pub async fn git_switch_branch(
+        &self,
+        session: &str,
+        repo: &str,
+        branch: &str,
+        remote: Option<String>,
+        mode: SwitchMode,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::GitSwitchBranch {
+                session: session.into(),
+                repo: repo.into(),
+                branch: branch.into(),
+                remote,
+                mode,
+            })
+            .await,
+        )
+    }
+
+    /// `git.create_branch`: new branch `name` from `base` (local branch or `remote/branch`),
+    /// switched to.
+    pub async fn git_create_branch(
+        &self,
+        session: &str,
+        repo: &str,
+        name: &str,
+        base: &str,
+        mode: SwitchMode,
+    ) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::GitCreateBranch {
+                session: session.into(),
+                repo: repo.into(),
+                name: name.into(),
+                base: base.into(),
+                mode,
+            })
+            .await,
+        )
+    }
+
+    /// `git.branch_refresh_info`: 새 브랜치로 이어가기 dialog data (`fetch` = dialog opening).
+    pub async fn git_branch_refresh_info(
+        &self,
+        session: &str,
+        repo: &str,
+        fetch: bool,
+    ) -> Result<BranchRefreshInfo, ProtoError> {
+        expect(
+            self.call(Request::GitBranchRefreshInfo {
+                session: session.into(),
+                repo: repo.into(),
+                fetch,
+            })
+            .await,
+            |r| match r {
+                Response::GitRefreshInfo(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.branch_refresh_check`: dry run of the picked commits (and uncommitted changes).
+    pub async fn git_branch_refresh_check(
+        &self,
+        session: &str,
+        repo: &str,
+        commits: Vec<String>,
+        move_files: bool,
+    ) -> Result<BranchRefreshCheck, ProtoError> {
+        expect(
+            self.call(Request::GitBranchRefreshCheck {
+                session: session.into(),
+                repo: repo.into(),
+                commits,
+                move_files,
+            })
+            .await,
+            |r| match r {
+                Response::GitRefreshCheck(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.refresh_branch`: continue on a new branch from the fresh `origin/<base>`.
+    pub async fn git_refresh_branch(
+        &self,
+        session: &str,
+        repo: &str,
+        options: BranchRefreshOptions,
+    ) -> Result<BranchRefreshResult, ProtoError> {
+        expect(
+            self.call(Request::GitRefreshBranch {
+                session: session.into(),
+                repo: repo.into(),
+                options,
+            })
+            .await,
+            |r| match r {
+                Response::GitRefreshResult(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
     /// `def.lookup`: go to definition at 1-based `line`/`col` (`col` in chars) of `path`;
     /// `text` = the editor's unsaved content (`None` = the file on disk).
     pub async fn def_lookup(
@@ -1217,6 +1543,316 @@ impl Client {
                 _ => None,
             },
         )
+    }
+
+    // --- pull requests and agent prompts
+
+    /// `pr.status`: the checked-out branch's PR (open first, else the latest), `None` = none.
+    pub async fn pr_status(&self, session: &str, repo: &str) -> Result<Option<PrStatus>, ProtoError> {
+        let req = Request::PrStatus {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrStatus(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// `pr.gate`: review decision, checks and merge state of PR `number`.
+    pub async fn pr_gate(&self, session: &str, repo: &str, number: u64) -> Result<PrGate, ProtoError> {
+        let req = Request::PrGate {
+            session: session.into(),
+            repo: repo.into(),
+            number,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrGate(g) => Some(g),
+            _ => None,
+        })
+    }
+
+    /// `pr.find_open`: the branch's open PR (`kind: Exists`), `None` = none open.
+    pub async fn pr_find_open(
+        &self,
+        session: &str,
+        repo: &str,
+    ) -> Result<Option<PullRequestResult>, ProtoError> {
+        let req = Request::PrFindOpen {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrFound(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// `pr.remote_branches`: origin's branches, its default and the current branch.
+    pub async fn pr_remote_branches(&self, session: &str, repo: &str) -> Result<PrTargets, ProtoError> {
+        let req = Request::PrRemoteBranches {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrTargets(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    /// `pr.pending_work`: unpushed commits and uncommitted files.
+    pub async fn pr_pending_work(&self, session: &str, repo: &str) -> Result<PendingWork, ProtoError> {
+        let req = Request::PrPendingWork {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrPendingWork(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `pr.leftover`: the PR text left behind and what the branch has for `base`.
+    pub async fn pr_leftover(
+        &self,
+        session: &str,
+        repo: &str,
+        base: Option<&str>,
+    ) -> Result<PrLeftover, ProtoError> {
+        let req = Request::PrLeftover {
+            session: session.into(),
+            repo: repo.into(),
+            base: base.map(Into::into),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrLeftover(l) => Some(l),
+            _ => None,
+        })
+    }
+
+    /// `pr.reset_file`: empty the PR file before asking the agent; returns its path.
+    pub async fn pr_reset_file(&self, session: &str, repo: &str) -> Result<String, ProtoError> {
+        let req = Request::PrResetFile {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrFile { path } => Some(path),
+            _ => None,
+        })
+    }
+
+    /// `pr.drift`: HEAD, uncommitted files and the commits since `since`.
+    pub async fn pr_drift(
+        &self,
+        session: &str,
+        repo: &str,
+        since: Option<&str>,
+        allowed: Vec<String>,
+    ) -> Result<PrDrift, ProtoError> {
+        let req = Request::PrDrift {
+            session: session.into(),
+            repo: repo.into(),
+            since: since.map(Into::into),
+            allowed,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrDrift(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    /// `pr.unmerged`: work the session's base lacks ("커밋 보유"); `None` = cannot tell.
+    pub async fn pr_unmerged(
+        &self,
+        session: &str,
+        repo: &str,
+    ) -> Result<Option<UnmergedWork>, ProtoError> {
+        let req = Request::PrUnmerged {
+            session: session.into(),
+            repo: repo.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrUnmerged(u) => Some(u),
+            _ => None,
+        })
+    }
+
+    /// `pr.commit_preview`: PR text from the commits `origin/<base>` lacks (fetches).
+    pub async fn pr_commit_preview(
+        &self,
+        session: &str,
+        repo: &str,
+        base: &str,
+        push: bool,
+    ) -> Result<CommitPrPreview, ProtoError> {
+        let req = Request::PrCommitPreview {
+            session: session.into(),
+            repo: repo.into(),
+            base: base.into(),
+            push,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrCommitPreview(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `pr.commit_text`: write the PR file from the commits; returns the title.
+    pub async fn pr_commit_text(
+        &self,
+        session: &str,
+        repo: &str,
+        base: &str,
+        options: CommitPrTextOptions,
+    ) -> Result<String, ProtoError> {
+        let req = Request::PrCommitText {
+            session: session.into(),
+            repo: repo.into(),
+            base: base.into(),
+            options,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrTitle(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    /// `pr.create`: push (unless `push` false) and open the PR into `base` from the PR file.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pr_create(
+        &self,
+        session: &str,
+        repo: &str,
+        base: &str,
+        draft: bool,
+        push: bool,
+        push_sha: Option<&str>,
+        options: Option<CommitPrTextOptions>,
+    ) -> Result<PullRequestResult, ProtoError> {
+        let req = Request::PrCreate {
+            session: session.into(),
+            repo: repo.into(),
+            base: base.into(),
+            draft,
+            push,
+            push_sha: push_sha.map(Into::into),
+            options,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrCreated(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// `pr.merge`: merge PR `number` only if its head is still `sha`.
+    pub async fn pr_merge(
+        &self,
+        session: &str,
+        repo: &str,
+        number: u64,
+        sha: &str,
+        method: PrMergeMethod,
+        delete_branch: bool,
+    ) -> Result<PrMerged, ProtoError> {
+        let req = Request::PrMerge {
+            session: session.into(),
+            repo: repo.into(),
+            number,
+            sha: sha.into(),
+            method,
+            delete_branch,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrMerged(m) => Some(m),
+            _ => None,
+        })
+    }
+
+    /// `pr.close`: close open PR `number` without merging.
+    pub async fn pr_close(&self, session: &str, repo: &str, number: u64) -> Result<PrClosed, ProtoError> {
+        let req = Request::PrClose {
+            session: session.into(),
+            repo: repo.into(),
+            number,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrClosed(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// `pr.update_branch`: GitHub's "Update branch"; GitHub's message, if any.
+    pub async fn pr_update_branch(
+        &self,
+        session: &str,
+        repo: &str,
+        number: u64,
+        sha: &str,
+    ) -> Result<Option<String>, ProtoError> {
+        let req = Request::PrUpdateBranch {
+            session: session.into(),
+            repo: repo.into(),
+            number,
+            sha: sha.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::PrBranchUpdated { message } => Some(message),
+            _ => None,
+        })
+    }
+
+    /// `prompt.commit`: Desk's "커밋 맡기기" prompt for `files` (`all` = every change).
+    pub async fn prompt_commit(
+        &self,
+        session: &str,
+        repo: &str,
+        files: Vec<String>,
+        all: bool,
+    ) -> Result<String, ProtoError> {
+        let req = Request::PromptCommit {
+            session: session.into(),
+            repo: repo.into(),
+            files,
+            all,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::Prompt(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `prompt.pr`: Desk's PR prompt for `target` (names the PR file).
+    pub async fn prompt_pr(
+        &self,
+        session: &str,
+        repo: &str,
+        target: &str,
+        exclude: PrExclusions,
+    ) -> Result<String, ProtoError> {
+        let req = Request::PromptPr {
+            session: session.into(),
+            repo: repo.into(),
+            target: target.into(),
+            exclude,
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::Prompt(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `session.send_prompt`: submit `text` to the session's agent (`prompt-not-ready` while a
+    /// TUI is not at its input; `session-not-running`).
+    pub async fn send_prompt(&self, session: &str, text: &str) -> Result<(), ProtoError> {
+        let req = Request::SessionSendPrompt {
+            session: session.into(),
+            text: text.into(),
+        };
+        expect(self.call(req).await, |r| match r {
+            Response::Unit => Some(()),
+            _ => None,
+        })
     }
 }
 

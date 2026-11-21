@@ -50,6 +50,13 @@ impl AgentProvider for Claude {
         // The flags below were verified on 2.1.318 and 2.1.329.
         Some("2.1.318")
     }
+    fn prompt_input(&self) -> crate::PromptInput {
+        // A full-screen TUI: one bracketed paste, then Enter (not verified against the real
+        // CLI: no prompts are sent to it from tests).
+        crate::PromptInput::Paste {
+            submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
+        }
+    }
     fn capabilities(&self) -> Caps {
         Caps {
             accounts: true,

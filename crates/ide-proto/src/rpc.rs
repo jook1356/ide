@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 5;
+pub const PROTO_VERSION: u32 = 6;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -454,6 +454,116 @@ pub enum Request {
         sha: String,
         path: Option<String>,
     },
+    // --- local git actions (Changes / History footer)
+    /// Discard one file's uncommitted change (Desk `changes:discard`): `Untracked` is deleted,
+    /// `Added`/`Copied` removed from index and tree, `Renamed` restored to `orig_path` (and the
+    /// new path removed), anything else restored from HEAD (index and worktree).
+    GitDiscard {
+        session: String,
+        repo: String,
+        file: GitChange,
+    },
+    /// Every stash of the repository, newest first (Desk `git:listStashes`).
+    GitStashList {
+        session: String,
+        repo: String,
+    },
+    /// Stash the changes (untracked included): all, or only `paths` (literal, both sides of a
+    /// rename). Nothing to stash = `git-stash-empty` (Desk `git:stashPush`).
+    GitStashPush {
+        session: String,
+        repo: String,
+        message: String,
+        paths: Option<Vec<String>>,
+    },
+    /// Pop / apply / drop the stash with commit id `sha` (Desk `git:stashAction`).
+    GitStashAction {
+        session: String,
+        repo: String,
+        sha: String,
+        action: crate::StashAction,
+    },
+    /// History context menu action on commit `sha` (full id); needs a clean tree and no
+    /// merge/rebase in progress (Desk `git:commitAction`).
+    GitCommitAction {
+        session: String,
+        repo: String,
+        sha: String,
+        action: crate::CommitAction,
+    },
+    /// Sync button numbers; `fetch` first fetches the upstream (failures ignored).
+    /// `merged_head`: head commit of the branch's merged PR, if known (Desk `github:syncStatus`).
+    GitSyncStatus {
+        session: String,
+        repo: String,
+        fetch: bool,
+        merged_head: Option<String>,
+    },
+    /// Push the checked-out branch to origin (`-u`; `force` = `--force-with-lease`); with
+    /// `expected` push exactly that verified commit (Desk `github:push`). Returns the branch.
+    GitPush {
+        session: String,
+        repo: String,
+        force: bool,
+        expected: Option<crate::PushExpected>,
+    },
+    /// Pull the upstream into the checked-out branch (Desk `github:pull`). Returns the branch.
+    GitPull {
+        session: String,
+        repo: String,
+        mode: crate::PullMode,
+    },
+    /// Local and remote-tracking branches with their checkout holders (Desk `git:branches`,
+    /// `git:remoteTrackingBranches`, `git:branchBases`); local refs only.
+    GitBranches {
+        session: String,
+        repo: String,
+    },
+    /// `git fetch --prune` every remote, throttled per repository (Desk `git:fetchRemotes`).
+    GitFetchRemotes {
+        session: String,
+        repo: String,
+    },
+    /// Switch the worktree to local `branch`; with `remote` to that remote's branch (fetched
+    /// fresh, created locally tracking it) unless a local one exists (Desk `git:switch`,
+    /// `git:switchRemote`).
+    GitSwitchBranch {
+        session: String,
+        repo: String,
+        branch: String,
+        remote: Option<String>,
+        mode: crate::SwitchMode,
+    },
+    /// Create branch `name` from `base` (a local branch or `remote/branch`, no tracking) and
+    /// switch to it (Desk `git:createBranch`).
+    GitCreateBranch {
+        session: String,
+        repo: String,
+        name: String,
+        base: String,
+        mode: crate::SwitchMode,
+    },
+    /// 새 브랜치로 이어가기 dialog data against the session's base; `fetch` = the dialog
+    /// opening: fetch `origin/<base>` first (Desk `git:branchRefreshInfo`).
+    GitBranchRefreshInfo {
+        session: String,
+        repo: String,
+        fetch: bool,
+    },
+    /// Dry run of the picked commits (Desk `git:branchRefreshCheck`).
+    GitBranchRefreshCheck {
+        session: String,
+        repo: String,
+        commits: Vec<String>,
+        move_files: bool,
+    },
+    /// Continue on a new branch from the fresh `origin/<base>` with the picked commits; the
+    /// session worktree's branch becomes the new one (Desk `git:refreshBranch`).
+    GitRefreshBranch {
+        session: String,
+        repo: String,
+        options: crate::BranchRefreshOptions,
+    },
     /// Go to definition at `line`/`col` (1-based; `col` in chars) of `path`. `text` = the
     /// editor's current (possibly unsaved) content; `None` = read the file.
     DefLookup {
@@ -463,6 +573,137 @@ pub enum Request {
         line: u32,
         col: u32,
         text: Option<String>,
+    },
+    // --- pull requests and agent prompts
+    // GitHub through the `gh` CLI (`gh api`); every request names `(session, repo)` and runs in
+    // that worktree. See docs/changes-actions.md, "Pull requests and agent prompts".
+    /// The checked-out branch's PR (open first, else the latest closed/merged one); `None` =
+    /// none (Desk `github:prStatus`).
+    PrStatus {
+        session: String,
+        repo: String,
+    },
+    /// Review decision, checks and merge state of PR `number` (Desk `github:prGate`).
+    PrGate {
+        session: String,
+        repo: String,
+        number: u64,
+    },
+    /// Read-only lookup of the branch's open PR (`kind: Exists`), with `session_base` when its
+    /// target is not the session's base; `None` = no open PR (Desk `github:findOpenPr`).
+    PrFindOpen {
+        session: String,
+        repo: String,
+    },
+    /// origin's branches (`git ls-remote`), its default and the current branch: the PR
+    /// dialog's target list (Desk `github:remoteBranches`).
+    PrRemoteBranches {
+        session: String,
+        repo: String,
+    },
+    /// Unpushed commits and uncommitted files, asked before the PR dialog (Desk
+    /// `github:pendingWork`).
+    PrPendingWork {
+        session: String,
+        repo: String,
+    },
+    /// The PR text left behind and what the branch has for `base` (Desk `github:prLeftover`).
+    PrLeftover {
+        session: String,
+        repo: String,
+        base: Option<String>,
+    },
+    /// Remove a stale PR file (+ its meta) and create its folder; returns the PR file's path
+    /// (Desk `github:prFilePath` + `github:resetPrFile`). Workspace sessions only.
+    PrResetFile {
+        session: String,
+        repo: String,
+    },
+    /// HEAD, uncommitted files and the commits since `since` (Desk `github:prDrift`).
+    PrDrift {
+        session: String,
+        repo: String,
+        since: Option<String>,
+        allowed: Vec<String>,
+    },
+    /// Work the session's base does not have yet ("커밋 보유", Desk `github:unmerged`);
+    /// `None` = cannot tell (no `origin/<base>`).
+    PrUnmerged {
+        session: String,
+        repo: String,
+    },
+    /// Read-only PR text from committed history against `origin/<base>` (fetches the base;
+    /// `push` false = the fetched `origin/<branch>` instead of HEAD) (Desk
+    /// `github:commitPrPreview`).
+    PrCommitPreview {
+        session: String,
+        repo: String,
+        base: String,
+        push: bool,
+    },
+    /// Write the PR file from the commits (pins checked); returns the title (Desk
+    /// `github:commitPrText`).
+    PrCommitText {
+        session: String,
+        repo: String,
+        base: String,
+        options: crate::CommitPrTextOptions,
+    },
+    /// Push (unless `push` false) and open the PR into `base` from the PR file (Desk
+    /// `github:createPr`). `push_sha`: push that commit of the branch instead of HEAD;
+    /// `options`: a commit-based request's pins, revalidated.
+    PrCreate {
+        session: String,
+        repo: String,
+        base: String,
+        draft: bool,
+        push: bool,
+        push_sha: Option<String>,
+        options: Option<crate::CommitPrTextOptions>,
+    },
+    /// Merge PR `number` only if its head is still `sha` (Desk `github:mergePr`).
+    PrMerge {
+        session: String,
+        repo: String,
+        number: u64,
+        sha: String,
+        method: crate::PrMergeMethod,
+        delete_branch: bool,
+    },
+    /// Close open PR `number` without merging (Desk `github:closePr`).
+    PrClose {
+        session: String,
+        repo: String,
+        number: u64,
+    },
+    /// GitHub's "Update branch" for PR `number`, expecting head `sha` (Desk
+    /// `github:updatePrBranch`).
+    PrUpdateBranch {
+        session: String,
+        repo: String,
+        number: u64,
+        sha: String,
+    },
+    /// Desk's commit prompt ("커밋 맡기기") for `files` (`all` = every change).
+    PromptCommit {
+        session: String,
+        repo: String,
+        files: Vec<String>,
+        all: bool,
+    },
+    /// Desk's PR prompt for target `target` (the PR file path included).
+    PromptPr {
+        session: String,
+        repo: String,
+        target: String,
+        exclude: crate::PrExclusions,
+    },
+    /// Submit `text` to the session's agent the way its provider takes a prompt (bracketed
+    /// paste + Enter for TUIs, typed lines for shells); `prompt-not-ready` when the TUI is not
+    /// at its input yet.
+    SessionSendPrompt {
+        session: String,
+        text: String,
     },
 }
 
@@ -527,7 +768,42 @@ impl Request {
             Request::GitUnpushed { .. } => "git.unpushed",
             Request::GitCommitFiles { .. } => "git.commit_files",
             Request::GitCommitDiff { .. } => "git.commit_diff",
+            // --- local git actions (Changes / History footer)
+            Request::GitDiscard { .. } => "git.discard",
+            Request::GitStashList { .. } => "git.stash_list",
+            Request::GitStashPush { .. } => "git.stash_push",
+            Request::GitStashAction { .. } => "git.stash_action",
+            Request::GitCommitAction { .. } => "git.commit_action",
+            Request::GitSyncStatus { .. } => "git.sync_status",
+            Request::GitPush { .. } => "git.push",
+            Request::GitPull { .. } => "git.pull",
+            Request::GitBranches { .. } => "git.branches",
+            Request::GitFetchRemotes { .. } => "git.fetch_remotes",
+            Request::GitSwitchBranch { .. } => "git.switch_branch",
+            Request::GitCreateBranch { .. } => "git.create_branch",
+            Request::GitBranchRefreshInfo { .. } => "git.branch_refresh_info",
+            Request::GitBranchRefreshCheck { .. } => "git.branch_refresh_check",
+            Request::GitRefreshBranch { .. } => "git.refresh_branch",
             Request::DefLookup { .. } => "def.lookup",
+            // --- pull requests and agent prompts
+            Request::PrStatus { .. } => "pr.status",
+            Request::PrGate { .. } => "pr.gate",
+            Request::PrFindOpen { .. } => "pr.find_open",
+            Request::PrRemoteBranches { .. } => "pr.remote_branches",
+            Request::PrPendingWork { .. } => "pr.pending_work",
+            Request::PrLeftover { .. } => "pr.leftover",
+            Request::PrResetFile { .. } => "pr.reset_file",
+            Request::PrDrift { .. } => "pr.drift",
+            Request::PrUnmerged { .. } => "pr.unmerged",
+            Request::PrCommitPreview { .. } => "pr.commit_preview",
+            Request::PrCommitText { .. } => "pr.commit_text",
+            Request::PrCreate { .. } => "pr.create",
+            Request::PrMerge { .. } => "pr.merge",
+            Request::PrClose { .. } => "pr.close",
+            Request::PrUpdateBranch { .. } => "pr.update_branch",
+            Request::PromptCommit { .. } => "prompt.commit",
+            Request::PromptPr { .. } => "prompt.pr",
+            Request::SessionSendPrompt { .. } => "session.send_prompt",
         }
     }
 }
@@ -584,7 +860,59 @@ pub enum Response {
     GitUnpushed(Vec<String>),
     /// `git.commit_files`.
     GitChanges(Vec<GitChange>),
+    // --- local git actions (Changes / History footer)
+    /// `git.stash_list`.
+    GitStashes(Vec<crate::StashEntry>),
+    /// `git.stash_action`.
+    GitStashResult(crate::StashActionResult),
+    /// `git.sync_status`.
+    GitSyncStatus(crate::SyncStatus),
+    /// `git.push` / `git.pull`: the branch pushed / pulled.
+    GitBranchName(String),
+    /// `git.branches`.
+    GitBranches(crate::GitBranches),
+    /// `git.fetch_remotes`.
+    GitFetchStatus(crate::RemoteFetchStatus),
+    /// `git.branch_refresh_info`.
+    GitRefreshInfo(crate::BranchRefreshInfo),
+    /// `git.branch_refresh_check`.
+    GitRefreshCheck(crate::BranchRefreshCheck),
+    /// `git.refresh_branch`.
+    GitRefreshResult(crate::BranchRefreshResult),
     Def(DefResult),
+    // --- pull requests and agent prompts
+    /// `pr.status` (`None` = the branch has no PR).
+    PrStatus(Option<crate::PrStatus>),
+    /// `pr.gate`.
+    PrGate(crate::PrGate),
+    /// `pr.find_open` (`None` = no open PR).
+    PrFound(Option<crate::PullRequestResult>),
+    /// `pr.remote_branches`.
+    PrTargets(crate::PrTargets),
+    /// `pr.pending_work`.
+    PrPendingWork(crate::PendingWork),
+    /// `pr.leftover`.
+    PrLeftover(crate::PrLeftover),
+    /// `pr.reset_file`: the PR file's server path.
+    PrFile { path: String },
+    /// `pr.drift`.
+    PrDrift(crate::PrDrift),
+    /// `pr.unmerged` (`None` = cannot tell).
+    PrUnmerged(Option<crate::UnmergedWork>),
+    /// `pr.commit_preview`.
+    PrCommitPreview(crate::CommitPrPreview),
+    /// `pr.commit_text`: the title written.
+    PrTitle(String),
+    /// `pr.create`.
+    PrCreated(crate::PullRequestResult),
+    /// `pr.merge`.
+    PrMerged(crate::PrMerged),
+    /// `pr.close`.
+    PrClosed(crate::PrClosed),
+    /// `pr.update_branch`: GitHub's message (`None` = none given).
+    PrBranchUpdated { message: Option<String> },
+    /// `prompt.commit` / `prompt.pr`: the text to send.
+    Prompt(String),
 }
 
 /// Server -> client event.
@@ -793,6 +1121,90 @@ mod tests {
                 id: 10,
                 result: Ok(Response::GitUnpushed(vec!["b".repeat(40)])),
             },
+            // --- local git actions (Changes / History footer)
+            RpcMessage::Request {
+                id: 11,
+                req: Request::GitCommitAction {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    sha: "c".repeat(40),
+                    action: crate::CommitAction::Branch {
+                        name: "기능/x".into(),
+                    },
+                },
+            },
+            RpcMessage::Request {
+                id: 12,
+                req: Request::GitStashPush {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    message: "메모".into(),
+                    paths: Some(vec!["a.txt".into(), "한글.txt".into()]),
+                },
+            },
+            RpcMessage::Response {
+                id: 13,
+                result: Ok(Response::GitStashes(vec![crate::StashEntry {
+                    sha: "d".repeat(40),
+                    message: String::new(),
+                    branch: "main".into(),
+                    auto: true,
+                    date: 1_700_000_000,
+                    files: vec![GitChange {
+                        path: "n.txt".into(),
+                        orig_path: None,
+                        kind: crate::ChangeKind::Untracked,
+                    }],
+                }])),
+            },
+            RpcMessage::Response {
+                id: 14,
+                result: Ok(Response::GitBranches(crate::GitBranches {
+                    current: Some("main".into()),
+                    local: vec![crate::LocalBranch {
+                        name: "f".into(),
+                        checkout: crate::BranchCheckout::Worktree("C:/w/f".into()),
+                    }],
+                    remote: vec![crate::RemoteBranch {
+                        remote: "origin".into(),
+                        branch: "f".into(),
+                        short_ref: "origin/f".into(),
+                        has_local: true,
+                    }],
+                })),
+            },
+            RpcMessage::Request {
+                id: 15,
+                req: Request::GitRefreshBranch {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    options: crate::BranchRefreshOptions {
+                        name: None,
+                        commits: vec!["e".repeat(40)],
+                        move_files: true,
+                    },
+                },
+            },
+            RpcMessage::Response {
+                id: 16,
+                result: Ok(Response::GitRefreshCheck(crate::BranchRefreshCheck {
+                    conflict: Some(crate::RefreshConflict {
+                        sha: "e".repeat(40),
+                        subject: "x".into(),
+                        files: vec!["a".into()],
+                    }),
+                    skipped: vec![],
+                    files_conflict: vec!["b".into()],
+                })),
+            },
+            RpcMessage::Response {
+                id: 17,
+                result: Ok(Response::GitSyncStatus(crate::SyncStatus {
+                    ahead: 2,
+                    upstream: Some("origin/main".into()),
+                    ..Default::default()
+                })),
+            },
         ];
         for m in msgs {
             let b = m.encode();
@@ -811,5 +1223,98 @@ mod tests {
             RpcMessage::decode(b"\xc1").unwrap_err().id,
             "bad-message".to_string()
         );
+    }
+
+    // --- pull requests and agent prompts
+    #[test]
+    fn pr_messages_round_trip() {
+        let pr = crate::PrStatus {
+            number: 12,
+            url: "https://github.com/acme/w/pull/12".into(),
+            title: "기능 추가".into(),
+            state: crate::PrState::Open,
+            draft: false,
+            head_ref: "feature".into(),
+            head_sha: "c".repeat(40),
+            base_ref: "main".into(),
+            mergeable: None,
+            mergeable_state: "unknown".into(),
+            approved: true,
+            changes_requested: false,
+        };
+        let msgs = vec![
+            RpcMessage::Request {
+                id: 1,
+                req: Request::PrCreate {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    base: "main".into(),
+                    draft: true,
+                    push: false,
+                    push_sha: Some("d".repeat(40)),
+                    options: Some(crate::CommitPrTextOptions {
+                        title: Some("제목".into()),
+                        push: Some(false),
+                        ..Default::default()
+                    }),
+                },
+            },
+            RpcMessage::Request {
+                id: 2,
+                req: Request::PrMerge {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    number: 12,
+                    sha: "c".repeat(40),
+                    method: crate::PrMergeMethod::Rebase,
+                    delete_branch: true,
+                },
+            },
+            RpcMessage::Request {
+                id: 3,
+                req: Request::SessionSendPrompt {
+                    session: "s".into(),
+                    text: "[커밋 요청]\n- a".into(),
+                },
+            },
+            RpcMessage::Response {
+                id: 4,
+                result: Ok(Response::PrStatus(Some(pr))),
+            },
+            RpcMessage::Response {
+                id: 5,
+                result: Ok(Response::PrCreated(crate::PullRequestResult {
+                    kind: crate::PrResultKind::Page,
+                    url: "https://github.com/acme/w/compare/main...feature?expand=1".into(),
+                    title: "t".into(),
+                    number: None,
+                    reason: Some(ProtoError::new("gh-auth").arg("host", "github.com")),
+                    base: None,
+                    mergeable_state: None,
+                    session_base: None,
+                })),
+            },
+            RpcMessage::Response {
+                id: 6,
+                result: Ok(Response::PrGate(crate::PrGate {
+                    head_sha: "c".repeat(40),
+                    review_decision: None,
+                    merge_state: "BLOCKED".into(),
+                    checks: vec![crate::PrCheck {
+                        name: "ci".into(),
+                        state: crate::PrCheckState::Pending,
+                        required: true,
+                    }],
+                })),
+            },
+            RpcMessage::Response {
+                id: 7,
+                result: Ok(Response::PrBranchUpdated { message: None }),
+            },
+        ];
+        for m in msgs {
+            let b = m.encode();
+            assert_eq!(RpcMessage::decode(&b).unwrap(), m);
+        }
     }
 }

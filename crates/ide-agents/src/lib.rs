@@ -37,6 +37,7 @@ pub mod declarative;
 mod detect;
 pub mod fallback;
 mod plan;
+mod prompt;
 mod registry;
 mod shell;
 mod skills;
@@ -52,6 +53,9 @@ pub use codex::Codex;
 pub use declarative::{DeclarativeProvider, DeclarativeSpec};
 pub use detect::{Detection, parse_version, version_at_least};
 pub use plan::LaunchPlan;
+pub use prompt::{
+    PASTE_SUBMIT_DELAY_MS, PromptInput, PromptRefusal, PromptWrite, clean_prompt, prompt_writes,
+};
 pub use registry::Providers;
 pub use shell::Shell;
 pub use skills::Skill;
@@ -191,6 +195,11 @@ pub trait AgentProvider: Send + Sync {
     }
     /// What this provider supports.
     fn capabilities(&self) -> Caps;
+    /// How the CLI takes a prompt typed into its terminal (`session.send_prompt`). Default:
+    /// typed lines (shells, plain programs).
+    fn prompt_input(&self) -> PromptInput {
+        PromptInput::Lines
+    }
 
     // ---- Accounts ----
 

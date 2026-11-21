@@ -42,6 +42,7 @@ pub mod launch;
 pub mod migrate;
 pub mod ops;
 pub mod paths;
+pub mod prompts;
 pub mod registry;
 pub mod repo;
 pub mod session;
@@ -75,4 +76,6 @@ pub use session::{
     SessionWorktree,
 };
 pub use slug::{slugify, validate_slug};
+// --- pull requests and agent prompts
+pub use prompts::{commit_prompt, pr_file_path, pr_prompt};
 pub use worktree::{BRANCH_PREFIX, Worktree, WorktreeInfo, worktree_exists};

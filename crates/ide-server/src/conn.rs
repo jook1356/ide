@@ -229,6 +229,9 @@ where
                 "search",
                 "git",
                 "def",
+                // --- pull requests and agent prompts
+                "pr",
+                "send-prompt",
             ]
             .map(String::from)
             .to_vec(),

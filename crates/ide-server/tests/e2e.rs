@@ -608,7 +608,10 @@ async fn handshake_errors() {
                     "browse-pick",
                     "search",
                     "git",
-                    "def"
+                    "def",
+                    // --- pull requests and agent prompts
+                    "pr",
+                    "send-prompt"
                 ]
             );
         }

@@ -10,7 +10,9 @@ pub mod bin;
 pub mod error;
 pub mod files;
 pub mod frame;
+pub mod git_actions;
 pub mod mux;
+pub mod pr;
 pub mod rpc;
 pub mod term;
 
@@ -25,6 +27,12 @@ pub use files::{
     FsEntry, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus,
     LineKind, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
+pub use git_actions::{
+    BranchCheckout, BranchCommit, BranchRefreshCheck, BranchRefreshInfo, BranchRefreshOptions,
+    BranchRefreshResult, CommitAction, GitBranches, LocalBranch, PullMode, PushExpected,
+    RefreshConflict, RemoteBranch, RemoteFetchStatus, STASH_TAG, StashAction, StashActionResult,
+    StashEntry, StatusEntry, SwitchMode, SyncStatus,
+};
 pub use frame::{Frame, FrameError, FrameKind, MAX_FRAME_LEN, MAX_PAYLOAD};
 pub use mux::{
     DEFAULT_WINDOW, Mux, MuxConfig, MuxError, Role, RpcReceiver, Stream, StreamReceiver,
@@ -35,6 +43,15 @@ pub use rpc::{
     ResumeToken, RpcMessage, SessionInfo, SessionState, UserInfo, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};
+// --- pull requests and agent prompts
+pub use pr::{
+    CommitPrPreview, CommitPrTextOptions, DriftCommit, LeftoverMatch, MERGE_MAX_WAIT_SECS,
+    MERGE_POLL_SECS, MergeBlocker, MergeStep, MergeStop, PendingWork, PrCheck, PrCheckState,
+    PrClosed, PrCommit, PrDrift, PrExclusions, PrGate, PrLeftover, PrLeftoverFile, PrMergeMethod,
+    PrMerged, PrRecheckChange, PrResultKind, PrState, PrStatus, PrTargets, PrWorkFile,
+    PullRequestResult, UNEXPLAINED_BLOCK_SECS, UnmergedWork, choose_pr_target, drift_change,
+    effective_exclusions, merge_after_create_step, merge_blocker,
+};
 
 /// Build version of this crate (sent in `Hello`/`Welcome`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -46,6 +46,8 @@ pub trait AgentProvider: Send + Sync {
     fn program_path(&self, env: &HostEnv) -> Result<PathBuf>;     // default: PATH lookup
     fn detect(&self, env: &HostEnv) -> Detection;                 // default: path + --version
     fn capabilities(&self) -> Caps;
+    fn prompt_input(&self) -> PromptInput { Lines }        // session.send_prompt: Paste{..} for TUIs
+                                                           // (claude, codex), see changes-actions.md
     // Accounts
     fn account_env(&self, acct: &AccountDir) -> Vec<(String, String)> { vec![] }
     fn login_args(&self) -> Option<Vec<String>> { None }          // see login_spec()

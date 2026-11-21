@@ -276,6 +276,16 @@ impl TermHost {
         }
     }
 
+    /// The program has bracketed paste on (`ESC[?2004h`): a TUI waiting at its input.
+    pub fn bracketed_paste(&self) -> bool {
+        self.core
+            .lock()
+            .unwrap()
+            .term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
     /// Resize the server-side Term and the PTY (the most recent caller wins).
     pub fn resize(&self, cols: u16, rows: u16) {
         let cols = cols.max(2);

@@ -34,6 +34,22 @@ pub use ide_proto::{
     ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding,
     TextSearch, UserInfo, Welcome,
 };
+// --- local git actions (Changes / History footer)
+pub use ide_proto::git_actions::{
+    BranchCheckout, BranchCommit, BranchRefreshCheck, BranchRefreshInfo, BranchRefreshOptions,
+    BranchRefreshResult, CommitAction, GitBranches, LocalBranch, PullMode, PushExpected,
+    RefreshConflict, RemoteBranch, RemoteFetchStatus, STASH_TAG, StashAction, StashActionResult,
+    StashEntry, StatusEntry, SwitchMode, SyncStatus,
+};
+// --- pull requests and agent prompts
+pub use ide_proto::pr::{
+    CommitPrPreview, CommitPrTextOptions, DriftCommit, LeftoverMatch, MERGE_MAX_WAIT_SECS,
+    MERGE_POLL_SECS, MergeBlocker, MergeStep, MergeStop, PendingWork, PrCheck, PrCheckState,
+    PrClosed, PrCommit, PrDrift, PrExclusions, PrGate, PrLeftover, PrLeftoverFile, PrMergeMethod,
+    PrMerged, PrRecheckChange, PrResultKind, PrState, PrStatus, PrTargets, PrWorkFile,
+    PullRequestResult, UNEXPLAINED_BLOCK_SECS, UnmergedWork, choose_pr_target, drift_change,
+    effective_exclusions, merge_after_create_step, merge_blocker,
+};
 pub use transport::{
     AsyncIo, ConnectFuture, Connection, LocalChild, Memory, SERVER_BIN_ENV, Ssh, Switchable,
     Transport,
