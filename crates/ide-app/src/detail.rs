@@ -366,6 +366,10 @@ pub struct Detail {
     /// Shown state may be outdated (not watched for a while, reconnect): refresh when shown.
     pub stale: bool,
     pub toast: Option<(String, Instant)>,
+    /// Commit / sync / PR footer under Changes and History (`footer.rs`).
+    pub footer: crate::footer::Footer,
+    /// Checkboxes, stash, discard, commit menu and branch picker (`changes_actions.rs`).
+    pub acts: crate::changes_actions::ChangesActs,
 }
 
 impl Detail {
@@ -413,6 +417,8 @@ impl Detail {
             watched: BTreeSet::new(),
             stale: false,
             toast: None,
+            footer: Default::default(),
+            acts: Default::default(),
         }
     }
 
@@ -467,6 +473,7 @@ impl Detail {
         self.status_loaded = false;
         self.status_error = None;
         self.history = HistoryState::default();
+        self.acts = Default::default();
     }
 
     /// Show a message for a few seconds.
@@ -564,6 +571,8 @@ pub enum DetailMsg {
     CommitFilesLoaded(String, String, Result<Vec<GitChange>, ProtoError>),
     /// Open a commit's diff (whole commit, or one of its files).
     OpenCommit(String, Option<String>),
+    /// Changes / History actions (`changes_actions.rs`).
+    Acts(crate::changes_actions::ActMsg),
 }
 
 // ---------------------------------------------------------------------------------- helpers
@@ -859,7 +868,7 @@ impl App {
 
     /// (Re)load History of the picked repo: every commit shown so far (at least a page) and
     /// the unpushed marks (Desk's `loadRepositoryHistory`).
-    fn load_history(&mut self, sid: &str) -> Task<Message> {
+    pub(crate) fn load_history(&mut self, sid: &str) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
@@ -928,7 +937,7 @@ impl App {
     }
 
     /// Git status of the picked repo (the Changes list).
-    fn load_status(&self, sid: &str) -> Task<Message> {
+    pub(crate) fn load_status(&self, sid: &str) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
@@ -1404,6 +1413,7 @@ impl App {
                     None => task,
                 }
             }
+            DetailMsg::Acts(m) => self.on_changes_act(sid, m),
             DetailMsg::Status(repo, r) => {
                 let d = self.detail_mut(sid).expect("session");
                 if d.repo != repo {
@@ -1425,10 +1435,11 @@ impl App {
                                 .collect(),
                         );
                         d.status_error = None;
+                        d.acts.on_status(&s);
                     }
                     Err(e) => d.status_error = Some(i18n::proto_error(&e)),
                 }
-                Task::none()
+                self.after_status(sid)
             }
             DetailMsg::Code(path, cm) => {
                 let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) else {

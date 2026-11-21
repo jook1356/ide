@@ -205,6 +205,48 @@ impl ChangesList {
         .boxed()
     }
 
+    /// Like [`Self::view`], but the owner draws the file rows (`entry(group, index, entry,
+    /// selected)`, e.g. with checkboxes and row actions in its own message type); group headers
+    /// and scrolling stay here and are mapped with `map`.
+    pub fn view_with<'a, M: 'static>(
+        &'a self,
+        entry: impl Fn(ChangeGroup, usize, &'a ChangeEntry, bool) -> Element<'a, M> + 'a,
+        map: impl Fn(ChangesMessage) -> M + Clone + 'a,
+    ) -> Element<'a, M> {
+        if self.rows.is_empty() {
+            return self.view().map(map).boxed();
+        }
+        let on_scroll = {
+            let map = map.clone();
+            move |v| map(ChangesMessage::Scrolled(v))
+        };
+        container(self.list.view(
+            self.rows.len(),
+            ROW_H,
+            None,
+            move |i| match self.rows[i] {
+                Row::Header(_) => self.row_view(i).map(map.clone()).boxed(),
+                Row::Entry(g, k) => {
+                    let e = &self.groups[g.index()][k];
+                    let selected = self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|(sg, p)| *sg == g && *p == e.path);
+                    iced::widget::column![
+                        entry(g, k, e, selected),
+                        container(space()).width(Length::Fill).height(1).style(theme::bg(theme::BORDER))
+                    ]
+                    .boxed()
+                }
+            },
+            on_scroll,
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::bg(theme::PANEL))
+        .boxed()
+    }
+
     fn row_view(&self, i: usize) -> Element<'_, ChangesMessage> {
         match self.rows[i] {
             Row::Header(g) => {

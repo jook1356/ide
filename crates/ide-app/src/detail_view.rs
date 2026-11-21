@@ -3,14 +3,14 @@
 //! on top).
 
 use iced::widget::{
-    Column, button, column, container, hover, pick_list, popover, row, scrollable, space, stack,
+    Column, button, column, container, hover, popover, row, scrollable, space, stack,
     text, text_input,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _};
 use ide_views::icons;
 use ide_web::WebViewWidget;
 
-use crate::app::{App, Choice, Live, Message, URL_ID};
+use crate::app::{App, Live, Message, URL_ID};
 use crate::detail::{
     DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SIDE_W, SideTab, file_name, parent,
 };
@@ -552,7 +552,7 @@ impl App {
         };
         // Hermes Desk order: Changes | History | Explore. History's badge: commits not pushed
         // to a remote yet.
-        let changed = d.changes.total();
+        let changed = d.changed_count();
         let tabs = container(row![
             tab(
                 SideTab::Changes,
@@ -578,31 +578,8 @@ impl App {
                 message_body(tr::no_repos_in_session(), false),
             ]
             .boxed(),
-            SideTab::Changes => {
-                let s = sid.clone();
-                let head = container(
-                    text(match &d.status_error {
-                        Some(e) => e.clone(),
-                        None => tr::changes_count(i18n::count(d.changes.total())),
-                    })
-                    .size(11)
-                    .color(if d.status_error.is_some() {
-                        style::RED
-                    } else {
-                        style::DIM
-                    }),
-                )
-                .padding([6, 10]);
-                column![
-                    self.repo_selector(live),
-                    head,
-                    d.changes
-                        .view()
-                        .map(move |m| Message::Detail(s.clone(), DetailMsg::Changes(m)))
-                        .boxed(),
-                ]
-                .boxed()
-            }
+            // Checkboxes, stash, discard, reveal: `changes_view.rs`.
+            SideTab::Changes => column![self.repo_selector(live), self.changes_tab(live)].boxed(),
             SideTab::History => column![self.repo_selector(live), self.history_list(live)].boxed(),
             SideTab::Explore => column![
                 self.repo_selector(live),
@@ -621,7 +598,8 @@ impl App {
             ]
             .boxed(),
         };
-        container(column![tabs, hline(), content])
+        // Commit / sync / PR footer under Changes and History (`footer_view.rs`).
+        container(column![tabs, hline(), container(content).height(Fill), self.footer_section(live)])
             .width(SIDE_W)
             .height(Fill)
             .style(style::bg(style::SIDEBAR))
@@ -631,36 +609,21 @@ impl App {
     /// Hermes Desk's Changes-panel header (`BranchSelect`): `repo / branch` of the shown repo,
     /// a dropdown of the session's repos, and the session's repo settings (⚙: attach / detach).
     fn repo_selector<'a>(&'a self, live: &'a Live) -> El<'a> {
-        let d = &live.detail;
         let sid = live.info.id.clone();
-        let choices: Vec<Choice> = live
-            .info
-            .repos
-            .iter()
-            .map(|r| Choice {
-                key: r.repo.clone(),
-                label: format!("{} / {}", r.name, r.branch),
-            })
-            .collect();
-        let selected = choices.iter().find(|c| c.key == d.repo).cloned();
-        let picker: El<'a> = if choices.is_empty() {
-            text(tr::no_repos())
-                .size(12)
-                .color(style::DIM)
-                .width(Fill)
-                .boxed()
+        // Desk's `repo / branch` button and popover (repos, branches): `changes_view.rs`.
+        let picker: El<'a> = if live.info.repos.is_empty() {
+            row![
+                crate::icons::icon(crate::icons::Icon::GitBranch, 14.0, style::DIM),
+                text(tr::no_repos()).size(12).color(style::DIM).width(Fill),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .boxed()
         } else {
-            let s = sid.clone();
-            pick_list(selected, choices, |c: &Choice| c.label.clone())
-                .on_select(move |c: Choice| Message::Detail(s.clone(), DetailMsg::PickRepo(c.key)))
-                .text_size(12)
-                .padding([3, 6])
-                .width(Fill)
-                .boxed()
+            self.repo_branch_picker(live)
         };
         container(
             row![
-                crate::icons::icon(crate::icons::Icon::GitBranch, 14.0, style::DIM),
                 picker,
                 icon_button(
                     I_SETTINGS,
@@ -983,7 +946,7 @@ impl App {
         }
         for c in &h.commits {
             let expanded = h.expanded.contains(&c.sha);
-            list = list.push(commit_row(
+            let row_el = commit_row(
                 c,
                 h.unpushed.contains(&c.sha),
                 expanded,
@@ -991,18 +954,30 @@ impl App {
                 now,
                 m(DetailMsg::OpenCommit(c.sha.clone(), None)),
                 m(DetailMsg::ToggleCommit(c.sha.clone())),
-            ));
+            );
+            // Right-click: Desk's commit context menu (`changes_view.rs`).
+            list = list.push(self.commit_menu_wrap(live, c, row_el));
             if !expanded {
                 continue;
             }
             match h.files.get(&c.sha) {
                 Some(CommitFiles::Loaded(files)) => {
                     for f in files {
-                        list = list.push(commit_file_row(
+                        let file_row = commit_file_row(
                             f,
                             d.active == commit_key(&c.sha, Some(&f.path)),
                             m(DetailMsg::OpenCommit(c.sha.clone(), Some(f.path.clone()))),
-                        ));
+                        );
+                        // Desk: a reveal button on hover, except for deleted files.
+                        list = list.push(if f.kind == ide_client::ChangeKind::Deleted {
+                            file_row
+                        } else {
+                            crate::changes_view::row_actions(
+                                file_row,
+                                vec![crate::changes_view::reveal_button(&sid, &f.path)],
+                                12.0 + 16.0 + 8.0,
+                            )
+                        });
                     }
                 }
                 status => {

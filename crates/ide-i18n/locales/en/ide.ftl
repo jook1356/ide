@@ -514,3 +514,544 @@ sort-desc = Descending
 sort-move-up = Raise priority
 sort-move-down = Lower priority
 sort-remove = Remove criterion
+
+## Changes tab actions (Hermes Desk ChangesPanel / StashSection / CommitContextMenu / BranchSelect)
+chg-select-all = Select all
+chg-stash-all-tip = Stash changes (stash)
+chg-stash-checked-tip = { $count ->
+    [one] Stash 1 checked file (stash)
+   *[other] Stash { $count } checked files (stash)
+}
+chg-stash-checked-body = { $count ->
+    [one] Stash the checked file
+   *[other] Stash the { $count } checked files
+}
+chg-stash-all-body = { $count ->
+    [one] Stash the 1 change
+   *[other] Stash all { $count } changes
+}
+chg-stash-memo = Note (optional)
+chg-stash-untracked = New (untracked) files are stashed too
+chg-stash-confirm = Stash
+chg-stash-done = { $count ->
+    [one] Stashed 1 change
+   *[other] Stashed { $count } changes
+}
+chg-stash-failed = Stash failed: { $error }
+chg-discard-tip = Discard changes (back to the last commit)
+chg-reveal = Show in Explore
+chg-discard = Discard changes
+chg-discard-checked = { $count ->
+    [one] Discard all checked files (1)
+   *[other] Discard all checked files ({ $count })
+}
+chg-discard-body = The uncommitted changes of these files go back to the last commit. Discarded changes cannot be recovered.
+chg-discard-new = New files will be deleted.
+chg-discard-done = { $count ->
+    [one] Discarded the changes of 1 file
+   *[other] Discarded the changes of { $count } files
+}
+chg-discard-failed = Some files could not be reverted:
+    { $error }
+chg-stash-title = Stash
+chg-stash-auto = Stashed when switching branches
+chg-stash-no-memo = No note
+chg-stash-meta = { $count ->
+    [one] 1 file · { $time }
+   *[other] { $count } files · { $time }
+}
+chg-no-branch = no branch
+chg-stash-pop-tip = Pop: restore the changes and remove them from the stash
+chg-stash-apply-tip = Apply: restore the changes and keep them in the stash
+chg-stash-drop-tip = Drop
+chg-stash-popped = Popped the stash
+chg-stash-applied = Applied the stash
+chg-stash-dropped = Dropped the stash
+chg-stash-pop-failed = Pop failed: { $error }
+chg-stash-apply-failed = Apply failed: { $error }
+chg-stash-drop-failed = Drop failed: { $error }
+chg-stash-conflicts = { $count ->
+    [one] 1 file conflicted. Resolve it in Changes (the stash was kept).
+   *[other] { $count } files conflicted. Resolve them in Changes (the stash was kept).
+}
+chg-stash-others = { $count ->
+    [one] Show 1 stash of other branches
+   *[other] Show { $count } stashes of other branches
+}
+chg-stash-mine = Show this branch's only
+chg-stash-drop-title = Drop stash
+chg-stash-drop-body = { $count ->
+    [one] Drops “{ $title }” with its change. This cannot be undone.
+   *[other] Drops “{ $title }” with its { $count } changes. This cannot be undone.
+}
+chg-stash-drop = Drop
+chg-copy-sha = Copy SHA
+chg-copy-subject = Copy commit subject
+chg-copied-sha = Copied the commit SHA
+chg-copied-subject = Copied the commit subject
+chg-copy-failed = Copy failed
+chg-commit-checkout = Check out this commit (detached HEAD)
+chg-commit-branch = Create a branch from this commit
+chg-commit-revert = Revert this commit (revert)
+chg-commit-cherry-pick = Apply to the current branch (cherry-pick)
+chg-commit-checkout-desc = Switches to a detached HEAD that belongs to no branch. Create a branch first for new work.
+chg-commit-branch-desc = Creates a new local branch at the selected commit and switches to it. No remote tracking branch is set.
+chg-commit-revert-desc = Adds a new commit to the current branch that undoes the selected commit. Existing history is not rewritten.
+chg-commit-cherry-pick-desc = Applies the selected commit's changes to the current branch as a new commit.
+chg-commit-target = Target: { $path }
+chg-commit-branch-name = New branch name
+chg-commit-warning = Nothing runs while there are uncommitted or untracked files or a merge / rebase / cherry-pick / revert in progress. Reverting or cherry-picking merge commits is not supported. If a conflict happens, resolve or abort the git operation outside and try again.
+chg-commit-run = Confirm and run
+chg-commit-done = Git operation completed
+chg-refresh = Refresh repository state
+chg-picker-repos = Repos
+chg-picker-branches = Branches
+chg-new-branch = New branch
+chg-branch-search = Search branches
+chg-local = Local
+chg-remote = Remote
+chg-more-rows = { $count ->
+    [one] 1 more — narrow it down with the search
+   *[other] { $count } more — narrow it down with the search
+}
+chg-fetch-failed = Couldn't fetch the remote list (check authentication)
+chg-in-use-main = Also checked out in the main repo ({ $path }) — you can switch to it
+chg-in-use-session = In use by session { $session }, so you can't switch to it
+chg-in-use-path = In use at { $path }, so you can't switch to it
+chg-remote-tip = Remote branch — fetched, then switched to
+chg-switch-title = Switch branch
+chg-switch-body = Switches this session's worktree: { $from } → { $to }
+chg-switch-remote-body = Fetches the remote branch { $remote }/{ $branch } as a local branch of the same name and switches this session's worktree: { $from } → { $branch }
+chg-dirty = { $count ->
+    [one] 1 uncommitted change
+   *[other] { $count } uncommitted changes
+}
+chg-mode-carry = Bring them along
+chg-mode-stash = Stash on the current branch
+chg-mode-carry-note = Moves the changes as they are (no switch on a conflict)
+chg-mode-stash-note = Stashes them on the current branch (restore them when you come back)
+chg-switch-agent-note = If the agent is working, the files it works on change. Switch while the conversation is idle.
+chg-switch-fetching = Fetching and switching… ({ $remote }/{ $branch })
+chg-switch = Switch
+chg-switched = Switched branch: { $branch }
+chg-switched-stash = Stashed the changes and switched branch: { $from } → { $to }
+chg-switched-remote = Fetched the remote branch and switched: { $remote }/{ $branch }
+chg-switch-failed = Switching branches failed: { $error }
+chg-switch-remote-failed = Switching to the remote branch failed: { $error }
+chg-branch-name = Branch name
+chg-branch-taken = This branch already exists
+chg-base-branch = Base branch
+chg-created = Created a new branch and switched to it: { $base } → { $name }
+chg-create-failed = Creating the branch failed: { $error }
+err-git-bad-branch = Not a valid branch name: { $name }
+err-git-branch-exists = Branch { $name } already exists.
+err-git-branch-checked-out = Branch { $branch } is checked out in another worktree: { $path }
+err-git-unknown-remote = No such remote: { $remote }
+err-git-detached = Not on a branch (detached HEAD).
+err-git-no-upstream = The branch has no upstream.
+err-git-push-changed = The branch changed after it was checked; nothing was pushed.
+err-git-busy = Another git action is running in this worktree.
+err-git-in-progress = A merge, rebase, cherry-pick or revert is in progress.
+err-git-dirty = There are uncommitted or untracked files.
+err-git-merge-commit = Reverting or cherry-picking a merge commit is not supported.
+err-git-stash-empty = Nothing to stash.
+err-git-stash-gone = The stash no longer exists.
+err-git-refresh-moved = The branch changed meanwhile; open the dialog again.
+err-git-refresh-conflict = Moving { $sha } { $subject } would conflict ({ $files }{ $more ->
+    [0] {""}
+   *[other] {" "}and { $more } more
+})
+err-git-merge-tree = git 2.40 or newer is needed (merge-tree): { $detail }
+
+## Changes footer and pull requests
+
+foot-commit = Ask to commit
+foot-commit-pick = Pick the files to commit
+foot-commit-partial = { $count ->
+    [one] The agent commits the 1 selected file
+   *[other] The agent commits the { $count } selected files
+}
+foot-commit-all = The agent looks at the changes, writes a commit message and commits
+foot-prompt-failed = Could not send the request: { $error }
+foot-more = More
+foot-no-remote = No remote
+foot-no-remote-tip = A local repository without a remote. Push and pull work once you add a remote (origin).
+foot-sync-publish = Publish branch
+foot-sync-pull = Pull
+foot-sync-push = Push
+foot-sync-fetch = Fetch
+foot-sync-options = Sync options
+foot-menu-fetch = Fetch
+foot-menu-pull = Pull (merge)
+foot-menu-rebase = Pull (rebase)
+foot-menu-caution = Needs care
+foot-menu-force-push = Force push
+foot-menu-reset = Overwrite with the remote
+foot-hint-fetch = Checks the remote's latest state
+foot-hint-merged = PR #{ $number } was merged. Nothing left to push · click to check the remote's latest state
+foot-hint-merged-gone = PR #{ $number } was merged. Nothing left to push (remote branch deleted after the merge) · click to check the remote's latest state
+foot-hint-publish = { $count ->
+    [0] Not on the remote yet. Publishing pushes it to the remote (origin)
+    [one] Not on the remote yet. Publishing pushes it to the remote (origin) · 1 commit
+   *[other] Not on the remote yet. Publishing pushes it to the remote (origin) · { $count } commits
+}
+foot-hint-publish-gone = { $count ->
+    [0] The remote branch was deleted (e.g. after a merge). Publishing pushes this branch again · nothing new to push
+   *[other] The remote branch was deleted (e.g. after a merge). Publishing pushes this branch again · { $count } commits not on the remote
+}
+foot-hint-publish-pr = { $count ->
+    [0] PR #{ $number } is open for this branch. Publishing adds to PR #{ $number }; afterwards it shows as push
+   *[other] PR #{ $number } is open for this branch. Publishing adds { $count } commits to PR #{ $number }; afterwards it shows as push
+}
+foot-hint-pull = { $behind ->
+    [one] 1 new commit on the remote
+   *[other] { $behind } new commits on the remote
+}{ $ahead ->
+    [0] {""}
+   *[other] {" "}({ $ahead } only local)
+}
+foot-hint-push = { $count ->
+    [one] Pushes 1 commit to { $upstream }
+   *[other] Pushes { $count } commits to { $upstream }
+}
+foot-hint-push-pr = { $count ->
+    [one] Pushes 1 commit to { $upstream } · added to the open PR #{ $number }
+   *[other] Pushes { $count } commits to { $upstream } · added to the open PR #{ $number }
+}
+foot-published = Published { $branch } to the remote
+foot-pushed = Pushed { $branch }
+foot-force-pushed = Force-pushed { $branch }
+foot-pulled = Pulled the remote changes into { $branch }
+foot-rebased = Rebased { $branch } on the remote changes
+foot-reset-done = Overwrote { $branch } with the remote state
+foot-sync-failed = { $op } failed: { $error }
+foot-op-fetch = Fetch
+foot-op-push = Push
+foot-op-publish = Publish branch
+foot-op-force-push = Force push
+foot-op-pull = Pull
+foot-op-rebase = Pull (rebase)
+foot-op-reset = Overwrite with the remote
+foot-remote-branch = the remote branch
+foot-reset-title = Overwrite with the remote state?
+foot-reset-body = { $count ->
+    [0] Makes the local branch identical to { $upstream }. Local-only commits and uncommitted changes are lost and cannot be restored.
+   *[other] Makes the local branch identical to { $upstream }. The { $count } local-only commits and uncommitted changes are lost and cannot be restored.
+}
+foot-reset-confirm = Overwrite
+foot-force-title = Force push?
+foot-force-body = { $count ->
+    [0] Overwrites the remote branch with the local history. Refused for safety if someone pushed since the last fetch (--force-with-lease).
+   *[other] Overwrites the remote branch with the local history ({ $count } remote-only commits are lost). Refused for safety if someone pushed since the last fetch (--force-with-lease).
+}
+foot-merge-item = Merge · #{ $number }
+foot-merge-hint = The app merges this PR into the base branch
+foot-merge-uncommitted = There are uncommitted changes
+foot-merge-unpushed = There are commits not pushed yet
+foot-view-pr = View PR
+foot-close-item = Close PR · #{ $number }
+foot-close-hint = Closes it without merging. The branch and commits stay
+foot-recheck-item = PR needs a check
+foot-recheck-hint = Check what changed after the request before the PR goes up
+foot-create-pr = Open PR
+foot-pr-hint = Pick the target branch; the agent writes the PR title and body, the app pushes and opens the PR
+foot-pr-needs-workspace = PR requests work in workspace sessions
+foot-pr-no-remote = A local repository without a remote cannot open a PR
+foot-pr-nothing = No commits to put up
+foot-continue = Continue on a new branch
+foot-continue-hint = Makes a new branch from the latest base branch and moves the commits and changes you pick
+foot-blocker-merged = Already merged
+foot-blocker-closed = The PR is closed
+foot-blocker-draft = It is a draft PR
+foot-blocker-changes-requested = Changes were requested
+foot-blocker-blocked = GitHub branch protection (required checks, reviews, …) has not passed yet
+foot-blocker-conflict = It conflicts with the base branch
+foot-blocker-behind = The base branch is ahead (update the branch)
+foot-blocker-not-mergeable = GitHub says it cannot be merged
+foot-recheck-strip = The PR needs a check before it goes up
+foot-recheck-strip-action = Check
+foot-recheck-strip-tip = New commits or changes appeared after the PR request; it waits before going up
+foot-leftover-strip = There is PR text that was not put up
+foot-leftover-strip-action = Open
+foot-leftover-strip-tip = In the Open PR dialog you can put it up as is or have it written again
+foot-merge-title = Merge PR #{ $number }
+foot-merge-method = Merge method
+foot-merge-delete-after = Delete the remote branch after merging
+foot-merge-delete-branch = Delete the remote branch after merging
+foot-merge-guard = Not merged if anything was pushed after the checked commit { $sha }. GitHub branch protection still applies.
+foot-merge = Merge
+foot-merging = Merging…
+foot-merged = Merged PR #{ $number } · { $title }
+foot-merged-branch-deleted = {" "}· remote branch deleted
+foot-merge-failed = Could not merge PR #{ $number }: { $error }
+foot-close-title = Close PR #{ $number }?
+foot-close-body = Closes it without merging. The branch and commits stay, and it can be reopened on GitHub.
+foot-close-confirm = Close PR
+foot-closed = Closed PR #{ $number }
+foot-close-failed = Could not close the PR: { $error }
+foot-pending-title = Check before opening the PR
+foot-pending-loading = Checking unpushed commits and changes…
+foot-pending-commit-mode-note = Writing from the commit history does not commit uncommitted files; including files applies to the AI mode only.
+foot-pending-intro = { $repo } · { $branch } · Unchecked items stay out of this PR and remain local.
+foot-pending-commits = { $count ->
+    [one] Include 1 unpushed commit
+   *[other] Include { $count } unpushed commits
+}
+foot-pending-commits-unpublished = { $count ->
+    [one] Include 1 commit to publish (branch not on the remote)
+   *[other] Include { $count } commits to publish (branch not on the remote)
+}
+foot-pending-commits-unpublished-note = This branch is not on the remote yet: without them there is nothing to open a PR from.
+foot-pending-commits-on = Pushed together with the PR.
+foot-pending-commits-off = Left out: not pushed, kept local. The PR is made from origin/{ $branch } on the remote.
+foot-pending-files = { $count ->
+    [one] Include 1 uncommitted file
+   *[other] Include { $count } uncommitted files
+}
+foot-pending-files-on = The AI commits them before writing the PR.
+foot-pending-files-off = Left out: not committed, left as they are.
+foot-pending-files-off-commits = Leaving the commits out leaves these out too (a new commit would not go up).
+foot-pending-continue = Continue
+foot-pending-continue-some = Continue without some
+foot-more-count = { $count ->
+    [one] and 1 more
+   *[other] and { $count } more
+}
+foot-excluded = Left out: { $parts } — they stay local
+foot-excluded-commits = { $count ->
+    [one] 1 unpushed commit
+   *[other] { $count } unpushed commits
+}
+foot-excluded-files = { $count ->
+    [one] 1 uncommitted file
+   *[other] { $count } uncommitted files
+}
+foot-pr-title = Open PR · { $repo }
+foot-pr-request-error = Could not check the PR request: { $error } · check for an existing PR instead of a new AI request.
+foot-pr-existing = PR #{ $number } is already open
+foot-pr-open-existing = Open the existing PR
+foot-pr-none-open = No open PR for this repository and branch.
+foot-pr-same-as = Same content as { $target }
+foot-pr-same-as-body = Nothing to put up. Commits not on the base may show, but their content is already in { $target } (e.g. left after a squash merge).
+foot-pr-targets-failed = Could not load the remote branches: { $error }
+foot-pr-targets-loading = Loading the remote branches…
+foot-pr-target = Target branch
+foot-pr-target-note = The session's base branch is picked first (picking another one here does not change the session's base).
+foot-pr-base-missing = origin has no { $base } branch, so { $target } was picked.
+foot-pr-from-commits = Write from the commit history
+foot-pr-from-commits-note = Fills the title and body from the included commits. Does not call the AI.
+foot-pr-uncommitted-stay = Uncommitted files are not committed automatically and stay local.
+foot-pr-preview-failed = Could not load the commit preview: { $error }
+foot-pr-preview-loading = Loading the commit preview…
+foot-pr-no-commits = No commits to include.
+foot-pr-title-label = PR title
+foot-pr-title-note = Starts with the latest commit's subject. Edit it freely.
+foot-pr-body-preview = { $count ->
+    [one] Body preview · 1 commit
+   *[other] Body preview · { $count } commits
+}
+foot-pr-body-show = Show body
+foot-pr-body-hide = Fold body
+foot-pr-draft = Open as a draft PR
+foot-pr-merge-now = Merge right after opening the PR
+foot-pr-merge-now-note = Waits for the required checks and merges when they pass. Does not merge (and says so) when a review approval is needed.
+foot-pr-merge-now-draft = A draft PR cannot be merged
+foot-pr-what-commits-push = The app pushes the commits and opens the PR.
+foot-pr-what-commits-remote = The app opens the PR from the commits on the remote.
+foot-pr-what-ai = When the agent has prepared the commits and the PR title and body, the app pushes and opens the PR.
+foot-pr-what-ai-no-files = When the agent has prepared the PR title and body, the app pushes and opens the PR.
+foot-pr-what-ai-remote = When the agent has prepared the PR title and body, the app opens the PR from the commits on the remote (no push).
+foot-pr-check-existing = Check for an existing PR
+foot-pr-check-existing-tip = Only looks up an open PR for this branch, without the AI or a push
+foot-pr-reuse-diverged-confirm = The commit history changed since it was written, so it may not match. Click again to put it up with this text.
+foot-pr-rewrite = Have the AI write it again
+foot-pr-reuse = Put it up with this text
+foot-pr-reuse-anyway = Put it up with this text anyway
+foot-pr-submit-merge = Open PR and merge
+foot-pr-submit-ai = Request PR (AI)
+foot-pr-submit-ai-merge = Request PR and merge (AI)
+foot-left-title = There is PR text that was written but not put up
+foot-left-written = Written { $when }
+foot-left-written-reason = Written { $when } · last attempt: { $reason }
+foot-left-same = Matches the commits · no commit changed since it was written
+foot-left-ahead = { $count ->
+    [one] 1 more commit since it was written · not covered by the text
+   *[other] { $count } more commits since it was written · not covered by the text
+}
+foot-left-diverged = The commits it was written for are no longer on the branch (rebase / reset) · it may not match
+foot-left-unknown = No record of the commit it was written for, so it cannot be checked
+foot-left-pr-title = PR title
+foot-left-empty = (empty)
+foot-left-show = Show text
+foot-left-fold = Fold
+foot-job-title = { $repo } PR request
+foot-job-preparing = Making the PR title and body from the commit history…
+foot-job-writing = The session commits and writes the PR title and body… (ide cannot see when the agent's turn ends: it goes on once the PR file is written, or when you click Create PR)
+foot-job-file = PR file: { $path }
+foot-job-retry = Ask again
+foot-job-create-now = Create PR
+foot-job-open = Open
+foot-job-cancelled = { $repo } PR request cancelled
+foot-job-merge-cancelled = { $repo } merge wait cancelled
+foot-job-merge-cancelled-body = The PR stays open.
+foot-job-creating-title = Opening the { $repo } PR
+foot-job-creating-push = Pushing and opening the PR on GitHub…
+foot-job-creating-remote = Opening the PR on GitHub from the commits on the remote…
+foot-job-prepare-failed = Could not make the { $repo } PR text
+foot-job-send-failed = Could not send the { $repo } PR request
+foot-job-check-failed = The { $repo } pre-PR check failed
+foot-job-commit-send-failed = Could not send the { $repo } commit request
+foot-job-create-failed = Could not open the { $repo } PR
+foot-job-page-title = The { $repo } PR has to be opened on its page
+foot-job-page-hint = { $reason } · Open shows the PR creation page
+foot-job-page-hint-no-merge = { $reason } · Open shows the PR creation page (not merged)
+foot-job-created = Opened { $repo } PR #{ $number }
+foot-job-exists = { $repo } already has the open PR #{ $number }
+foot-job-mergeable-unknown = Conflicts are not known yet. Refresh to check.
+foot-job-exists-no-merge = An existing PR is not merged automatically.
+foot-job-conflict-title = { $repo } PR #{ $number } · conflicts with the base branch
+foot-job-conflict-body = The PR is open. Resolve the conflicts with { $base } to merge it.
+foot-job-recheck-title = { $repo } PR needs a check before it goes up
+foot-job-recheck-body = After the request: { $parts }. Nothing goes up before you check.
+foot-drift-rewritten = the branch history changed (rebase etc.)
+foot-drift-commits = { $count ->
+    [one] 1 new commit
+   *[other] { $count } new commits
+}
+foot-drift-files = { $count ->
+    [one] 1 changed file
+   *[other] { $count } changed files
+}
+foot-job-committing = { $count ->
+    [one] The session commits 1 file… checked once more when it is done
+   *[other] The session commits { $count } files… checked once more when they are done
+}
+foot-job-merge-wait-title = Waiting to merge { $repo } PR #{ $number }
+foot-job-merge-wait-first = Waiting while GitHub checks whether it can be merged…
+foot-job-merge-wait = GitHub is checking whether it can be merged · { $minutes } min waited
+foot-job-merge-wait-checks = Checks { $progress } · waiting for { $pending } · { $minutes } min waited. Merges when all pass.
+foot-job-merge-timeout = The checks did not finish in time. Merge with Merge in the Changes footer when they are done.
+foot-job-merging = Merging…
+foot-job-merged = Merged { $repo } PR #{ $number }
+foot-job-merged-deleted = The remote branch was deleted too
+foot-job-not-merged = { $repo } PR #{ $number } was not merged
+foot-stop-target-changed = The PR's target branch changed ({ $from } → { $to }). Not merged.
+foot-stop-draft = A draft PR is not merged
+foot-stop-review-required = A review approval is needed. Merge with Merge in the Changes footer once approved.
+foot-stop-checks-failed = Required checks failed: { $names }
+foot-stop-protected = Branch protection (review approval or required checks) has to pass before it can be merged
+foot-recheck-intro = { $repo } · These appeared after the PR request. Unchecked items stay out of this PR and remain local.
+foot-recheck-rewritten = The branch history changed after the request (rebase, reset, …). It can only go up as it is now, and a push is refused if it differs from the remote.
+foot-recheck-commits = { $count ->
+    [one] Include 1 commit made after the request
+   *[other] Include { $count } commits made after the request
+}
+foot-recheck-commits-on = Pushed together with the PR.
+foot-recheck-commits-on-pushoff = Pushed together with the PR, along with the unpushed commits left out at the request.
+foot-recheck-commits-off = Left out: not pushed. The PR is made up to the commits checked at the request.
+foot-recheck-commits-off-pushoff = Left out: not pushed. The PR is made from the commits on the remote.
+foot-recheck-files-on = The session commits them first, then this check runs once more.
+foot-recheck-merge = Merge right after it goes up (set at the request)
+foot-recheck-cancel = Cancel the PR request
+foot-recheck-commit-go = Commit and continue
+foot-later = Later
+foot-continue-loading = Fetching the latest base branch…
+foot-continue-load-failed = Could not read the branch state: { $error }
+foot-continue-intro = Makes a new branch from the latest origin/{ $base } and takes only what you pick. { $branch } stays as it is locally.
+foot-continue-fetch-failed = Could not fetch origin/{ $base }; showing the last local state.
+foot-continue-name = New branch name
+foot-continue-name-placeholder = Empty: { $suggested }
+foot-continue-bad-name = This branch name cannot be used
+foot-continue-commits = Commits to take
+foot-continue-all = Select all
+foot-continue-none = Clear all
+foot-continue-no-commits = There are no commits that origin/{ $base } does not have.
+foot-continue-no-change = No change
+foot-continue-in-base = Same content in { $base }
+foot-continue-more = { $count ->
+    [one] 1 older commit is not listed and is not moved.
+   *[other] { $count } older commits are not listed and are not moved.
+}
+foot-continue-order = Moved oldest first. The picks are tried in advance; nothing runs if they conflict.
+foot-continue-conflict = Moving { $sha } { $subject } conflicts. Also pick the earlier commit it relies on, or leave this one out.
+foot-continue-conflict-files = { $more ->
+    [0] Moving { $sha } { $subject } conflicts ({ $files }). Also pick the earlier commit it relies on, or leave this one out.
+   *[other] Moving { $sha } { $subject } conflicts ({ $files } and { $more } more). Also pick the earlier commit it relies on, or leave this one out.
+}
+foot-continue-check-failed = Could not try the picks: { $error }
+foot-continue-files = { $count ->
+    [one] Take the uncommitted changes · 1 file
+   *[other] Take the uncommitted changes · { $count } files
+}
+foot-continue-files-off = Not taken. Stashed on { $branch } to take out later.
+foot-continue-files-conflict = { $count ->
+    [one] 1 file conflicts with the new branch. If it cannot be taken it stays in the stash of { $branch }.
+   *[other] { $count } files conflict with the new branch. If they cannot be taken they stay in the stash of { $branch }.
+}
+foot-continue-files-list-more = { $names } and { NUMBER($count) } more
+foot-continue-close-pr = Close the open PR #{ $number }
+foot-continue-close-pr-note = { $title } · closed without a comment (ide)
+foot-continue-run = Create new branch
+foot-continue-running = Creating…
+foot-continue-failed = Could not move to a new branch: { $error }
+foot-continue-result-branch = Work continues on { $branch }
+foot-continue-result-moved = { $count ->
+    [one] Moved 1 commit
+   *[other] Moved { $count } commits
+}
+foot-continue-result-skipped = { $count ->
+    [one] Skipped 1 commit that changes nothing (already in)
+   *[other] Skipped { $count } commits that change nothing (already in)
+}
+foot-continue-result-left = { $count ->
+    [one] 1 commit not picked stays on { $previous }
+   *[other] { $count } commits not picked stay on { $previous }
+}
+foot-continue-result-closed = Closed PR #{ $number }. Open the PR again from the new branch
+foot-continue-result-not-closed = The old PR was not closed: { $error }
+foot-continue-result-files-stash = { $count ->
+    [one] 1 change conflicted on the new branch and stays in the stash of { $previous }
+   *[other] { $count } changes conflicted on the new branch and stay in the stash of { $previous }
+}
+foot-continue-result-files-moved = { $count ->
+    [one] Moved 1 change
+   *[other] Moved { $count } changes
+}
+foot-continue-result-files-stashed = { $count ->
+    [one] Stashed 1 change on { $previous }
+   *[other] Stashed { $count } changes on { $previous }
+}
+err-gh-missing = The GitHub CLI (gh) was not found: { $program }
+err-github-no-credentials = No GitHub login for { $host }: git has no credential for it and the GitHub CLI (gh) is not installed
+err-github-auth = GitHub rejected git's credential for { $host } (401) and there is no GitHub CLI (gh) to retry
+err-github-failed = No answer from GitHub: { $detail }
+err-gh-auth = gh is not logged in to { $host } (run gh auth login)
+err-gh-failed = gh failed: { $detail }
+err-pr-no-origin = The repository has no origin remote
+err-pr-origin-unparsable = Cannot tell the GitHub repository from origin ({ $url })
+err-pr-gitlab = GitLab merge requests are not supported here
+err-pr-gitlab-page = GitLab: open the merge request page
+err-pr-detached = HEAD is detached (no branch)
+err-pr-same-branch = The PR's branch and target are the same ({ $branch })
+err-pr-no-remote-branch = origin has no { $branch } branch
+err-pr-bad-branch = Not a valid branch name: { $branch }
+err-pr-bad-number = Not a valid PR number
+err-pr-bad-sha = Not a valid commit id: { $sha }
+err-pr-not-on-branch = Commit { $sha } is not on this branch
+err-pr-changed = The branch changed after the preview; open the dialog again
+err-pr-no-text = The PR file was not written
+err-pr-empty-title = The PR title is empty
+err-pr-bad-title = The PR title is not valid
+err-pr-no-commits = No commits that { $base } does not have
+err-pr-needs-workspace = PR requests work in workspace sessions
+err-pr-api = GitHub refused the request ({ $status }): { $detail }
+err-pr-merge-refused = GitHub refused the merge ({ $status }): { $detail }
+err-pr-close-failed = GitHub did not close the PR ({ $status }): { $detail }
+err-pr-update-refused = GitHub refused to update the branch ({ $status }): { $detail }
+err-pr-already-merged = PR #{ $number } is already merged
+err-pr-not-open = PR #{ $number } is not open
+err-pr-head-moved = PR #{ $number } moved on ({ $expected } → { $actual }); check it again before merging
+err-pr-push-failed = Push failed: { $detail }
+err-pr-create-unconfirmed = Not sure whether the PR was created: { $detail }
+err-prompt-empty = The request is empty
+err-prompt-not-ready = The agent is not at its input right now (session { $id }); try again when it waits for input

@@ -125,6 +125,25 @@ pub fn proto_error(e: &ProtoError) -> String {
         "search-bad-glob" => tr::err_search_bad_glob(&a("glob"), &a("detail")),
         "git-bad-rev" => tr::err_git_bad_rev(&a("rev")),
         "git-no-base" => tr::err_git_no_base(&a("base")),
+        // local git actions (Changes / History; docs/changes-actions.md)
+        "git-bad-branch" => tr::err_git_bad_branch(&a("name")),
+        "git-branch-exists" => tr::err_git_branch_exists(&a("name")),
+        "git-branch-checked-out" => tr::err_git_branch_checked_out(&a("branch"), &a("path")),
+        "git-unknown-remote" => tr::err_git_unknown_remote(&a("remote")),
+        "git-detached" => tr::err_git_detached(),
+        "git-no-upstream" => tr::err_git_no_upstream(),
+        "git-push-changed" => tr::err_git_push_changed(),
+        "git-busy" => tr::err_git_busy(),
+        "git-in-progress" => tr::err_git_in_progress(),
+        "git-dirty" => tr::err_git_dirty(),
+        "git-merge-commit" => tr::err_git_merge_commit(),
+        "git-stash-empty" => tr::err_git_stash_empty(),
+        "git-stash-gone" => tr::err_git_stash_gone(),
+        "git-refresh-moved" => tr::err_git_refresh_moved(),
+        "git-refresh-conflict" => {
+            tr::err_git_refresh_conflict(&a("sha"), &a("subject"), &a("files"), n("more"))
+        }
+        "git-merge-tree" => tr::err_git_merge_tree(&a("detail")),
         // `def.lookup` "nothing found" reasons (`DefResult::None`)
         "def-invalid-position" => tr::err_def_invalid_position(),
         "def-unsupported-file" => tr::err_def_unsupported_file(&a("path")),
@@ -137,6 +156,10 @@ pub fn proto_error(e: &ProtoError) -> String {
         "disconnected" => tr::err_disconnected(),
         "timeout" => tr::err_timeout(),
         "connect-failed" => tr::err_connect_failed(&a("detail")),
+        // PR backend and prompt delivery (gh-*, github-*, pr-*, prompt-*; `footer.rs`)
+        id if ["gh-", "github-", "pr-", "prompt-"].iter().any(|p| id.starts_with(p)) => {
+            crate::footer::proto_error_text(e).unwrap_or_else(|| tr::err_unknown(id, ""))
+        }
         other => {
             let details = e
                 .args
@@ -250,6 +273,22 @@ mod tests {
             "provider-not-found",
             "provider-no-login",
             "invalid-mcp-name",
+            "git-bad-branch",
+            "git-branch-exists",
+            "git-branch-checked-out",
+            "git-unknown-remote",
+            "git-detached",
+            "git-no-upstream",
+            "git-push-changed",
+            "git-busy",
+            "git-in-progress",
+            "git-dirty",
+            "git-merge-commit",
+            "git-stash-empty",
+            "git-stash-gone",
+            "git-refresh-moved",
+            "git-refresh-conflict",
+            "git-merge-tree",
         ] {
             let e = ProtoError::new(id);
             assert!(

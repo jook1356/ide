@@ -490,6 +490,12 @@ pub enum Modal {
     SessionRepos(SessionReposForm),
     /// Register a plain folder: `git init` it first?
     InitRepo(InitRepoForm),
+    /// Changes / History action dialogs (discard, stash drop, commit action, branch switch /
+    /// create; `changes_actions.rs`).
+    Changes(crate::changes_actions::ChangesModal),
+    /// Changes / History footer dialogs (PR, merge, close, sync confirm, branch continue;
+    /// `footer.rs`).
+    Footer(Box<crate::footer::FooterModal>),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -737,6 +743,8 @@ pub enum Message {
 
     /// Detail area of a session.
     Detail(String, DetailMsg),
+    /// Changes / History footer of a session (`footer.rs`; `""` = its timer).
+    Footer(String, crate::footer::FooterMsg),
     ToggleOpenItems,
     CloseOpenItems,
     /// Session list sort menu (header button).
@@ -2015,6 +2023,8 @@ impl App {
                     Some(Modal::StopServer(f)) => f.busy,
                     Some(Modal::Close(f)) => f.busy,
                     Some(Modal::SessionRepos(f)) => f.busy,
+                    Some(Modal::Changes(f)) => f.busy,
+                    Some(Modal::Footer(f)) => f.busy(),
                     _ => false,
                 };
                 if busy {
@@ -2790,7 +2800,13 @@ impl App {
                 self.sync_detail()
             }
 
-            Message::Detail(sid, m) => self.on_detail(sid, m),
+            Message::Detail(sid, m) => {
+                // The footer follows status / History answers (`footer.rs`).
+                let hook = crate::footer::detail_hook(&m);
+                let t = self.on_detail(sid.clone(), m);
+                Task::batch([t, self.footer_after_detail(&sid, hook)])
+            }
+            Message::Footer(sid, m) => self.on_footer(sid, m),
             Message::ToggleOpenItems => {
                 self.open_items = !self.open_items;
                 Task::none()
@@ -3511,6 +3527,7 @@ impl App {
         if self.sessions.iter().any(|l| l.detail.toast.is_some()) {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Expire));
         }
+        subs.push(self.footer_subscription());
         if self.script.as_ref().is_some_and(|s| !s.done()) {
             subs.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));
         }

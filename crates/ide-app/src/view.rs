@@ -2658,6 +2658,8 @@ impl App {
                 c.width(560).boxed()
             }
             Modal::QuickOpen(f) => self.quick_open_card(f),
+            Modal::Changes(f) => self.changes_modal_card(f),
+            Modal::Footer(f) => self.footer_modal_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

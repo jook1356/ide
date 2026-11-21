@@ -40,6 +40,13 @@ use crate::session_sort::SortKey;
 use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
 use ide_client::{AccountState, SessionKind};
 
+/// Changes / History tab action steps (`script_changes.rs`).
+#[path = "script_changes.rs"]
+mod changes;
+/// Changes / History footer steps (`script_footer.rs`).
+#[path = "script_footer.rs"]
+mod footer_steps;
+
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
 
@@ -327,6 +334,10 @@ enum Step {
     /// The commit diff (of the file, or the whole commit) is shown with this added line and
     /// remembered in `ui.json`.
     WaitCommitDiff(Option<&'static str>, &'static str, u64),
+    /// Changes / History tab actions (`script_changes.rs`).
+    Chg(changes::CStep),
+    /// Changes / History footer (`script_footer.rs`).
+    Foot(footer_steps::FStep),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -438,10 +449,15 @@ impl Script {
             evidence.display()
         ));
         Some(Script {
-            steps: if only_p2 {
-                steps_p2_only()
-            } else {
-                steps(claude)
+            steps: {
+                let mut s = if only_p2 {
+                    steps_p2_only()
+                } else {
+                    steps(claude)
+                };
+                changes::splice(&mut s);
+                footer_steps::splice(&mut s);
+                s
             },
             pc: 0,
             started: None,
@@ -3647,6 +3663,16 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             | Step::OpenCommitP2(..)
             | Step::WaitCommitDiff(..)) => {
                 let (n, t) = step_p2(sc, app, st, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::Chg(x) => {
+                let (n, t) = changes::run(sc, app, x, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::Foot(x) => {
+                let (n, t) = footer_steps::run(sc, app, x, el);
                 next = n;
                 tasks.push(t);
             }

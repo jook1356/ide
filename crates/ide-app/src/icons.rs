@@ -25,9 +25,22 @@ pub enum Icon {
     ArrowUp,
     ChevronRight,
     ChevronDown,
+    // Changes / History tab actions (changes_view.rs).
+    Check,
+    Minus,
+    Archive,
+    ArrowBackUp,
+    ArrowRight,
+    PackageExport,
+    CopyCheck,
+    Trash,
+    Cloud,
+    Plus,
+    Folder,
+    Refresh,
 }
 
-const SOURCES: [&str; 15] = [
+const SOURCES: [&str; 27] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -43,6 +56,18 @@ const SOURCES: [&str; 15] = [
     include_str!("../assets/icons/arrow-up.svg"),
     include_str!("../assets/icons/chevron-right.svg"),
     include_str!("../assets/icons/chevron-down.svg"),
+    include_str!("../assets/icons/check.svg"),
+    include_str!("../assets/icons/minus.svg"),
+    include_str!("../assets/icons/archive.svg"),
+    include_str!("../assets/icons/arrow-back-up.svg"),
+    include_str!("../assets/icons/arrow-right.svg"),
+    include_str!("../assets/icons/package-export.svg"),
+    include_str!("../assets/icons/copy-check.svg"),
+    include_str!("../assets/icons/trash.svg"),
+    include_str!("../assets/icons/cloud.svg"),
+    include_str!("../assets/icons/plus.svg"),
+    include_str!("../assets/icons/folder.svg"),
+    include_str!("../assets/icons/refresh.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -56,7 +81,9 @@ static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let w = if i == Icon::ArrowUp as usize { STROKE_BOLD } else { STROKE };
+            // Checkbox marks are bold like Mantine's.
+            let bold = [Icon::ArrowUp, Icon::Check, Icon::Minus].map(|x| x as usize);
+            let w = if bold.contains(&i) { STROKE_BOLD } else { STROKE };
             let s = s.replace("stroke-width=\"2\"", &format!("stroke-width=\"{w}\""));
             svg::Handle::from_memory(s.into_bytes())
         })
@@ -86,6 +113,6 @@ mod tests {
             assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::ChevronDown as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Refresh as usize + 1);
     }
 }

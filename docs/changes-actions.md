@@ -307,3 +307,51 @@ child with `IDE_GH`, `IDE_GITHUB_API` and a scratch `GIT_CONFIG_GLOBAL`
 `Bearer`, gh not run; no token -> fake `gh`; neither -> `github-no-credentials`). `ide-core` `prompts` tests compare the full commit
 prompt with Desk's output; `ide-agents` `prompt` tests the byte sequences and the declarative
 `[prompt]` table; `ide-proto` `pr` tests the pure helpers and `pr_messages_round_trip`.
+
+### Footer UI (ide-app `footer.rs`, `footer_view.rs`)
+
+The Changes / History footer is a port of Desk's `AiActionBar` + `SyncButton` +
+`PullRequestModal` / `MergePrModal` / close confirm / `BranchRefreshModal` / `PrRecheckModal`
+and the `pr-leftover-strip` strips, using the calls in the tables above.
+
+| Desk | ide |
+|---|---|
+| `AiActionBar` under Changes and History, hidden on Explore, kept mounted | `footer::shown_on(side)`; drawn by `detail_view.rs` under the tab content; state per session (`Detail::footer`) and per repo (`RepoFooter`), so it survives tab switches |
+| 커밋 맡기기 (violet round button, sparkles, count badge when only some rows are checked; tooltip) | `FooterMsg::Commit`: `Detail::checked_changes()` (sibling API) -> `prompt_commit(files, all)` + `send_prompt(selected session)`; `prompt-not-ready` / `session-not-running` shown as a toast |
+| `SyncButton` (primary op with ↑/↓ counts, publish / push / pull / fetch; menu: 가져오기 (fetch), 풀 (병합), 풀 (리베이스), 브랜치 게시 / 푸시, 주의가 필요한 작업: 강제 푸시, 원격 상태로 덮어쓰기 with confirms; 원격 없음 when `no_remote`; periodic fetch `FETCH_EVERY_MS`, `FRESH_ON_OPEN_MS`) | `sync_button` / `sync_menu`; `git_sync_status` (fetch on open when older than 60 s and every 5 min while shown), `git_push` / `git_pull`; force push and reset go through `SyncConfirmForm`; merged-PR hints from `pr_status` |
+| `…` round icon menu with item descriptions: PR 올리기, 머지하기 · #N, PR 보기, PR 닫기 · #N, PR 확인 필요, 새 브랜치로 이어가기 | `App::footer_more(sid) -> Vec<MoreEntry>` (kind, enabled, hint; the script checks it per state); 머지하기 disabled with Desk's hint while changes / unpushed commits exist |
+| PR 보기 / opening a created PR | `footer_open_url`: the session's web detail tab (the ide's in-app browser; Desk uses the OS browser via `openExternal`) |
+| `PullRequestModal` (PR 올리기 전에 확인 step, 머지 대상 브랜치, 커밋 기록으로 작성 + body preview, PR 제목, leftover file, 초안, PR을 올린 뒤 바로 머지, 기존 PR 확인) | `Modal::Footer(FooterModal::Pr)`; PR job notice card above the footer (AI mode: waits for the PR file by polling `pr_leftover` every 2 s, or 'Create PR' / 'Ask again' / 'Cancel') |
+| `MergePrModal` (method, 머지 후 원격 브랜치 삭제), close confirm | `FooterModal::Merge` / `FooterModal::ClosePr` |
+| `BranchRefreshModal` (새 브랜치 이름, 가져갈 커밋 picks, 변경 옮기기, 열린 PR #N 닫기, pre-check, result lines) | `FooterModal::Continue`: `git_branch_refresh_info` / `_check` / `_run`, then `pr_close` when the box is on |
+| `pr-leftover-strip`, PR 확인 필요 strip, `PrRecheckModal` | strips above the footer; `FooterModal::Recheck` built from `drift_change` |
+| Server errors | `i18n::proto_error` routes `gh-*`, `github-*`, `pr-*`, `prompt-*` to `footer::proto_error_text` (`err-*` messages) |
+
+Deviations / omissions:
+
+- **No "agent busy" signal**: Desk's `ai.blocked` hints (에이전트가 답변 중) are omitted; the
+  buttons only need a connection and checked files.
+- **AI PR job end**: Desk resumes on the chat turn's end; the ide polls for the PR file and offers
+  'Create PR' on the notice.
+- **PR pages open in the in-app web tab**, not the OS browser.
+- **Job notice texts** are formatted when the event happens (they do not re-translate on a
+  language switch).
+- **Not in the footer**: Desk's PR card 'Update branch' (`pr_update_branch`) and the 커밋 보유
+  badge (`pr_unmerged`) belong to the session list / PR card, which the ide does not have yet.
+- **Closing the old PR on 새 브랜치로 이어가기** uses `pr_close` without Desk's comment.
+
+Script (`script_footer.rs`, spliced after the base-branch pass; run with `IDE_GH` = the fake `gh`
+`crates/ide-app/tests/fake-gh/gh.cmd` (Node `gh.js`: `pulls` list / create / get / close / merge,
+reviews, GraphQL gate, ref delete; PRs in `$IDE_FAKE_GH_STATE/state.json`, commits from and squash
+merges into the bare origin `$IDE_FAKE_GH_ORIGIN`), `IDE_GITHUB_API` = an unreachable local address, `GIT_CONFIG_GLOBAL` = a scratch config
+whose credential helper answers `quit=1`, `GIT_CONFIG_NOSYSTEM=1`; the test repo's origin is
+`https://github.com/ide-test/footer.git` rewritten by `url.<bare origin>.insteadOf`, so git
+pushes to a local bare repo and the PR backend falls back to the fake `gh`): footer shown on
+Changes / History, hidden on Explore; 커밋 맡기기 into a shell session (prompt line in the
+terminal); publish, push (↑1), fetch + pull (↓1) counts; `…` entries per state (no PR, open PR,
+uncommitted change disables 머지하기); PR 올리기 (commit mode) -> open PR shown in the web tab
+-> 머지하기 -> merged; pending step + PR 닫기; AI mode (prompt in the terminal, PR file written
+by the script) -> created; 새 브랜치로 이어가기 (closes the PR, worktree moves to `-2`).
+Screenshots `foot_01`..`foot_16`, `ko_foot_01_footer`, `ko_foot_02_sync_menu`,
+`ko_foot_03_more_menu`, `ko_foot_04_pr_dialog`, `ko_foot_05_merge_dialog`,
+`ko_foot_06_branch_continue`.
