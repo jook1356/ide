@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ide_proto::{
-    AheadBehind, ChangeKind, DiffAgainst, DiffFile, DiffHunk, DiffLine, GitChange, GitRev,
-    GitStatus, LineKind, ProtoError,
+    AheadBehind, ChangeKind, CommitInfo, DiffAgainst, DiffFile, DiffHunk, DiffLine, GIT_LOG_PAGE,
+    GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, ProtoError,
 };
 
 use crate::service::core_error;
@@ -735,6 +735,251 @@ pub fn file_at(
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// History (Hermes Desk's History tab: `changes.ts` commitLog/commitFiles/commitDiff,
+// `github.ts` historyLocalCommits)
+
+/// Most commits one `git.log` page returns (bounds the reply size).
+const LOG_MAX: u32 = 10_000;
+
+/// `git log` record format of Hermes Desk's `commitLog` (unit/record separators).
+const LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%at%x1f%ae%x1e";
+
+/// Parse `git log` output in [`LOG_FORMAT`].
+pub fn parse_log(out: &[u8]) -> Vec<CommitInfo> {
+    String::from_utf8_lossy(out)
+        .split('\x1e')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| {
+            let mut f = r.split('\x1f');
+            let sha = f.next()?.to_owned();
+            let short = f.next()?.to_owned();
+            let subject = f.next()?.to_owned();
+            let author = f.next()?.to_owned();
+            let date = f.next()?.parse().unwrap_or(0);
+            let email = f.next().unwrap_or_default().to_owned();
+            Some(CommitInfo {
+                sha,
+                short,
+                subject,
+                author,
+                email,
+                date,
+            })
+        })
+        .collect()
+}
+
+/// `git.log`: a page of HEAD's history, newest first (`limit` 0 = [`GIT_LOG_PAGE`]).
+pub fn log(root: &Path, skip: u32, limit: u32) -> Result<GitLog, ProtoError> {
+    let limit = if limit == 0 {
+        GIT_LOG_PAGE
+    } else {
+        limit.min(LOG_MAX)
+    };
+    if !has_head(root) {
+        return Ok(GitLog {
+            commits: Vec::new(),
+            has_more: false,
+        });
+    }
+    // One extra commit tells whether another page follows.
+    let skip_arg = format!("--skip={skip}");
+    let n = (limit + 1).to_string();
+    let out = run(
+        root,
+        &[
+            "log",
+            "--no-color",
+            LOG_FORMAT,
+            &skip_arg,
+            "-n",
+            &n,
+            "HEAD",
+            "--",
+        ],
+    )?;
+    let mut commits = parse_log(&out);
+    let has_more = commits.len() > limit as usize;
+    commits.truncate(limit as usize);
+    Ok(GitLog { commits, has_more })
+}
+
+/// `git.unpushed`: Hermes Desk's `historyLocalCommits` (GitHub Desktop's count): a branch with
+/// an upstream marks `upstream..HEAD`; one whose upstream is gone marks nothing (it is to be
+/// published again); a branch tracking nothing (or a detached HEAD) marks the commits no
+/// remote-tracking branch has. At most [`GIT_UNPUSHED_MAX`]. Empty without a remote, and on
+/// any git failure (as in Desk).
+pub fn unpushed(root: &Path) -> Vec<String> {
+    if try_text(root, &["remote"]).is_none_or(|r| r.is_empty()) || !has_head(root) {
+        return Vec::new();
+    }
+    let branch = try_text(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let track = if !branch.is_empty() && branch != "HEAD" {
+        try_text(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(upstream)|%(upstream:track)",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (upstream, state) = track.split_once('|').unwrap_or((track.as_str(), ""));
+    if !upstream.is_empty() && state.contains("gone") {
+        return Vec::new();
+    }
+    let max = format!("--max-count={GIT_UNPUSHED_MAX}");
+    let range = format!("{upstream}..HEAD");
+    let mut args = vec!["rev-list", max.as_str()];
+    if upstream.is_empty() {
+        args.extend(["HEAD", "--not", "--remotes"]);
+    } else {
+        args.push(&range);
+    }
+    try_text(root, &args)
+        .map(|o| o.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// A commit id from the client: 4-64 hex digits (Hermes Desk's `commitDetail` check) naming an
+/// existing commit, else `git-bad-rev`. Returns the full id.
+fn resolve_commit(root: &Path, sha: &str) -> Result<String, ProtoError> {
+    let bad = || ProtoError::new("git-bad-rev").arg("rev", sha);
+    if !(4..=64).contains(&sha.len()) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    try_text(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            "--end-of-options",
+            &format!("{sha}^{{commit}}"),
+        ],
+    )
+    .filter(|s| !s.is_empty())
+    .ok_or_else(bad)
+}
+
+/// `diff-tree` arguments comparing `commit` with its first parent, or with the empty tree for
+/// a root commit (`--root`).
+fn commit_range(root: &Path, commit: &str) -> Vec<String> {
+    match try_text(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{commit}^1^{{commit}}"),
+        ],
+    ) {
+        Some(parent) if !parent.is_empty() => vec![parent, commit.to_owned()],
+        _ => vec!["--root".into(), "--no-commit-id".into(), commit.to_owned()],
+    }
+}
+
+/// Parse `diff-tree --name-status -z` output.
+pub fn parse_name_status(out: &[u8]) -> Vec<GitChange> {
+    let text = String::from_utf8_lossy(out);
+    let parts: Vec<&str> = text.split('\0').filter(|p| !p.is_empty()).collect();
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let st = parts[i];
+        i += 1;
+        let letter = st.bytes().next().unwrap_or(b'M');
+        if letter == b'R' || letter == b'C' {
+            let (Some(orig), Some(path)) = (parts.get(i), parts.get(i + 1)) else {
+                break;
+            };
+            i += 2;
+            files.push(GitChange {
+                path: (*path).to_owned(),
+                orig_path: Some((*orig).to_owned()),
+                kind: letter_kind(letter).unwrap_or(ChangeKind::Renamed),
+            });
+        } else {
+            let Some(path) = parts.get(i) else { break };
+            i += 1;
+            files.push(GitChange {
+                path: (*path).to_owned(),
+                orig_path: None,
+                kind: letter_kind(letter).unwrap_or(ChangeKind::Modified),
+            });
+        }
+    }
+    files
+}
+
+/// `git.commit_files`: files `sha` changed against its first parent (root: the empty tree),
+/// renames detected, in git's order.
+pub fn commit_files(root: &Path, sha: &str) -> Result<Vec<GitChange>, ProtoError> {
+    let commit = resolve_commit(root, sha)?;
+    let mut args: Vec<String> = ["diff-tree", "-r", "-M", "--name-status", "-z"]
+        .map(String::from)
+        .to_vec();
+    args.extend(commit_range(root, &commit));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(parse_name_status(&run(root, &refs)?))
+}
+
+/// `git.commit_diff`: patch of `sha` against its first parent (root: the empty tree); `path`
+/// = only that file (a rename's old path matches too).
+pub fn commit_diff(
+    root: &Path,
+    sha: &str,
+    path: Option<&str>,
+) -> Result<Vec<DiffFile>, ProtoError> {
+    let commit = resolve_commit(root, sha)?;
+    let range = commit_range(root, &commit);
+    let mut args: Vec<String> = [
+        "diff-tree",
+        "-r",
+        "-p",
+        "-M",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.extend(range.iter().cloned());
+    if let Some(p) = path {
+        // A renamed file: include the other side's path so rename detection pairs them.
+        let mut specs = vec![format!(":(literal){p}")];
+        let mut ns: Vec<String> = ["diff-tree", "-r", "-M", "--name-status", "-z"]
+            .map(String::from)
+            .to_vec();
+        ns.extend(range.iter().cloned());
+        let ns_ref: Vec<&str> = ns.iter().map(String::as_str).collect();
+        for c in parse_name_status(&run(root, &ns_ref)?) {
+            match c.orig_path {
+                Some(o) if c.path == p => specs.push(format!(":(literal){o}")),
+                Some(o) if o == p => specs.push(format!(":(literal){}", c.path)),
+                _ => {}
+            }
+        }
+        args.push("--".into());
+        args.extend(specs);
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let files = parse_diff(&run(root, &refs)?);
+    Ok(match path {
+        Some(p) => files
+            .into_iter()
+            .filter(|f| f.path == p || f.old_path.as_deref() == Some(p))
+            .collect(),
+        None => files,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,5 +1304,241 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(b.get("sub"), Some(&ChangeKind::Modified));
         assert!(badges(&t, "").is_empty());
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn history_log_files_diff_unpushed() {
+        let t = tmp("git-history");
+        let repo = t.join("repo");
+        init_repo(
+            &repo,
+            &[
+                ("a.txt", "one\ntwo\n"),
+                ("old.txt", "rename me\nline 2\nline 3\n"),
+            ],
+        );
+        let head = |r: &Path| git(r, &["rev-parse", "HEAD"]).trim().to_owned();
+        let root_sha = head(&repo);
+        std::fs::write(repo.join("a.txt"), "one\nTWO\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "edit a, add b"]);
+        let edit_sha = head(&repo);
+        git(&repo, &["mv", "old.txt", "새 이름.txt"]);
+        git(&repo, &["commit", "-qm", "rename"]);
+        let ren_sha = head(&repo);
+        // A merge commit: its files/diff are against the first parent.
+        git(&repo, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(repo.join("side.txt"), "s\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "side"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("b.txt"), "b\nmain\n").unwrap();
+        git(&repo, &["commit", "-qam", "main edit"]);
+        git(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        let merge_sha = head(&repo);
+
+        // Log paging: init, edit, rename, side, main edit, merge = 6 commits.
+        let all = log(&repo, 0, 0).unwrap();
+        assert_eq!((all.commits.len(), all.has_more), (6, false));
+        let c = &all.commits[0];
+        assert_eq!(
+            (
+                c.sha.as_str(),
+                c.subject.as_str(),
+                c.author.as_str(),
+                c.email.as_str()
+            ),
+            (merge_sha.as_str(), "merge side", "t", "t@example.com")
+        );
+        assert!(c.sha.starts_with(&c.short) && c.short.len() >= 4 && c.date > 1_600_000_000);
+        assert_eq!(all.commits[5].sha, root_sha);
+        let p1 = log(&repo, 0, 2).unwrap();
+        assert_eq!((p1.commits.len(), p1.has_more), (2, true));
+        let p3 = log(&repo, 4, 2).unwrap();
+        assert_eq!((p3.commits.len(), p3.has_more), (2, false));
+        assert_eq!(p3.commits[1].sha, root_sha);
+        let p4 = log(&repo, 5, 2).unwrap();
+        assert_eq!((p4.commits.len(), p4.has_more), (1, false));
+        assert!(log(&repo, 50, 2).unwrap().commits.is_empty());
+
+        // Commit files.
+        let kinds = |v: Vec<GitChange>| -> Vec<(String, Option<String>, ChangeKind)> {
+            v.into_iter()
+                .map(|c| (c.path, c.orig_path, c.kind))
+                .collect()
+        };
+        assert_eq!(
+            kinds(commit_files(&repo, &root_sha).unwrap()),
+            [
+                ("a.txt".into(), None, ChangeKind::Added),
+                ("old.txt".into(), None, ChangeKind::Added)
+            ]
+        );
+        assert_eq!(
+            kinds(commit_files(&repo, &edit_sha[..7]).unwrap()),
+            [
+                ("a.txt".into(), None, ChangeKind::Modified),
+                ("b.txt".into(), None, ChangeKind::Added)
+            ]
+        );
+        assert_eq!(
+            kinds(commit_files(&repo, &ren_sha).unwrap()),
+            [(
+                "새 이름.txt".into(),
+                Some("old.txt".into()),
+                ChangeKind::Renamed
+            )]
+        );
+        assert_eq!(
+            kinds(commit_files(&repo, &merge_sha).unwrap()),
+            [("side.txt".into(), None, ChangeKind::Added)]
+        );
+
+        // Commit diffs.
+        let d = commit_diff(&repo, &edit_sha, Some("a.txt")).unwrap();
+        assert_eq!(d.len(), 1);
+        let l: Vec<_> = d[0].hunks[0]
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            l,
+            [
+                (LineKind::Context, "one"),
+                (LineKind::Del, "two"),
+                (LineKind::Add, "TWO")
+            ]
+        );
+        let d = commit_diff(&repo, &edit_sha, None).unwrap();
+        assert_eq!(
+            d.iter()
+                .map(|f| (f.path.as_str(), f.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("a.txt", ChangeKind::Modified),
+                ("b.txt", ChangeKind::Added)
+            ]
+        );
+        let d = commit_diff(&repo, &root_sha, None).unwrap();
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().all(|f| f.kind == ChangeKind::Added));
+        assert_eq!(d[1].hunks[0].lines.len(), 3);
+        for p in ["새 이름.txt", "old.txt"] {
+            let d = commit_diff(&repo, &ren_sha, Some(p)).unwrap();
+            assert_eq!(
+                (
+                    d.len(),
+                    d[0].kind,
+                    d[0].path.as_str(),
+                    d[0].old_path.as_deref()
+                ),
+                (1, ChangeKind::Renamed, "새 이름.txt", Some("old.txt"))
+            );
+        }
+        let d = commit_diff(&repo, &merge_sha, None).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].path, "side.txt");
+        assert!(
+            commit_diff(&repo, &edit_sha, Some("nope.txt"))
+                .unwrap()
+                .is_empty()
+        );
+
+        // Invalid commit ids.
+        for bad in [
+            "-p",
+            "--output=x",
+            "HEAD",
+            "main",
+            "abc",
+            "zzzzzzz",
+            "deadbeefdeadbeef",
+            "",
+        ] {
+            assert_eq!(
+                commit_files(&repo, bad).unwrap_err().id,
+                "git-bad-rev",
+                "{bad}"
+            );
+            assert_eq!(
+                commit_diff(&repo, bad, None).unwrap_err().id,
+                "git-bad-rev",
+                "{bad}"
+            );
+        }
+
+        // Unpushed: nothing without a remote.
+        assert!(unpushed(&repo).is_empty());
+        let origin = t.join("origin.git");
+        git(&t, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&repo, &["push", "-q", "-u", "origin", "main"]);
+        assert!(unpushed(&repo).is_empty());
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "c1"]);
+        let c1 = head(&repo);
+        std::fs::write(repo.join("c.txt"), "c2\n").unwrap();
+        git(&repo, &["commit", "-qam", "c2"]);
+        let c2 = head(&repo);
+        assert_eq!(unpushed(&repo), [c2.clone(), c1.clone()]);
+        // A branch tracking nothing: the commits no remote branch has.
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("f.txt"), "f\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "f"]);
+        let f = head(&repo);
+        assert_eq!(unpushed(&repo), [f.clone(), c2.clone(), c1.clone()]);
+        // Published, then the remote branch deleted (merged PR): upstream gone -> none.
+        git(&repo, &["push", "-q", "-u", "origin", "feature"]);
+        assert!(unpushed(&repo).is_empty());
+        git(&repo, &["push", "-q", "origin", "--delete", "feature"]);
+        git(&repo, &["fetch", "-q", "--prune", "origin"]);
+        assert!(unpushed(&repo).is_empty());
+
+        // No commit yet: empty page, nothing unpushed.
+        let empty = t.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "-q"]);
+        let l = log(&empty, 0, 0).unwrap();
+        assert!(l.commits.is_empty() && !l.has_more);
+        assert!(unpushed(&empty).is_empty());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn log_and_name_status_parsing() {
+        let out = "aaaa\x1faa\x1fsubject: x\x1fme\x1f1700000000\x1fm@x\x1e\nbbbb\x1fbb\x1f\x1fyou\x1fbad\x1f\x1e\n";
+        let c = parse_log(out.as_bytes());
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            (c[0].subject.as_str(), c[0].date, c[0].email.as_str()),
+            ("subject: x", 1_700_000_000, "m@x")
+        );
+        assert_eq!(c[1].subject, "");
+        assert_eq!((c[1].date, c[1].email.as_str()), (0, ""));
+        let n = parse_name_status(b"M\0a.txt\0R087\0old\0new\0T\0link\0C100\0x\0y\0D\0gone\0");
+        let k: Vec<_> = n
+            .iter()
+            .map(|c| (c.path.as_str(), c.orig_path.as_deref(), c.kind))
+            .collect();
+        assert_eq!(
+            k,
+            [
+                ("a.txt", None, ChangeKind::Modified),
+                ("new", Some("old"), ChangeKind::Renamed),
+                ("link", None, ChangeKind::TypeChanged),
+                ("y", Some("x"), ChangeKind::Copied),
+                ("gone", None, ChangeKind::Deleted)
+            ]
+        );
     }
 }

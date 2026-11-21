@@ -373,6 +373,51 @@ async fn files_scenario(c: &Client, repo: &Path, root: &Path) {
         "path-denied"
     );
 
+    // History (Hermes Desk's History tab): commit the util.js edit on the session branch.
+    git(Path::new(&wt_path), &["commit", "-q", "-m", "history", "--", "src/util.js"]);
+    let page = c.git_log(sid, rp, 0, 2).await.unwrap();
+    assert_eq!((page.commits.len(), page.has_more), (2, true));
+    assert_eq!(page.commits[0].subject, "history");
+    let all = c.git_log(sid, rp, 0, 0).await.unwrap();
+    assert_eq!(
+        all.commits.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
+        ["history", "files", "init"]
+    );
+    assert!(!all.has_more);
+    let sha = all.commits[0].sha.clone();
+    let files = c.git_commit_files(sid, rp, &sha).await.unwrap();
+    assert_eq!(
+        files.iter().map(|f| (f.path.as_str(), f.kind)).collect::<Vec<_>>(),
+        [("src/util.js", ChangeKind::Modified)]
+    );
+    let root_files = c.git_commit_files(sid, rp, &all.commits[2].sha).await.unwrap();
+    assert_eq!(root_files[0].kind, ChangeKind::Added);
+    let d = c
+        .git_commit_diff(sid, rp, &all.commits[0].short, Some("src/util.js".into()))
+        .await
+        .unwrap();
+    assert_eq!(d[0].hunks[0].lines.last().unwrap().kind, LineKind::Del);
+    let d = c.git_commit_diff(sid, rp, &all.commits[1].sha, None).await.unwrap();
+    assert_eq!(d.len(), 4);
+    assert!(d.iter().all(|f| f.kind == ChangeKind::Added));
+    assert_eq!(
+        c.git_commit_diff(sid, rp, "-p", None).await.unwrap_err().id,
+        "git-bad-rev"
+    );
+    assert_eq!(
+        c.git_commit_files(sid, rp, "HEAD").await.unwrap_err().id,
+        "git-bad-rev"
+    );
+    assert_eq!(
+        c.git_commit_diff(sid, rp, &sha, Some("../x".into()))
+            .await
+            .unwrap_err()
+            .id,
+        "path-denied"
+    );
+    // No remote: nothing is marked unpushed.
+    assert!(c.git_unpushed(sid, rp).await.unwrap().is_empty());
+
     // Go to definition (file on disk, then unsaved editor text).
     let r = c.def_lookup(sid, rp, "src/main.js", 2, 2, None).await.unwrap();
     match r {

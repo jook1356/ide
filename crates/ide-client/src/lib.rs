@@ -28,9 +28,9 @@ pub use ide_proto::{
     SessionRepo, Support,
 };
 pub use ide_proto::{
-    AheadBehind, Attached, BrowseEntry, BrowseListing, ByteRange, ChangeKind,
+    AheadBehind, Attached, BrowseEntry, BrowseListing, ByteRange, ChangeKind, CommitInfo,
     DefResult, DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent,
-    FileMatch, FsEntry, FsStat, GitChange, GitRev, GitStatus, LineKind, NewSession, Notify,
+    FileMatch, FsEntry, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, NewSession, Notify,
     ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding,
     TextSearch, UserInfo, Welcome,
 };

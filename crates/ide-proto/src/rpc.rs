@@ -9,11 +9,11 @@ use crate::agents::{
 use crate::error::ProtoError;
 use crate::files::{
     BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
-    FsStat, GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
+    FsStat, GitChange, GitLog, GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 4;
+pub const PROTO_VERSION: u32 = 5;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -423,6 +423,37 @@ pub enum Request {
         rev: GitRev,
         base: Option<String>,
     },
+    /// A page of HEAD's history, newest first (`git log HEAD`): skip `skip` commits, return at
+    /// most `limit` (0 = [`crate::GIT_LOG_PAGE`]). No commit yet = an empty page.
+    GitLog {
+        session: String,
+        repo: String,
+        skip: u32,
+        limit: u32,
+    },
+    /// Full ids of the History tab's not-yet-pushed commits (Hermes Desk's ↑ marks): with an
+    /// upstream `upstream..HEAD`, with a gone upstream none, without one the commits no
+    /// remote-tracking branch has; at most [`crate::GIT_UNPUSHED_MAX`]. Empty without a remote.
+    GitUnpushed {
+        session: String,
+        repo: String,
+    },
+    /// Files a commit changed against its first parent (a root commit: against the empty
+    /// tree), renames detected. `sha`: hex commit id (4-64 digits), else `git-bad-rev`.
+    GitCommitFiles {
+        session: String,
+        repo: String,
+        sha: String,
+    },
+    /// Diff of a commit against its first parent (root commit: the empty tree); `path` `None`
+    /// = every file, else that file (a renamed file's old path matches too). Same
+    /// `Response::Diff` as `git.diff`.
+    GitCommitDiff {
+        session: String,
+        repo: String,
+        sha: String,
+        path: Option<String>,
+    },
     /// Go to definition at `line`/`col` (1-based; `col` in chars) of `path`. `text` = the
     /// editor's current (possibly unsaved) content; `None` = read the file.
     DefLookup {
@@ -492,6 +523,10 @@ impl Request {
             Request::GitStatus { .. } => "git.status",
             Request::GitDiff { .. } => "git.diff",
             Request::GitFileAt { .. } => "git.file_at",
+            Request::GitLog { .. } => "git.log",
+            Request::GitUnpushed { .. } => "git.unpushed",
+            Request::GitCommitFiles { .. } => "git.commit_files",
+            Request::GitCommitDiff { .. } => "git.commit_diff",
             Request::DefLookup { .. } => "def.lookup",
         }
     }
@@ -543,6 +578,12 @@ pub enum Response {
     GitStatus(GitStatus),
     Diff(Vec<DiffFile>),
     FileAt(Option<FileContent>),
+    /// `git.log`.
+    GitLog(GitLog),
+    /// `git.unpushed`: full commit ids.
+    GitUnpushed(Vec<String>),
+    /// `git.commit_files`.
+    GitChanges(Vec<GitChange>),
     Def(DefResult),
 }
 
@@ -717,6 +758,41 @@ mod tests {
                 result: Ok(Response::AccountState(AccountState::LoggedOut)),
             },
             RpcMessage::Notify(Notify::AccountsChanged),
+            RpcMessage::Request {
+                id: 7,
+                req: Request::GitCommitDiff {
+                    session: "s".into(),
+                    repo: "r".into(),
+                    sha: "abc1234".into(),
+                    path: Some("한글.txt".into()),
+                },
+            },
+            RpcMessage::Response {
+                id: 8,
+                result: Ok(Response::GitLog(GitLog {
+                    commits: vec![crate::CommitInfo {
+                        sha: "a".repeat(40),
+                        short: "aaaaaaa".into(),
+                        subject: "첫 커밋".into(),
+                        author: "t".into(),
+                        email: "t@example.com".into(),
+                        date: 1_700_000_000,
+                    }],
+                    has_more: true,
+                })),
+            },
+            RpcMessage::Response {
+                id: 9,
+                result: Ok(Response::GitChanges(vec![GitChange {
+                    path: "b.txt".into(),
+                    orig_path: Some("a.txt".into()),
+                    kind: crate::ChangeKind::Renamed,
+                }])),
+            },
+            RpcMessage::Response {
+                id: 10,
+                result: Ok(Response::GitUnpushed(vec!["b".repeat(40)])),
+            },
         ];
         for m in msgs {
             let b = m.encode();

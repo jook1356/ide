@@ -354,6 +354,38 @@ pub enum GitRev {
     Rev(String),
 }
 
+/// Default page size of `git.log` (`limit` 0), Hermes Desk's `LOG_PAGE`.
+pub const GIT_LOG_PAGE: u32 = 200;
+
+/// Most commits `git.unpushed` returns (Hermes Desk's `--max-count=500`; the UI shows `500+`).
+pub const GIT_UNPUSHED_MAX: u32 = 500;
+
+/// One commit of `git.log` (Hermes Desk's `CommitInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitInfo {
+    /// Full commit id.
+    pub sha: String,
+    /// Abbreviated commit id (`%h`).
+    pub short: String,
+    /// First line of the message.
+    pub subject: String,
+    /// Author name.
+    pub author: String,
+    /// Author email.
+    pub email: String,
+    /// Author date, unix seconds.
+    pub date: i64,
+}
+
+/// `git.log` result: one page of HEAD's history, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitLog {
+    /// The commits of this page.
+    pub commits: Vec<CommitInfo>,
+    /// More commits follow this page (ask again with `skip + commits.len()`).
+    pub has_more: bool,
+}
+
 /// A go-to-definition target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefTarget {

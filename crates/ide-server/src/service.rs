@@ -1276,6 +1276,34 @@ impl UserCtx {
                     blob.map(|b| fsops::content_from_bytes(&rel, &b, 0)),
                 ))
             }
+            Request::GitLog {
+                session,
+                repo,
+                skip,
+                limit,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                git::log(j.root(), skip, limit).map(Response::GitLog)
+            }
+            Request::GitUnpushed { session, repo } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                Ok(Response::GitUnpushed(git::unpushed(j.root())))
+            }
+            Request::GitCommitFiles { session, repo, sha } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                git::commit_files(j.root(), &sha).map(Response::GitChanges)
+            }
+            Request::GitCommitDiff {
+                session,
+                repo,
+                sha,
+                path,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                // Only the syntax is checked: the file may no longer exist in the worktree.
+                let path = path.map(|p| normalize_rel(&p)).transpose()?;
+                git::commit_diff(j.root(), &sha, path.as_deref()).map(Response::Diff)
+            }
             Request::DefLookup {
                 session,
                 repo,

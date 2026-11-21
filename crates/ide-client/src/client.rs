@@ -9,7 +9,7 @@ use bytes::Bytes;
 use ide_proto::{
     AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
-    GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
+    GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
     SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
 };
@@ -1100,6 +1100,92 @@ impl Client {
             .await,
             |r| match r {
                 Response::FileAt(f) => Some(f),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.log`: a page of HEAD's history, newest first (`limit` 0 = Hermes Desk's page of
+    /// [`ide_proto::GIT_LOG_PAGE`]); `has_more` = ask again with `skip + commits.len()`.
+    pub async fn git_log(
+        &self,
+        session: &str,
+        repo: &str,
+        skip: u32,
+        limit: u32,
+    ) -> Result<GitLog, ProtoError> {
+        expect(
+            self.call(Request::GitLog {
+                session: session.into(),
+                repo: repo.into(),
+                skip,
+                limit,
+            })
+            .await,
+            |r| match r {
+                Response::GitLog(l) => Some(l),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.unpushed`: full ids of the commits the History tab marks as not pushed (at most
+    /// [`ide_proto::GIT_UNPUSHED_MAX`]; the badge shows `500+` at the cap). Empty without a
+    /// remote.
+    pub async fn git_unpushed(&self, session: &str, repo: &str) -> Result<Vec<String>, ProtoError> {
+        expect(
+            self.call(Request::GitUnpushed {
+                session: session.into(),
+                repo: repo.into(),
+            })
+            .await,
+            |r| match r {
+                Response::GitUnpushed(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.commit_files`: files a commit changed against its first parent (renames detected).
+    pub async fn git_commit_files(
+        &self,
+        session: &str,
+        repo: &str,
+        sha: &str,
+    ) -> Result<Vec<GitChange>, ProtoError> {
+        expect(
+            self.call(Request::GitCommitFiles {
+                session: session.into(),
+                repo: repo.into(),
+                sha: sha.into(),
+            })
+            .await,
+            |r| match r {
+                Response::GitChanges(v) => Some(v),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.commit_diff`: structured diff of a commit against its first parent (root commit:
+    /// everything added); `path` `None` = every file.
+    pub async fn git_commit_diff(
+        &self,
+        session: &str,
+        repo: &str,
+        sha: &str,
+        path: Option<String>,
+    ) -> Result<Vec<DiffFile>, ProtoError> {
+        expect(
+            self.call(Request::GitCommitDiff {
+                session: session.into(),
+                repo: repo.into(),
+                sha: sha.into(),
+                path,
+            })
+            .await,
+            |r| match r {
+                Response::Diff(d) => Some(d),
                 _ => None,
             },
         )

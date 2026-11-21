@@ -20,10 +20,10 @@ pub use agents::{
 };
 pub use error::ProtoError;
 pub use files::{
-    AheadBehind, BrowseEntry, BrowseListing, ByteRange, ChangeKind, DefResult,
+    AheadBehind, BrowseEntry, BrowseListing, ByteRange, ChangeKind, CommitInfo, DefResult,
     DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent, FileMatch,
-    FsEntry, FsStat, GitChange, GitRev, GitStatus, LineKind, SearchMatch, SearchSummary,
-    TextEncoding, TextSearch,
+    FsEntry, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus,
+    LineKind, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
 pub use frame::{Frame, FrameError, FrameKind, MAX_FRAME_LEN, MAX_PAYLOAD};
 pub use mux::{
