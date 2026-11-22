@@ -461,6 +461,40 @@ impl Client {
         expect_configuration(self.call(Request::ConfigurationUpdate(c)).await)
     }
 
+    /// `attach.put`: store `data` as an attachment of `session` (in pieces of
+    /// [`ide_proto::ATTACH_CHUNK`]); returns its absolute path on the server.
+    pub async fn attach_file(
+        &self,
+        session: &str,
+        name: &str,
+        data: &[u8],
+    ) -> Result<String, ProtoError> {
+        let mut upload: Option<String> = None;
+        let mut path = String::new();
+        // An empty file is still created (one empty piece).
+        let empty: &[u8] = &[];
+        let pieces = data
+            .chunks(ide_proto::ATTACH_CHUNK)
+            .chain(std::iter::once(empty).filter(|_| data.is_empty()));
+        for piece in pieces {
+            let r = self
+                .call(Request::AttachPut {
+                    session: session.into(),
+                    name: name.into(),
+                    upload: upload.clone(),
+                    data: piece.to_vec(),
+                })
+                .await;
+            let (n, p) = expect(r, |r| match r {
+                Response::AttachPath { name, path } => Some((name, path)),
+                _ => None,
+            })?;
+            upload.get_or_insert(n);
+            path = p;
+        }
+        Ok(path)
+    }
+
     /// `skill.create`: a new skill (a `SKILL.md` from `name` and `description`).
     pub async fn skill_create(
         &self,
@@ -1113,8 +1147,65 @@ impl Client {
                 repo: repo.into(),
                 path: path.into(),
                 recursive,
+                trash: false,
             })
             .await,
+        )
+    }
+
+    /// `fs.delete` with `trash`: to the recycle bin / trash (Explore's 삭제).
+    pub async fn fs_trash(&self, session: &str, repo: &str, path: &str) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::FsDelete {
+                session: session.into(),
+                repo: repo.into(),
+                path: path.into(),
+                recursive: true,
+                trash: true,
+            })
+            .await,
+        )
+    }
+
+    /// `fs.copy`: copy `from` (root-relative, or an absolute server path with `external`) into
+    /// `to_dir`; returns the copy's root-relative path.
+    pub async fn fs_copy(
+        &self,
+        session: &str,
+        repo: &str,
+        from: &str,
+        external: bool,
+        to_dir: &str,
+    ) -> Result<String, ProtoError> {
+        expect(
+            self.call(Request::FsCopy {
+                session: session.into(),
+                repo: repo.into(),
+                from: from.into(),
+                external,
+                to_dir: to_dir.into(),
+            })
+            .await,
+            |r| match r {
+                Response::FsCopied(p) => Some(p),
+                _ => None,
+            },
+        )
+    }
+
+    /// `git.remote_url`: the web address of `path` on the repo's origin.
+    pub async fn git_remote_url(&self, session: &str, repo: &str, path: &str) -> Result<String, ProtoError> {
+        expect(
+            self.call(Request::GitRemoteUrl {
+                session: session.into(),
+                repo: repo.into(),
+                path: path.into(),
+            })
+            .await,
+            |r| match r {
+                Response::Url(u) => Some(u),
+                _ => None,
+            },
         )
     }
 

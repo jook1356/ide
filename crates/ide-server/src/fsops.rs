@@ -558,6 +558,105 @@ pub fn rename(jail: &RootJail, from: &str, to: &str) -> Result<(), ProtoError> {
     std::fs::rename(&a, &b).map_err(|e| io_error(&nf, &e))
 }
 
+/// `fs.copy`: copy `from` (root-relative, or with `external` an absolute path of the server's
+/// machine, e.g. files copied in its file manager) into the folder `to_dir` (`""` = the root).
+/// A taken name becomes `name copy.ext`, `name copy 2.ext`, ... (VS Code). Links are skipped.
+/// Returns the new root-relative path.
+pub fn copy(jail: &RootJail, from: &str, external: bool, to_dir: &str) -> Result<String, ProtoError> {
+    let src = if external {
+        let p = PathBuf::from(from);
+        if !p.is_absolute() {
+            return Err(crate::jail::invalid(from));
+        }
+        p
+    } else {
+        let nf = normalize_rel(from)?;
+        deny_git_internal(&nf)?;
+        jail.resolve_entry(&nf)?
+    };
+    let m = std::fs::symlink_metadata(&src).map_err(|e| io_error(from, &e))?;
+    let dir_rel = if to_dir.is_empty() {
+        String::new()
+    } else {
+        normalize_rel(to_dir)?
+    };
+    if !dir_rel.is_empty() {
+        deny_git_internal(&dir_rel)?;
+    }
+    let dir = if dir_rel.is_empty() {
+        jail.root().to_path_buf()
+    } else {
+        jail.resolve(&dir_rel)?
+    };
+    if !dir.is_dir() {
+        return Err(err("fs-not-found", &dir_rel));
+    }
+    if m.is_dir() && dir.starts_with(&src) {
+        return Err(crate::jail::invalid(&dir_rel));
+    }
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| crate::jail::invalid(from))?;
+    let name = copy_name(&dir, &name);
+    let to = dir.join(&name);
+    if m.is_dir() {
+        copy_tree(&src, &to).map_err(|e| io_error(from, &e))?;
+    } else {
+        std::fs::copy(&src, &to).map_err(|e| io_error(from, &e))?;
+    }
+    Ok(if dir_rel.is_empty() {
+        name
+    } else {
+        format!("{dir_rel}/{name}")
+    })
+}
+
+/// `name` in `dir`, or `stem copy.ext`, `stem copy 2.ext`, ... when it is taken.
+fn copy_name(dir: &Path, name: &str) -> String {
+    if std::fs::symlink_metadata(dir.join(name)).is_err() {
+        return name.to_owned();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    std::iter::once(format!("{stem} copy{ext}"))
+        .chain((2..).map(|n| format!("{stem} copy {n}{ext}")))
+        .find(|c| std::fs::symlink_metadata(dir.join(c)).is_err())
+        .expect("a free name")
+}
+
+/// Recursive copy of a folder (links skipped).
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for ent in std::fs::read_dir(from)? {
+        let ent = ent?;
+        let p = ent.path();
+        if is_link(&p) {
+            continue;
+        }
+        let dst = to.join(ent.file_name());
+        if ent.file_type()?.is_dir() {
+            copy_tree(&p, &dst)?;
+        } else {
+            std::fs::copy(&p, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move an entry to the recycle bin / trash (`fs.delete` with `trash`).
+pub fn trash(jail: &RootJail, rel: &str) -> Result<(), ProtoError> {
+    let norm = normalize_rel(rel)?;
+    deny_git_internal(&norm)?;
+    let abs = jail.resolve_entry(&norm)?;
+    std::fs::symlink_metadata(&abs).map_err(|e| io_error(&norm, &e))?;
+    ::trash::delete(&abs).map_err(|e| {
+        ProtoError::new("io").arg("path", norm.as_str()).arg("detail", e.to_string())
+    })
+}
+
 /// `fs.delete` (a link is removed, never its target).
 pub fn delete(jail: &RootJail, rel: &str, recursive: bool) -> Result<(), ProtoError> {
     let norm = normalize_rel(rel)?;
@@ -840,6 +939,32 @@ mod tests {
             .id,
             "fs-unencodable"
         );
+    }
+
+    #[test]
+    fn copy_names_and_folders() {
+        let t = tmp("fscopy");
+        let root = t.join("wt");
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("src/sub/b.rs"), "b").unwrap();
+        let j = RootJail::new(&root).unwrap();
+        // Into a folder, then a taken name: " copy", " copy 2".
+        assert_eq!(copy(&j, "a.txt", false, "src").unwrap(), "src/a.txt");
+        assert_eq!(copy(&j, "a.txt", false, "").unwrap(), "a copy.txt");
+        assert_eq!(copy(&j, "a.txt", false, "").unwrap(), "a copy 2.txt");
+        // A folder with its content.
+        assert_eq!(copy(&j, "src/sub", false, "").unwrap(), "sub");
+        assert_eq!(std::fs::read_to_string(root.join("sub/b.rs")).unwrap(), "b");
+        // Not into itself.
+        assert!(copy(&j, "src", false, "src/sub").is_err());
+        // From outside the root (a file copied in the file manager).
+        let outside = t.join("out.md");
+        std::fs::write(&outside, "o").unwrap();
+        let ext = outside.display().to_string();
+        assert_eq!(copy(&j, &ext, true, "src").unwrap(), "src/out.md");
+        assert!(copy(&j, "out.md", true, "").is_err(), "external paths are absolute");
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

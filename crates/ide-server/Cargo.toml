@@ -9,6 +9,8 @@ name = "ide-server"
 path = "src/main.rs"
 
 [dependencies]
+# Explore's 삭제: to the recycle bin / trash (Hermes Desk), not gone for good.
+trash = "5"
 ide-core.workspace = true
 ide-agents.workspace = true
 ide-proto.workspace = true

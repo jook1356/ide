@@ -188,6 +188,15 @@ where
         .await
         .expect("create session");
     assert_eq!(s.state, SessionState::Running);
+    // Attachments (input-box chips): stored under the session's data folder, sent in pieces.
+    let big: Vec<u8> = (0..ide_proto::ATTACH_CHUNK * 2 + 123).map(|i| (i % 251) as u8).collect();
+    let p1 = c1.attach_file(&s.id, r"C:\shots\shot 1.png", &big).await.unwrap();
+    assert!(p1.ends_with("shot 1.png") && p1.contains("attachments"), "{p1}");
+    assert_eq!(std::fs::read(&p1).unwrap(), big);
+    let p2 = c1.attach_file(&s.id, "shot 1.png", b"x").await.unwrap();
+    assert!(p2.ends_with("shot 1-2.png"), "{p2}");
+    let empty = c1.attach_file(&s.id, "../../empty.txt", b"").await.unwrap();
+    assert!(empty.ends_with("empty.txt") && std::fs::read(&empty).unwrap().is_empty());
     assert_eq!(
         (
             s.provider.as_str(),

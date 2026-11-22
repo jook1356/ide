@@ -13,7 +13,11 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 8;
+pub const PROTO_VERSION: u32 = 10;
+/// Largest `attach.put` piece (a frame holds at most 1 MiB).
+pub const ATTACH_CHUNK: usize = 512 * 1024;
+/// Largest attachment.
+pub const ATTACH_MAX: u64 = 50 * 1024 * 1024;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -438,6 +442,18 @@ pub enum Request {
         #[serde(with = "crate::bin")]
         bytes: Vec<u8>,
     },
+    /// A file for an agent's prompt (an input-box attachment: a screenshot, or a file the
+    /// client has but the server's machine has not), stored under the session's data folder
+    /// (`<data>/sessions/<id>/attachments/`). Sent in pieces of at most [`ATTACH_CHUNK`]:
+    /// the first (`upload: None`) creates the file (`name` made a safe, unique file name), the
+    /// next ones append to it (`upload` = the stored name). Answers `AttachPath`.
+    AttachPut {
+        session: String,
+        name: String,
+        upload: Option<String>,
+        #[serde(with = "crate::bin")]
+        data: Vec<u8>,
+    },
     TermResize {
         session: String,
         cols: u16,
@@ -498,12 +514,33 @@ pub enum Request {
         from: String,
         to: String,
     },
-    /// Delete a file, symlink or folder (non-empty folders need `recursive`).
+    /// Delete a file, symlink or folder (non-empty folders need `recursive`); with `trash`, to
+    /// the recycle bin / trash instead (Explore's 삭제).
     FsDelete {
         session: String,
         repo: String,
         path: String,
         recursive: bool,
+        #[serde(default)]
+        trash: bool,
+    },
+    /// Copy `from` (root-relative, or with `external` an absolute path of the server's machine)
+    /// into the folder `to_dir` (`""` = the root); a taken name gets ` copy` (VS Code).
+    /// Answers `FsCopied` (the new root-relative path).
+    FsCopy {
+        session: String,
+        repo: String,
+        from: String,
+        #[serde(default)]
+        external: bool,
+        to_dir: String,
+    },
+    /// The web address of `path` (root-relative) on the repo's `origin` at its current branch
+    /// (Explore's 원격 파일 URL 복사); `git-no-origin` without one. Answers `Url`.
+    GitRemoteUrl {
+        session: String,
+        repo: String,
+        path: String,
     },
     /// Start sending `Notify::FsChanged`/`GitChanged` for the session to this connection.
     FsWatch {
@@ -907,6 +944,7 @@ impl Request {
             Request::TermAttach { .. } => "term.attach",
             Request::TermDetach { .. } => "term.detach",
             Request::TermWrite { .. } => "term.write",
+            Request::AttachPut { .. } => "attach.put",
             Request::TermResize { .. } => "term.resize",
             Request::ServerShutdown => "server.shutdown",
             Request::FsList { .. } => "fs.list",
@@ -917,6 +955,8 @@ impl Request {
             Request::FsCreateDir { .. } => "fs.create_dir",
             Request::FsRename { .. } => "fs.rename",
             Request::FsDelete { .. } => "fs.delete",
+            Request::FsCopy { .. } => "fs.copy",
+            Request::GitRemoteUrl { .. } => "git.remote_url",
             Request::FsWatch { .. } => "fs.watch",
             Request::FsUnwatch { .. } => "fs.unwatch",
             Request::BrowsePickList { .. } => "browse.pick_list",
@@ -984,6 +1024,16 @@ pub enum Response {
     AccountState(AccountState),
     Configurations(Vec<ConfigurationInfo>),
     Configuration(ConfigurationInfo),
+    /// Where an attachment is stored on the server (`attach.put`): its file name and
+    /// absolute path.
+    AttachPath {
+        name: String,
+        path: String,
+    },
+    /// Where `fs.copy` put the copy (root-relative).
+    FsCopied(String),
+    /// A web address (`git.remote_url`).
+    Url(String),
     /// A skill's `SKILL.md`.
     SkillText(String),
     Sessions(Vec<SessionInfo>),

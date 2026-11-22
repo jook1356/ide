@@ -1206,6 +1206,12 @@ impl UserCtx {
             | Request::UTermStop { .. }
             | Request::UTermRerun { .. }
             | Request::UTermRemove { .. }) => self.handle_uterm(r),
+            Request::AttachPut {
+                session,
+                name,
+                upload,
+                data,
+            } => self.attach_put(&session, &name, upload.as_deref(), &data),
             Request::SessionStart { id } => {
                 let s = self.resolve_session(&id)?;
                 self.start(&s)?;
@@ -1360,14 +1366,57 @@ impl UserCtx {
                 repo,
                 path,
                 recursive,
+                trash,
             } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 {
                     let _g = self.write_lock.lock().unwrap();
-                    fsops::delete(&j, &path, recursive)?;
+                    if trash {
+                        fsops::trash(&j, &path)?;
+                    } else {
+                        fsops::delete(&j, &path, recursive)?;
+                    }
                 }
                 self.audit_fs("fs.delete", &session, &repo, &normalize_rel(&path)?);
                 Ok(Response::Unit)
+            }
+            Request::FsCopy {
+                session,
+                repo,
+                from,
+                external,
+                to_dir,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                let to = {
+                    let _g = self.write_lock.lock().unwrap();
+                    fsops::copy(&j, &from, external, &to_dir)?
+                };
+                self.audit_fs("fs.copy", &session, &repo, &format!("{from} -> {to}"));
+                Ok(Response::FsCopied(to))
+            }
+            Request::GitRemoteUrl {
+                session,
+                repo,
+                path,
+            } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                let rel = normalize_rel(&path)?;
+                let origin = crate::pr::origin_repo(j.root())?;
+                let branch = ide_core::git_raw(j.root(), &["rev-parse", "--abbrev-ref", "HEAD"], &[])
+                    .ok()
+                    .filter(|o| o.code == Some(0))
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    .filter(|b| !b.is_empty() && b != "HEAD")
+                    .unwrap_or_else(|| "HEAD".into());
+                let enc = |s: &str| s.replace('%', "%25").replace(' ', "%20").replace('#', "%23");
+                let segments: Vec<String> = rel.split('/').map(enc).collect();
+                Ok(Response::Url(format!(
+                    "{}/blob/{}/{}",
+                    origin.web,
+                    enc(&branch),
+                    segments.join("/")
+                )))
             }
             Request::BrowsePickList { abs_dir } => {
                 fsops::pick_list(abs_dir.as_deref(), home_dir().as_deref()).map(Response::Browse)
@@ -2371,6 +2420,58 @@ impl UserCtx {
     }
 
     /// `uterm.*` requests.
+    /// `attach.put`: store (a piece of) an attachment under the session's data folder.
+    fn attach_put(
+        &self,
+        session: &str,
+        name: &str,
+        upload: Option<&str>,
+        data: &[u8],
+    ) -> Result<Response, ProtoError> {
+        use std::io::Write as _;
+        let s = self.resolve_session(session)?;
+        let too_large =
+            || ProtoError::new("attach-too-large").arg("max", (ide_proto::ATTACH_MAX >> 20).to_string());
+        if data.len() > ide_proto::ATTACH_CHUNK {
+            return Err(too_large());
+        }
+        let dir = self.paths.session_dir(&s.id.to_string()).join("attachments");
+        let io = |e: std::io::Error| ProtoError::new("io").arg("detail", e.to_string());
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        let (file_name, mut file) = match upload {
+            None => {
+                let name = unique_name(&dir, &attachment_name(name));
+                let f = std::fs::File::create(dir.join(&name)).map_err(io)?;
+                (name, f)
+            }
+            Some(n) => {
+                // Only a name this folder handed out (no separators, existing).
+                if attachment_name(n) != n || !dir.join(n).is_file() {
+                    return Err(ProtoError::new("attach-not-found").arg("name", n));
+                }
+                let f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(dir.join(n))
+                    .map_err(io)?;
+                (n.to_owned(), f)
+            }
+        };
+        file.write_all(data).map_err(io)?;
+        let path = dir.join(&file_name);
+        if file.metadata().map(|m| m.len()).unwrap_or(0) > ide_proto::ATTACH_MAX {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(too_large());
+        }
+        if upload.is_none() {
+            self.audit("attach.put", &format!("{session}/{file_name}"));
+        }
+        Ok(Response::AttachPath {
+            name: file_name,
+            path: path.display().to_string(),
+        })
+    }
+
     fn handle_uterm(&self, req: Request) -> Result<Response, ProtoError> {
         match req {
             Request::UTermOpen {
@@ -2466,5 +2567,57 @@ impl UserCtx {
             }
             _ => Err(ProtoError::new("bad-request")),
         }
+    }
+}
+
+/// A safe file name for an attachment: the last component of `name`, characters Windows
+/// forbids replaced with `_`, "attachment" when nothing is left.
+fn attachment_name(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = last
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    let clean = clean.trim().trim_matches('.').to_owned();
+    if clean.is_empty() {
+        "attachment".into()
+    } else {
+        clean
+    }
+}
+
+/// `name` in `dir`, or `stem-2.ext`, `stem-3.ext`, ... when it is taken.
+fn unique_name(dir: &std::path::Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_owned();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (2..)
+        .map(|n| format!("{stem}-{n}{ext}"))
+        .find(|c| !dir.join(c).exists())
+        .expect("a free name")
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_names() {
+        assert_eq!(attachment_name(r"C:\shots\a b.png"), "a b.png");
+        assert_eq!(attachment_name("../../evil.txt"), "evil.txt");
+        assert_eq!(attachment_name("a:b?.png"), "a_b_.png");
+        assert_eq!(attachment_name(".."), "attachment");
+        assert_eq!(attachment_name(""), "attachment");
+        let t = std::env::temp_dir().join(format!("ide-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(t.join("x.png"), "").unwrap();
+        std::fs::write(t.join("x-2.png"), "").unwrap();
+        assert_eq!(unique_name(&t, "x.png"), "x-3.png");
+        assert_eq!(unique_name(&t, "y"), "y");
+        let _ = std::fs::remove_dir_all(&t);
     }
 }
