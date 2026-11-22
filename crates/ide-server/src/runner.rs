@@ -10,6 +10,10 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::audit::Audit;
 
+/// Environment variables that turn colours off in CLIs (`NO_COLOR`, https://no-color.org;
+/// `FORCE_COLOR=0` for Node's chalk / supports-color); removed from terminal processes.
+const NO_COLOR_VARS: [&str; 2] = ["NO_COLOR", "FORCE_COLOR"];
+
 /// What to run in a PTY.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
@@ -96,6 +100,13 @@ impl Runner for SameUserRunner {
         cmd.cwd(&spec.cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // The terminal shows colours: a "no colour" setting of whoever started the server (an
+        // IDE's tool shell, CI) is about its own output, not this terminal's. Claude Code, codex
+        // and most CLIs drop every colour (and Claude its grey prompt background) when they
+        // inherit it. A spec may still set it on purpose (`spec.env` is applied after).
+        for k in NO_COLOR_VARS {
+            cmd.env_remove(k);
+        }
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
