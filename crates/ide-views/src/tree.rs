@@ -72,12 +72,35 @@ pub enum TreeEvent {
     CreateFile { dir: String, name: String },
     CreateFolder { dir: String, name: String },
     Rename { path: String, new_name: String },
-    /// Delete was requested (menu or the Delete key): confirm first, then delete.
-    Delete(String),
+    /// Delete was requested (menu or the Delete key) for the selection: confirm first.
+    Delete(Vec<String>),
+    /// Rows were dragged (pressed and moved): their paths. Released over a folder of the tree
+    /// they become [`TreeEvent::Move`]; anywhere else [`TreeEvent::DragEnd`] (the owner may
+    /// drop them elsewhere, e.g. into an input box).
+    DragStart(Vec<String>),
+    DragEnd,
+    /// Move these entries into the folder `to_dir` (`""` = the root).
+    Move { paths: Vec<String>, to_dir: String },
+    /// Hermes Desk's Explore menu: 채팅에 첨부, 잘라내기 / 복사 / 붙여넣기 (into a folder),
+    /// 탐색기에서 보기 (`None` = the root), 경로 복사 / 상대 경로 복사 / 원격 파일 URL 복사.
+    Attach(Vec<String>),
+    Cut(Vec<String>),
+    Copy(Vec<String>),
+    Paste(String),
+    Reveal(Option<String>),
+    CopyPath(String),
+    CopyRelPath(String),
+    CopyRemoteUrl(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum TreeMessage {
+    /// A row was pressed and moved (a drag), the pointer is over a row during a drag, it left
+    /// the tree, and the drag ended.
+    DragStart(usize),
+    DragOver(usize),
+    DragLeave,
+    DragEnd,
     Click(usize),
     Context(usize),
     /// Right press anywhere in the tree (position for the menu).
@@ -91,9 +114,16 @@ pub enum TreeMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
-    Open,
     NewFile,
     NewFolder,
+    Attach,
+    Cut,
+    Copy,
+    Paste,
+    Reveal,
+    CopyPath,
+    CopyRelPath,
+    CopyRemoteUrl,
     Rename,
     Delete,
     Close,
@@ -142,6 +172,14 @@ pub struct FileTree {
     pending_menu_row: Option<usize>,
     focus_id: iced::widget::Id,
     input_id: iced::widget::Id,
+    /// The selected entries (Ctrl+click toggles, Shift+click takes a range from `selected`,
+    /// the anchor); `selected` alone when empty.
+    selection: Vec<String>,
+    /// Keyboard modifiers at the last click (set by the owner, see [`FileTree::set_modifiers`]).
+    modifiers: Modifiers,
+    /// The entries being dragged, and the folder they would move into.
+    drag: Option<Vec<String>>,
+    drop_dir: Option<String>,
 }
 
 impl Default for FileTree {
@@ -164,9 +202,58 @@ impl FileTree {
             pending_menu_row: None,
             focus_id: iced::widget::Id::unique(),
             input_id: iced::widget::Id::unique(),
+            selection: Vec::new(),
+            modifiers: Modifiers::empty(),
+            drag: None,
+            drop_dir: None,
         };
         t.rebuild();
         t
+    }
+
+    /// The keyboard modifiers for the next click (Ctrl toggles, Shift takes a range). The
+    /// owner tracks them (the tree only sees key presses).
+    pub fn set_modifiers(&mut self, m: Modifiers) {
+        self.modifiers = m;
+    }
+
+    /// Whether `path` is selected.
+    fn is_selected(&self, path: &str) -> bool {
+        if self.selection.is_empty() {
+            self.selected.as_deref() == Some(path)
+        } else {
+            self.selection.iter().any(|p| p == path)
+        }
+    }
+
+    /// The selected paths, without those inside an also-selected folder (moved / deleted once
+    /// with it; Desk's `topmost`).
+    pub fn selected_paths(&self) -> Vec<String> {
+        let all: Vec<String> = if self.selection.is_empty() {
+            self.selected.clone().into_iter().collect()
+        } else {
+            self.selection.clone()
+        };
+        all.iter()
+            .filter(|p| !all.iter().any(|o| o != *p && p.starts_with(&format!("{o}/"))))
+            .cloned()
+            .collect()
+    }
+
+    /// Select only `path` (it becomes the anchor).
+    fn select_only(&mut self, path: &str) {
+        self.selected = Some(path.to_owned());
+        self.selection = vec![path.to_owned()];
+    }
+
+    /// The folder an entry stands for as a target: itself, or a file's folder.
+    fn folder_for(&self, i: usize) -> Option<String> {
+        let (p, e) = self.entry_at(i)?;
+        Some(if e.is_dir {
+            p.to_owned()
+        } else {
+            split(p).0.to_owned()
+        })
     }
 
     /// Sets (or refreshes) the children of folder `dir` (`""` = root). Sorted here: folders
@@ -231,7 +318,7 @@ impl FileTree {
                 events.push(TreeEvent::Expand(acc.clone()));
             }
         }
-        self.selected = Some(path.to_owned());
+        self.select_only(path);
         self.rebuild();
         let task = match self.row_of(path) {
             Some(i) => self.list.center(i, ROW_H),
@@ -245,7 +332,8 @@ impl FileTree {
         iced::widget::operation::focus(self.focus_id.clone())
     }
 
-    fn row_of(&self, path: &str) -> Option<usize> {
+    /// The visible row showing `path`, if any (scripts drive drags by row).
+    pub fn row_of(&self, path: &str) -> Option<usize> {
         self.rows
             .iter()
             .position(|r| matches!(r.kind, RowKind::Entry(_)) && r.path == path)
@@ -320,7 +408,7 @@ impl FileTree {
             return (Task::none(), None);
         };
         let path = path.to_owned();
-        self.selected = Some(path.clone());
+        self.select_only(&path);
         (self.list.ensure_visible(i, ROW_H), Some(TreeEvent::Select(path)))
     }
 
@@ -346,13 +434,87 @@ impl FileTree {
                 self.list.on_scroll(&v);
                 (Task::none(), None)
             }
+            TreeMessage::DragStart(i) => {
+                let Some((path, _)) = self.entry_at(i) else {
+                    return (Task::none(), None);
+                };
+                let path = path.to_owned();
+                // The whole selection when the dragged row is in it, else that row alone.
+                if !self.is_selected(&path) {
+                    self.select_only(&path);
+                }
+                let paths = self.selected_paths();
+                self.drag = Some(paths.clone());
+                self.drop_dir = None;
+                (Task::none(), Some(TreeEvent::DragStart(paths)))
+            }
+            TreeMessage::DragOver(i) => {
+                if self.drag.is_some() {
+                    self.drop_dir = self.folder_for(i);
+                }
+                (Task::none(), None)
+            }
+            TreeMessage::DragLeave => {
+                self.drop_dir = None;
+                (Task::none(), None)
+            }
+            TreeMessage::DragEnd => {
+                let drag = self.drag.take();
+                let target = self.drop_dir.take();
+                match (drag, target) {
+                    // Released over the tree: move what may move (not into itself, not where
+                    // it already is; Desk).
+                    (Some(paths), Some(to_dir)) => {
+                        let movable: Vec<String> = paths
+                            .into_iter()
+                            .filter(|p| {
+                                *p != to_dir
+                                    && split(p).0 != to_dir
+                                    && !to_dir.starts_with(&format!("{p}/"))
+                            })
+                            .collect();
+                        let ev = (!movable.is_empty()).then_some(TreeEvent::Move {
+                            paths: movable,
+                            to_dir,
+                        });
+                        (Task::none(), ev.or(Some(TreeEvent::DragEnd)))
+                    }
+                    _ => (Task::none(), Some(TreeEvent::DragEnd)),
+                }
+            }
             TreeMessage::Click(i) => {
                 self.menu = None;
                 let Some((path, e)) = self.entry_at(i) else {
                     return (Task::none(), None);
                 };
                 let (path, is_dir) = (path.to_owned(), e.is_dir);
-                self.selected = Some(path.clone());
+                let m = self.modifiers;
+                if m.command() {
+                    // Ctrl+click: toggle in the selection.
+                    if self.selection.is_empty()
+                        && let Some(s) = self.selected.clone()
+                    {
+                        self.selection.push(s);
+                    }
+                    if let Some(k) = self.selection.iter().position(|p| *p == path) {
+                        self.selection.remove(k);
+                    } else {
+                        self.selection.push(path.clone());
+                    }
+                    self.selected = Some(path);
+                    return (Task::none(), None);
+                }
+                if m.shift()
+                    && let Some(a) = self.selected.clone().and_then(|s| self.row_of(&s))
+                {
+                    // Shift+click: the entries from the anchor to here.
+                    let (lo, hi) = (a.min(i), a.max(i));
+                    self.selection = (lo..=hi)
+                        .filter_map(|k| self.entry_at(k).map(|(p, _)| p.to_owned()))
+                        .collect();
+                    return (Task::none(), None);
+                }
+                self.select_only(&path);
                 if is_dir {
                     (Task::none(), self.toggle(&path))
                 } else {
@@ -360,8 +522,12 @@ impl FileTree {
                 }
             }
             TreeMessage::Context(i) => {
+                // Right-clicking outside the selection targets just that row (VS Code, Desk).
                 if let Some((path, _)) = self.entry_at(i) {
-                    self.selected = Some(path.to_owned());
+                    let path = path.to_owned();
+                    if !self.is_selected(&path) {
+                        self.select_only(&path);
+                    }
                 }
                 self.pending_menu_row = Some(i);
                 (Task::none(), None)
@@ -387,10 +553,23 @@ impl FileTree {
                     return (Task::none(), None);
                 };
                 let path = menu.path.clone().unwrap_or_default();
+                // The folder the menu targets: the row's folder, or the root.
+                let folder = if menu.is_dir {
+                    path.clone()
+                } else {
+                    split(&path).0.to_owned()
+                };
+                let some = |e: TreeEvent| (Task::none(), Some(e));
                 match action {
                     MenuAction::Close => (Task::none(), None),
-                    MenuAction::Open if menu.is_dir => (Task::none(), self.toggle(&path)),
-                    MenuAction::Open => (Task::none(), Some(TreeEvent::Open(path))),
+                    MenuAction::Attach => some(TreeEvent::Attach(self.selected_paths())),
+                    MenuAction::Cut => some(TreeEvent::Cut(self.selected_paths())),
+                    MenuAction::Copy => some(TreeEvent::Copy(self.selected_paths())),
+                    MenuAction::Paste => some(TreeEvent::Paste(folder)),
+                    MenuAction::Reveal => some(TreeEvent::Reveal(menu.path.clone())),
+                    MenuAction::CopyPath => some(TreeEvent::CopyPath(path)),
+                    MenuAction::CopyRelPath => some(TreeEvent::CopyRelPath(path)),
+                    MenuAction::CopyRemoteUrl => some(TreeEvent::CopyRemoteUrl(path)),
                     MenuAction::NewFile | MenuAction::NewFolder => {
                         // Create inside the folder (or next to the file).
                         let dir = if menu.is_dir {
@@ -417,7 +596,10 @@ impl FileTree {
                         }
                         None => (Task::none(), None),
                     },
-                    MenuAction::Delete => (Task::none(), menu.path.map(TreeEvent::Delete)),
+                    MenuAction::Delete => (
+                        Task::none(),
+                        menu.path.map(|_| TreeEvent::Delete(self.selected_paths())),
+                    ),
                 }
             }
             TreeMessage::EditInput(v) => {
@@ -467,6 +649,22 @@ impl FileTree {
         }
         let n = self.rows.len();
         let cur = self.selected_index();
+        // Ctrl/Cmd+C / X / V: copy, cut, paste (into the selected row's folder).
+        if mods.command()
+            && !mods.alt()
+            && let Key::Character(c) = &key
+        {
+            let ev = match c.as_str() {
+                "c" => Some(TreeEvent::Copy(self.selected_paths())),
+                "x" => Some(TreeEvent::Cut(self.selected_paths())),
+                "v" => Some(TreeEvent::Paste(
+                    cur.and_then(|c| self.folder_for(c)).unwrap_or_default(),
+                )),
+                _ => None,
+            };
+            let ev = ev.filter(|e| !matches!(e, TreeEvent::Copy(p) | TreeEvent::Cut(p) if p.is_empty()));
+            return (Task::none(), ev);
+        }
         let Key::Named(named) = key else {
             return (Task::none(), None);
         };
@@ -568,7 +766,10 @@ impl FileTree {
                 }
                 None => (Task::none(), None),
             },
-            Named::Delete => (Task::none(), self.selected.clone().map(TreeEvent::Delete)),
+            Named::Delete => {
+                let paths = self.selected_paths();
+                (Task::none(), (!paths.is_empty()).then_some(TreeEvent::Delete(paths)))
+            }
             _ => (Task::none(), None),
         }
     }
@@ -585,6 +786,8 @@ impl FileTree {
             .id(self.focus_id.clone())
             .on_key(|k, m| Some(TreeMessage::Key(k.clone(), m)))
             .on_right_press(TreeMessage::ContextAt);
+        // A drag that leaves the tree no longer moves anything (it may drop elsewhere).
+        let base = mouse_area(base).on_exit(TreeMessage::DragLeave);
         // Always a stack with the list first, so opening the menu keeps the list's scroll state.
         let Some(menu) = &self.menu else {
             return container(stack![base]).style(theme::bg(theme::PANEL)).boxed();
@@ -593,25 +796,68 @@ impl FileTree {
         let backdrop = mouse_area(space().width(Length::Fill).height(Length::Fill))
             .on_press(TreeMessage::Menu(MenuAction::Close))
             .on_right_press(TreeMessage::Menu(MenuAction::Close));
-        let item = |label: String, action: MenuAction| {
-            button(text(label).size(theme::UI_SIZE))
+        // Hermes Desk's Explore menu (`ExploreTree.tsx`): the same items, order and shortcuts.
+        let item = |label: String, keys: &'static str, action: MenuAction| {
+            button(
+                row![
+                    text(label).size(theme::UI_SIZE).width(Length::Fill),
+                    text(keys).size(11).color(theme::FAINT),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([4, 10])
+            .style(theme::menu_item(action == MenuAction::Delete))
+            .on_press(TreeMessage::Menu(action))
+            .boxed()
+        };
+        let divider = || {
+            container(space())
+                .height(1)
                 .width(Length::Fill)
-                .padding([4, 10])
-                .style(theme::menu_item(action == MenuAction::Delete))
-                .on_press(TreeMessage::Menu(action))
+                .style(theme::bg(theme::BORDER))
                 .boxed()
         };
-        let mut items = Column::new().spacing(1).width(Length::Fixed(170.0));
-        if menu.path.is_some() {
-            items = items.push(item(tr::tree_open(), MenuAction::Open));
+        let on_row = menu.path.is_some();
+        let count = self.selected_paths().len();
+        let single = on_row && count <= 1;
+        let mut items = Column::new().spacing(1).width(Length::Fixed(220.0));
+        items = items
+            .push(item(tr::tree_new_file(), "", MenuAction::NewFile))
+            .push(item(tr::tree_new_folder(), "", MenuAction::NewFolder))
+            .push(divider());
+        if on_row {
+            let attach = if count > 1 {
+                tr::tree_attach_many(count as i64)
+            } else {
+                tr::tree_attach()
+            };
+            items = items
+                .push(item(attach, "", MenuAction::Attach))
+                .push(divider())
+                .push(item(tr::tree_cut(), "Ctrl+X", MenuAction::Cut))
+                .push(item(tr::tree_copy(), "Ctrl+C", MenuAction::Copy));
         }
         items = items
-            .push(item(tr::tree_new_file(), MenuAction::NewFile))
-            .push(item(tr::tree_new_folder(), MenuAction::NewFolder));
-        if menu.path.is_some() {
-            items = items
-                .push(item(tr::rename(), MenuAction::Rename))
-                .push(item(tr::delete(), MenuAction::Delete));
+            .push(item(tr::tree_paste(), "Ctrl+V", MenuAction::Paste))
+            .push(divider())
+            .push(item(reveal_os_label(), "", MenuAction::Reveal));
+        if on_row {
+            // Path items are for one entry only (VS Code's single-selection menu, Desk).
+            if single {
+                items = items
+                    .push(divider())
+                    .push(item(tr::item_copy_path(), "", MenuAction::CopyPath))
+                    .push(item(tr::item_copy_rel(), "", MenuAction::CopyRelPath));
+                if !menu.is_dir {
+                    items = items.push(item(tr::tree_copy_remote_url(), "", MenuAction::CopyRemoteUrl));
+                }
+            }
+            items = items.push(divider());
+            if single {
+                items = items.push(item(tr::rename(), "F2", MenuAction::Rename));
+            }
+            items = items.push(item(tr::delete(), "Del", MenuAction::Delete));
         }
         let card = container(items).padding(4).style(theme::card);
         let placed = container(card).padding(Padding {
@@ -712,7 +958,9 @@ impl FileTree {
                             .boxed(),
                     );
                 }
-                let selected = self.selected.as_deref() == Some(r.path.as_str());
+                let selected = self.is_selected(&r.path);
+                // During a drag the folder it would move into is marked (Desk).
+                let drop_here = e.is_dir && self.drop_dir.as_deref() == Some(r.path.as_str());
                 let b = button(
                     line.padding(Padding {
                         right: 10.0,
@@ -724,7 +972,29 @@ impl FileTree {
                 .width(Length::Fill)
                 .style(theme::row(selected))
                 .on_press(TreeMessage::Click(i));
-                mouse_area(b).on_right_press(TreeMessage::Context(i)).boxed()
+                let b: Element<'_, TreeMessage> = if drop_here {
+                    container(b)
+                        .style(|_| container::Style {
+                            border: iced::Border {
+                                color: theme::ACCENT,
+                                width: 1.0,
+                                radius: 3.0.into(),
+                            },
+                            ..container::Style::default()
+                        })
+                        .boxed()
+                } else {
+                    b.boxed()
+                };
+                // Pressing and moving a row drags it (the selection): over a folder of the
+                // tree it moves there, elsewhere it goes to the owner (the input box). A plain
+                // click still opens it.
+                crate::Reorder::new(mouse_area(b).on_right_press(TreeMessage::Context(i)).boxed())
+                    .on_start(TreeMessage::DragStart(i))
+                    .on_end(TreeMessage::DragEnd)
+                    .active(self.drag.is_some())
+                    .on_over(move |_| TreeMessage::DragOver(i))
+                    .boxed()
             }
         }
     }
@@ -754,6 +1024,16 @@ fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
+/// "<file manager> 에서 보기" in this OS's words.
+fn reveal_os_label() -> String {
+    if cfg!(windows) {
+        tr::item_reveal_windows()
+    } else if cfg!(target_os = "macos") {
+        tr::item_reveal_finder()
+    } else {
+        tr::item_reveal_files()
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(unused_must_use)]
@@ -810,7 +1090,66 @@ mod tests {
         let (_, ev) = t.update(key(Named::ArrowLeft));
         assert_eq!(ev, Some(TreeEvent::Collapse("src".into())));
         let (_, ev) = t.update(key(Named::Delete));
-        assert_eq!(ev, Some(TreeEvent::Delete("src".into())));
+        assert_eq!(ev, Some(TreeEvent::Delete(vec!["src".into()])));
+    }
+
+    #[test]
+    fn multi_selection_drag_move_and_menu() {
+        let mut t = FileTree::new();
+        t.set_children(
+            "",
+            vec![
+                TreeEntry::dir("src"),
+                TreeEntry::file("a.txt"),
+                TreeEntry::file("b.txt"),
+                TreeEntry::file("c.txt"),
+            ],
+        );
+        // Rows: 0 src (collapsed), 1 a.txt, 2 b.txt, 3 c.txt.
+        t.update(TreeMessage::Click(1));
+        t.set_modifiers(Modifiers::SHIFT);
+        t.update(TreeMessage::Click(3));
+        assert_eq!(t.selected_paths(), ["a.txt", "b.txt", "c.txt"]);
+        t.set_modifiers(Modifiers::CTRL);
+        let (_, ev) = t.update(TreeMessage::Click(2));
+        assert_eq!(ev, None, "a Ctrl+click only selects");
+        assert_eq!(t.selected_paths(), ["a.txt", "c.txt"]);
+        t.set_modifiers(Modifiers::empty());
+        // Dragging a selected row drags the selection; over the folder and released: a move.
+        let (_, ev) = t.update(TreeMessage::DragStart(3));
+        assert_eq!(ev, Some(TreeEvent::DragStart(vec!["a.txt".into(), "c.txt".into()])));
+        t.update(TreeMessage::DragOver(0));
+        let (_, ev) = t.update(TreeMessage::DragEnd);
+        assert_eq!(
+            ev,
+            Some(TreeEvent::Move {
+                paths: vec!["a.txt".into(), "c.txt".into()],
+                to_dir: "src".into()
+            })
+        );
+        // Released outside the tree: the owner gets it.
+        t.update(TreeMessage::DragStart(1));
+        t.update(TreeMessage::DragOver(0));
+        t.update(TreeMessage::DragLeave);
+        let (_, ev) = t.update(TreeMessage::DragEnd);
+        assert_eq!(ev, Some(TreeEvent::DragEnd));
+        // Dropped where it already is: nothing moves.
+        t.update(TreeMessage::DragStart(1));
+        t.update(TreeMessage::DragOver(2));
+        let (_, ev) = t.update(TreeMessage::DragEnd);
+        assert_eq!(ev, Some(TreeEvent::DragEnd));
+        // The menu on an unselected row targets it alone; paste goes into the row's folder.
+        t.update(TreeMessage::Context(2));
+        t.update(TreeMessage::ContextAt(Point::new(5.0, 5.0)));
+        let (_, ev) = t.update(TreeMessage::Menu(MenuAction::Copy));
+        assert_eq!(ev, Some(TreeEvent::Copy(vec!["b.txt".into()])));
+        t.update(TreeMessage::Context(0));
+        t.update(TreeMessage::ContextAt(Point::new(5.0, 5.0)));
+        let (_, ev) = t.update(TreeMessage::Menu(MenuAction::Paste));
+        assert_eq!(ev, Some(TreeEvent::Paste("src".into())));
+        // Ctrl+C on the selection.
+        let (_, ev) = t.update(TreeMessage::Key(Key::Character("c".into()), Modifiers::CTRL));
+        assert_eq!(ev, Some(TreeEvent::Copy(vec!["src".into()])));
     }
 
     #[test]

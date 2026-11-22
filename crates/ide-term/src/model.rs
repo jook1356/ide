@@ -406,6 +406,11 @@ impl TermModel {
         self.0.notifier.ack();
     }
 
+    /// Show the newest output (leave the scrollback), as typing does.
+    pub fn scroll_to_bottom(&self) {
+        self.lock_term().scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+    }
+
     /// Locks the terminal state (grid, modes, selection). Keep the guard short-lived: `feed`
     /// parses under the same lock.
     pub fn lock_term(&self) -> impl std::ops::DerefMut<Target = Term<EventProxy>> + '_ {

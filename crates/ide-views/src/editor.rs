@@ -38,6 +38,13 @@ const AUTOSCROLL_MAX: i32 = 8;
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// The × of a chip's close mark (the colour comes from the draw call).
+static CLOSE_ICON: std::sync::LazyLock<iced::advanced::svg::Handle> = std::sync::LazyLock::new(|| {
+    iced::advanced::svg::Handle::from_memory(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M1.5 1.5l7 7m0-7l-7 7" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>"##.as_slice(),
+    )
+});
+
 /// A find match: byte range `start..end` on 0-based `line`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Match {
@@ -313,6 +320,28 @@ pub struct CodeEditor<'a, M> {
     on_ctrl_click: Option<M>,
     matches: &'a [Match],
     current_match: Option<usize>,
+    /// Chat-input look ([`CodeEditor::plain`]): no gutter, current-line band or background.
+    plain: bool,
+    font: iced::Font,
+    padding: iced::Padding,
+    /// Grow with the text up to this height, then scroll (`None` = fill the space).
+    max_height: Option<f32>,
+    placeholder: Option<String>,
+    text_color: iced::Color,
+    placeholder_color: iced::Color,
+    /// Spans drawn as pills behind their text (attachments in a chat input), and the pill's
+    /// fill and border.
+    chips: &'a [Match],
+    chip_colors: (iced::Color, iced::Color),
+    /// The chips' close marks (one span each, the `×` in the chip's text): pressed, they
+    /// publish `on_chip_close(index)` instead of moving the cursor.
+    chip_close: &'a [Match],
+    on_chip_close: Option<Box<dyn Fn(usize) -> M + 'a>>,
+    /// Each chip's label (same order as `chips`), drawn over its pill at `chip_label_size`,
+    /// `chip_label_inset` from the pill's left edge (the chip's text is only its room).
+    chip_labels: &'a [String],
+    chip_label_size: f32,
+    chip_label_inset: f32,
 }
 
 struct State {
@@ -364,7 +393,129 @@ impl<'a, M: Clone> CodeEditor<'a, M> {
             on_ctrl_click: None,
             matches: &[],
             current_match: None,
+            plain: false,
+            font: theme::MONO,
+            padding: iced::Padding {
+                top: PAD_TOP,
+                left: PAD_LEFT,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            max_height: None,
+            placeholder: None,
+            text_color: theme::CODE_TEXT,
+            placeholder_color: theme::LINE_NO,
+            chips: &[],
+            chip_colors: (theme::FIND_MATCH, theme::FIND_MATCH_BORDER),
+            chip_close: &[],
+            on_chip_close: None,
+            chip_labels: &[],
+            chip_label_size: 12.0,
+            chip_label_inset: 4.0,
         }
+    }
+
+    /// Labels drawn over the chips' pills (same order as the chips), at `size`, `inset` from
+    /// a pill's left edge.
+    pub fn chip_labels(mut self, labels: &'a [String], size: f32, inset: f32) -> Self {
+        self.chip_labels = labels;
+        self.chip_label_size = size;
+        self.chip_label_inset = inset;
+        self
+    }
+
+    /// The chips' close marks (spans of their `×`) and what pressing one publishes.
+    pub fn chip_close(mut self, marks: &'a [Match], f: impl Fn(usize) -> M + 'a) -> Self {
+        self.chip_close = marks;
+        self.on_chip_close = Some(Box::new(f));
+        self
+    }
+
+    /// The horizontal scroll that applies to drawing: none in the (wrapping) plain look.
+    fn h_scroll(&self, horizontal: f32) -> f32 {
+        if self.plain { 0.0 } else { horizontal }
+    }
+
+    /// Screen rectangles of `spans` in the laid-out text: (index in `spans`, rectangle), one per
+    /// visual segment.
+    fn span_rects(&self, ed: &GEditor, text: Rectangle, spans: &[Match]) -> Vec<(usize, Rectangle)> {
+        let buffer = ed.buffer();
+        let hf = ed.hint_factor().unwrap_or(1.0);
+        let scroll = buffer.scroll();
+        let mut out = Vec::new();
+        for run in buffer.layout_runs() {
+            for (k, m) in spans.iter().enumerate().filter(|(_, m)| m.line == run.line_i) {
+                let a = cosmic_text::Cursor::new(m.line, m.start);
+                let b = cosmic_text::Cursor::new(m.line, m.end);
+                for (x, w) in run.highlight(a, b) {
+                    out.push((
+                        k,
+                        Rectangle::new(
+                            Point::new(
+                                text.x + (x - self.h_scroll(scroll.horizontal)) / hf,
+                                text.y + run.line_top / hf,
+                            ),
+                            Size::new(w / hf, run.line_height / hf),
+                        ),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The close mark under `p`, if any.
+    fn close_at(&self, bounds: Rectangle, p: Point) -> Option<usize> {
+        if self.chip_close.is_empty() {
+            return None;
+        }
+        let ed = self.content.editor.borrow();
+        self.span_rects(&ed, self.text_bounds(bounds), self.chip_close)
+            .into_iter()
+            .find(|(_, r)| r.expand(2.0).contains(p))
+            .map(|(k, _)| k)
+    }
+
+    /// The chat-input look: no gutter, no current-line band, no background, text in `font` at
+    /// `size` / `line_height`, soft-wrapped.
+    pub fn plain(mut self, font: iced::Font, size: f32, line_height: f32) -> Self {
+        self.plain = true;
+        self.font = font;
+        self.size = size;
+        self.line_height = line_height;
+        self.wrap = true;
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<iced::Padding>) -> Self {
+        self.padding = padding.into();
+        self
+    }
+
+    /// Grow with the text up to `max` (then scroll) instead of filling the space.
+    pub fn max_height(mut self, max: f32) -> Self {
+        self.max_height = Some(max);
+        self
+    }
+
+    /// Shown while the text is empty.
+    pub fn placeholder(mut self, text: impl Into<String>) -> Self {
+        self.placeholder = Some(text.into());
+        self
+    }
+
+    /// Text and placeholder colours.
+    pub fn colors(mut self, text: iced::Color, placeholder: iced::Color) -> Self {
+        self.text_color = text;
+        self.placeholder_color = placeholder;
+        self
+    }
+
+    /// Spans (sorted by position) drawn as pills behind their text, with their fill and border.
+    pub fn chips(mut self, spans: &'a [Match], fill: iced::Color, border: iced::Color) -> Self {
+        self.chips = spans;
+        self.chip_colors = (fill, border);
+        self
     }
 
     pub fn id(mut self, id: widget::Id) -> Self {
@@ -407,17 +558,21 @@ impl<'a, M: Clone> CodeEditor<'a, M> {
     }
 
     fn gutter_width(&self) -> f32 {
+        if self.plain {
+            return 0.0;
+        }
         let digits = self.content.line_count().max(1).ilog10() as f32 + 1.0;
         (digits.max(3.0) * self.size * 0.6 + 2.0 * GUTTER_PAD).ceil()
     }
 
     fn text_bounds(&self, bounds: Rectangle) -> Rectangle {
-        let g = self.gutter_width() + PAD_LEFT;
+        let p = self.padding;
+        let g = self.gutter_width() + p.left;
         Rectangle {
             x: bounds.x + g,
-            y: bounds.y + PAD_TOP,
-            width: (bounds.width - g).max(0.0),
-            height: (bounds.height - PAD_TOP).max(0.0),
+            y: bounds.y + p.top,
+            width: (bounds.width - g - p.right).max(0.0),
+            height: (bounds.height - p.top - p.bottom).max(0.0),
         }
     }
 
@@ -431,9 +586,10 @@ impl<'a, M: Clone> CodeEditor<'a, M> {
         let max_top = total - visible;
         let track = Rectangle {
             x: bounds.x + bounds.width - SCROLLBAR_W,
-            y: bounds.y,
+            // The plain look keeps the bar off a rounded box's corners (Desk: 6 px).
+            y: bounds.y + if self.plain { 6.0 } else { 0.0 },
             width: SCROLLBAR_W,
-            height: bounds.height,
+            height: bounds.height - if self.plain { 12.0 } else { 0.0 },
         };
         let h = (track.height * visible as f32 / total as f32)
             .max(THUMB_MIN)
@@ -494,7 +650,12 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
     }
 
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Fill)
+        let h = if self.max_height.is_some() {
+            Length::Shrink
+        } else {
+            Length::Fill
+        };
+        Size::new(Length::Fill, h)
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) {
@@ -508,11 +669,14 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
             text::Parser::change_line(parser, 0);
             state.generation = self.content.generation;
         }
-        let size = limits.resolve(Length::Fill, Length::Fill, Size::ZERO);
+        let mut size = limits.resolve(Length::Fill, Length::Fill, Size::ZERO);
+        if let Some(max) = self.max_height {
+            size.height = max.min(limits.max.height);
+        }
         let text = self.text_bounds(Rectangle::new(Point::ORIGIN, size));
         self.content.editor.borrow_mut().update(
             text.size(),
-            theme::MONO,
+            self.font,
             Pixels(self.size),
             LineHeight::Absolute(Pixels(self.line_height)),
             if self.wrap {
@@ -525,6 +689,21 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
             parser,
         );
         self.content.apply_reveal();
+        // Growing: as tall as the laid-out lines (at least one), up to the cap; scrolled
+        // means the text is taller than the cap.
+        if self.max_height.is_some() {
+            let ed = self.content.editor.borrow();
+            let hf = ed.hint_factor().unwrap_or(1.0);
+            let buffer = ed.buffer();
+            let used = buffer
+                .layout_runs()
+                .map(|r| (r.line_top + r.line_height) / hf)
+                .fold(self.line_height, f32::max);
+            if buffer.scroll().line == 0 {
+                let p = self.padding;
+                size.height = (used + p.top + p.bottom).min(size.height);
+            }
+        }
         tree.size = size;
     }
 
@@ -549,6 +728,20 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         let text_bounds = self.text_bounds(bounds);
         if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
             state.pointer = Some(*position);
+            // The close marks' hover look.
+            if !self.chip_close.is_empty() {
+                shell.request_redraw();
+            }
+        }
+
+        // A chip's close mark: remove the chip, the cursor stays where it is.
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && let (Some(f), Some(p)) = (&self.on_chip_close, cursor.position_over(bounds))
+            && let Some(k) = self.close_at(bounds, p)
+        {
+            shell.publish(f(k));
+            shell.capture_event();
+            return;
         }
 
         // Scrollbar: drag the thumb, or press the track to jump there (then drag on).
@@ -710,27 +903,29 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         {
             let mut parser = state.parser.borrow_mut();
             parser.follow_view(ed.buffer().scroll().line);
-            ed.highlight(theme::MONO, &mut *parser, syntax::code_style);
+            ed.highlight(self.font, &mut *parser, syntax::code_style);
         }
 
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds,
-                ..Default::default()
-            },
-            theme::BG,
-        );
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    x: bounds.x + gutter_w - 1.0,
-                    width: 1.0,
-                    ..bounds
+        if !self.plain {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-            theme::HOVER,
-        );
+                theme::BG,
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + gutter_w - 1.0,
+                        width: 1.0,
+                        ..bounds
+                    },
+                    ..Default::default()
+                },
+                theme::HOVER,
+            );
+        }
 
         let hf = ed.hint_factor().unwrap_or(1.0);
         let cur = ed.cursor();
@@ -738,7 +933,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         let clip = bounds.intersection(viewport).unwrap_or(bounds);
         let text_clip = text_bounds
             .expand(iced::Padding {
-                left: PAD_LEFT,
+                left: self.padding.left,
                 ..Default::default()
             })
             .intersection(viewport)
@@ -747,7 +942,11 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
             let buffer = ed.buffer();
             let scroll = buffer.scroll();
             let mut last_line = usize::MAX;
+            // Gutter and current-line band (not in the plain look).
             renderer.with_layer(clip, |renderer| {
+                if self.plain {
+                    return;
+                }
                 for run in buffer.layout_runs() {
                     let y = text_bounds.y + run.line_top / hf;
                     let h = run.line_height / hf;
@@ -807,7 +1006,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
                             for (x, w) in run.highlight(a, b) {
                                 let r = Rectangle::new(
                                     Point::new(
-                                        text_bounds.x + (x - scroll.horizontal) / hf,
+                                        text_bounds.x + (x - self.h_scroll(scroll.horizontal)) / hf,
                                         text_bounds.y + run.line_top / hf,
                                     ),
                                     Size::new(w / hf, run.line_height / hf),
@@ -833,16 +1032,164 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
                     }
                 });
             }
+            // Chips: a pill behind each span (its padding is in the text), clipped to the
+            // whole widget so the pill's ends are not cut at the text's edges.
+            if !self.chips.is_empty() {
+                let (fill, border) = self.chip_colors;
+                renderer.with_layer(clip, |renderer| {
+                    for run in buffer.layout_runs() {
+                        let first = self.chips.partition_point(|m| m.line < run.line_i);
+                        for m in self.chips[first..].iter().take_while(|m| m.line == run.line_i) {
+                            let a = cosmic_text::Cursor::new(m.line, m.start);
+                            let b = cosmic_text::Cursor::new(m.line, m.end);
+                            for (x, w) in run.highlight(a, b) {
+                                let h = run.line_height / hf;
+                                let r = Rectangle::new(
+                                    Point::new(
+                                        text_bounds.x + (x - self.h_scroll(scroll.horizontal)) / hf,
+                                        text_bounds.y + run.line_top / hf + 1.0,
+                                    ),
+                                    Size::new(w / hf, h - 2.0),
+                                );
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: r,
+                                        border: iced::Border {
+                                            color: border,
+                                            width: 1.0,
+                                            radius: 4.0.into(),
+                                        },
+                                        ..Default::default()
+                                    },
+                                    fill,
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // Chip labels: over each chip's first pill segment, vertically centred.
+        if !self.chip_labels.is_empty() {
+            let pills = self.span_rects(&ed, text_bounds, self.chips);
+            renderer.with_layer(clip, |renderer| {
+                let mut seen = Vec::new();
+                for (k, r) in pills {
+                    if seen.contains(&k) {
+                        continue;
+                    }
+                    seen.push(k);
+                    let Some(label) = self.chip_labels.get(k).filter(|l| !l.is_empty()) else {
+                        continue;
+                    };
+                    renderer.fill_text(
+                        text::Text {
+                            content: label.clone(),
+                            bounds: Size::new(r.width, r.height),
+                            size: Pixels(self.chip_label_size),
+                            line_height: LineHeight::Absolute(Pixels(r.height)),
+                            font: self.font,
+                            align_x: text::Alignment::Default,
+                            align_y: alignment::Vertical::Center,
+                            shaping: text::Shaping::Advanced,
+                            wrapping: Wrapping::None,
+                            ellipsis: text::Ellipsis::None,
+                            hint_factor: renderer.hint_factor(),
+                        },
+                        Point::new(r.x + self.chip_label_inset, r.center_y()),
+                        self.text_color,
+                        clip,
+                    );
+                }
+            });
+        }
+
+        // The close marks: an × centred in each mark's slot (the font's `×` sits low), with a
+        // round spot behind the hovered one.
+        if !self.chip_close.is_empty() {
+            use iced::advanced::svg::{Renderer as _, Svg};
+            let over = cursor.position_over(bounds);
+            let rects = self.span_rects(&ed, text_bounds, self.chip_close);
+            renderer.with_layer(clip, |renderer| {
+                for (_, r) in rects {
+                    let c = r.center();
+                    let hovered = over.is_some_and(|p| r.expand(2.0).contains(p));
+                    if hovered {
+                        let d = (r.height - 4.0).min(r.width + 8.0);
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(c.x - d / 2.0, c.y - d / 2.0),
+                                    Size::new(d, d),
+                                ),
+                                border: iced::Border {
+                                    radius: (d / 2.0).into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                            self.chip_colors.1,
+                        );
+                    }
+                    let s = 7.0;
+                    let color = if hovered {
+                        self.text_color
+                    } else {
+                        iced::Color {
+                            a: 0.65,
+                            ..self.text_color
+                        }
+                    };
+                    renderer.draw_svg(
+                        Svg::new(CLOSE_ICON.clone()).color(color),
+                        Rectangle::new(Point::new(c.x - s / 2.0, c.y - s / 2.0), Size::new(s, s)),
+                        clip,
+                    );
+                }
+            });
+        }
+
+        // Placeholder of an empty text.
+        // (`ed` is borrowed: read the buffer through it, not through `self.content`.)
+        if let Some(p) = &self.placeholder
+            && ed.buffer().lines.len() <= 1
+            && ed.buffer().lines.first().is_none_or(|l| l.text().is_empty())
+        {
+            renderer.fill_text(
+                text::Text {
+                    content: p.clone(),
+                    bounds: text_bounds.size(),
+                    size: Pixels(self.size),
+                    line_height: LineHeight::Absolute(Pixels(self.line_height)),
+                    font: self.font,
+                    align_x: text::Alignment::Default,
+                    align_y: alignment::Vertical::Top,
+                    shaping: text::Shaping::Advanced,
+                    wrapping: Wrapping::None,
+                    ellipsis: text::Ellipsis::End,
+                    hint_factor: renderer.hint_factor(),
+                },
+                text_bounds.position(),
+                self.placeholder_color,
+                text_clip,
+            );
         }
 
         renderer.with_layer(text_clip, |renderer| {
             state.editor.draw(
                 &*ed,
                 renderer,
-                text_bounds.position(),
+                // The plain look wraps: iced's editor still nudges the view sideways (up to
+                // its cursor width) at a line's right edge; undo that, it only clips the text.
+                text_bounds.position()
+                    + iced::Vector::new(
+                        if self.plain { ed.buffer().scroll().horizontal / ed.hint_factor().unwrap_or(1.0) } else { 0.0 },
+                        0.0,
+                    ),
                 text_clip,
                 core_editor::Style {
-                    value: theme::CODE_TEXT,
+                    value: self.text_color,
                     selection: theme::SELECTION,
                 },
             );
@@ -889,8 +1236,13 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         let on_bar = self
             .scrollbar(layout.bounds())
             .is_some_and(|b| cursor.is_over(b.track));
+        let on_close = cursor
+            .position_over(layout.bounds())
+            .is_some_and(|p| self.close_at(layout.bounds(), p).is_some());
         if on_bar || state.thumb_grab.is_some() {
             mouse::Interaction::default()
+        } else if on_close {
+            mouse::Interaction::Pointer
         } else if cursor.is_over(self.text_bounds(layout.bounds())) {
             if state.modifiers.command() && self.on_ctrl_click.is_some() {
                 mouse::Interaction::Pointer

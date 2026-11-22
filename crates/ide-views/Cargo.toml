@@ -7,7 +7,7 @@ description = "Client-side iced views fed by plain view models: file tree, code 
 
 [dependencies]
 # `highlighter`: iced's syntect (two-face grammars) parser, reused for the editor and diff lines.
-iced = { workspace = true, features = ["advanced", "tokio", "wgpu", "highlighter"] }
+iced = { workspace = true, features = ["advanced", "tokio", "wgpu", "highlighter", "svg"] }
 ide-i18n.workspace = true
 similar.workspace = true
 

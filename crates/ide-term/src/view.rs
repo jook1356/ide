@@ -50,6 +50,8 @@ pub enum ViewEvent {
     Focused,
     /// The widget lost keyboard focus (click outside or a focus operation).
     Unfocused,
+    /// Ctrl+V found no text on the clipboard (it may hold files or an image).
+    PasteNotText,
 }
 
 /// Cell metrics in logical pixels.
@@ -452,6 +454,8 @@ impl<'a, Message> TerminalView<'a, Message> {
                     self.model.lock_term().scroll_display(Scroll::Bottom);
                     let bytes = self.model.paste_bytes(t);
                     self.input(shell, bytes);
+                } else {
+                    self.emit(shell, ViewEvent::PasteNotText);
                 }
                 shell.capture_event();
                 shell.request_redraw();
