@@ -13,7 +13,8 @@ path = "src/main.rs"
 # `cargo build --release -p ide-app -p ide-server` (alias: `cargo app`).
 
 [dependencies]
-iced = { workspace = true, features = ["advanced", "svg", "tokio", "wgpu"] }
+# `image`: clipboard images (screenshots pasted into the input box).
+iced = { workspace = true, features = ["advanced", "svg", "tokio", "wgpu", "image"] }
 ide-client = { workspace = true, features = ["iced"] }
 ide-proto.workspace = true
 ide-i18n.workspace = true

@@ -129,6 +129,8 @@ pub struct Live {
     pub uterms: Vec<crate::uterm::UTermView>,
     /// Browser tabs beyond the session's web page (`browser.rs`).
     pub browsers: Vec<crate::browser::Browser>,
+    /// The input box under the terminal: draft and sent history (`composer.rs`).
+    pub composer: crate::composer::Composer,
     /// Files, diffs, tree, changes and search of the session.
     pub detail: Detail,
 }
@@ -151,6 +153,7 @@ impl Live {
             can_forward: false,
             uterms: Vec::new(),
             browsers: Vec::new(),
+            composer: Default::default(),
         }
     }
 
@@ -331,6 +334,8 @@ pub struct DeleteEntryForm {
     pub session: String,
     pub repo: String,
     pub path: String,
+    /// The other selected entries (Explore's multi-selection).
+    pub more: Vec<String>,
     pub is_dir: bool,
     pub error: Option<String>,
     pub busy: bool,
@@ -899,6 +904,13 @@ pub enum Message {
     UTerm(crate::uterm::UTermMsg),
     /// Browser tabs and 즐겨찾기 (`browser.rs`).
     Browser(crate::browser::BrowserMsg),
+    /// The input box under an agent terminal.
+    Composer(crate::composer::ComposerMsg),
+    /// An in-app file drag: the pointer entered (`Some`) or left a drop target, and moved.
+    DropHover(crate::composer::Dest, bool),
+    DragPointer(iced::Point),
+    /// A file dropped on a window from the OS (`composer.rs`).
+    FileDropped(std::path::PathBuf),
     /// The keyboard's modifiers changed.
     Modifiers(keyboard::Modifiers),
     /// "+ 새로 열기" → 폴더 선택… (the server folder picker, for a 공용 terminal).
@@ -1104,6 +1116,14 @@ pub struct App {
     /// "+ 새로 열기": the server's shells (asked once), the picked start folder (session: a
     /// repo or the session folder, `None` = the Changes panel's repo; 공용: `None` = home),
     /// the servers listening in its terminals, and the keyboard's modifiers (Alt+클릭 = 공용).
+    /// A file dragged inside the app (from the Explore tree): (session, server path), where
+    /// it would drop (the pointer is over the input box / the terminal), and the pointer
+    /// (for the label following it).
+    pub file_drag: Option<(String, Vec<String>)>,
+    /// Entries cut or copied in Explore (`explore_actions.rs`).
+    pub explore_clip: Option<crate::explore_actions::ExploreClip>,
+    pub drop_target: Option<crate::composer::Dest>,
+    pub drag_pointer: Option<iced::Point>,
     pub shells: Option<Vec<ide_client::ShellInfo>>,
     pub new_dir_repo: Option<Option<String>>,
     pub new_dir_global: Option<String>,
@@ -1203,6 +1223,10 @@ impl App {
             global_uterms: Vec::new(),
             common: Vec::new(),
             shells: None,
+            file_drag: None,
+            explore_clip: None,
+            drop_target: None,
+            drag_pointer: None,
             new_dir_repo: None,
             new_dir_global: None,
             ports: Vec::new(),
@@ -1799,10 +1823,19 @@ impl App {
                 Task::none()
             }
             Message::TermView(ev) => {
-                if let ViewEvent::Copied(text) = ev {
-                    tracing::debug!(chars = text.chars().count(), "terminal copy");
+                match ev {
+                    ViewEvent::Copied(text) => {
+                        tracing::debug!(chars = text.chars().count(), "terminal copy");
+                        Task::none()
+                    }
+                    // The shown terminal is the selected session's: files / an image on the
+                    // clipboard go in as paths (`composer.rs`).
+                    ViewEvent::PasteNotText => match self.selected.clone() {
+                        Some(sid) => self.terminal_paste_not_text(&sid),
+                        None => Task::none(),
+                    },
+                    _ => Task::none(),
                 }
-                Task::none()
             }
             Message::Web(ev) => {
                 self.on_web(ev);
@@ -3367,6 +3400,21 @@ impl App {
             Message::ItemDrag(m) => self.on_item_drag(m),
             Message::UTerm(m) => self.on_uterm(m),
             Message::Browser(m) => self.on_browser(m),
+            Message::Composer(m) => self.on_composer(m),
+            Message::FileDropped(p) => self.on_file_dropped(p),
+            Message::DropHover(t, entered) => {
+                // Leaving clears only that target (another one may have been entered first).
+                if entered {
+                    self.drop_target = Some(t);
+                } else if self.drop_target == Some(t) {
+                    self.drop_target = None;
+                }
+                Task::none()
+            }
+            Message::DragPointer(p) => {
+                self.drag_pointer = Some(p);
+                Task::none()
+            }
             Message::Modifiers(m) => {
                 self.modifiers = m;
                 Task::none()
@@ -3980,8 +4028,17 @@ impl App {
         subs.push(self.footer_subscription());
         subs.push(event::listen_with(|e, _, _| match e {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
+            Event::Window(window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
             _ => None,
         }));
+        if self.file_drag.is_some() {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DragPointer(position))
+                }
+                _ => None,
+            }));
+        }
         if self.new_menu {
             subs.push(
                 iced::time::every(Duration::from_secs(3))

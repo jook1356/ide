@@ -18,6 +18,13 @@ tab (`ExploreTree.tsx`).
 | Revealing a file in the tree clears the filter | `App::tree_reveal` clears `SearchState` |
 | (no content search in Desk's Explore) | Text search of every repo below the file names under the `내용` / `Contents` label, with the status (`검색 중…`, counts, errors) next to it; starts 250 ms after the last keystroke (`DetailMsg::SearchTyped`) or at once on Enter (`SearchSubmit`); results grouped by repo and file as before |
 | Ctrl+Shift+F (none in Desk) | `Message::FindInFiles` -> `App::open_search`: shows Explore and focuses its input (`SEARCH_ID`) |
+| Tree selection: click, Ctrl+click toggles, Shift+click a range (`ExploreTree.tsx` multi-select) | `ide_views::FileTree` (`selection`, `set_modifiers` fed from `App::modifiers` before each `TreeMessage`); actions act on the topmost selected entries (`selected_paths`) |
+| Row context menu (Desk order): 새 파일 / 새 폴더, 입력창에 첨부(N개), 잘라내기 / 복사 / 붙여넣기 (Ctrl+X/C/V), OS 탐색기에서 보기, 경로 / 상대 경로 / 원격 파일 URL 복사 (one entry), 이름 변경 (F2), 삭제 (Del) | `tree.rs::MenuAction` -> `TreeEvent`s handled in `explore_actions.rs` (create / rename / delete stay in `detail.rs`); right-click on an unselected row selects only it |
+| Cut / copy / paste | `ExploreClip` in the app (session, repo, paths, cut); with a local server the files also go on the OS clipboard. Paste reads the OS clipboard first: files that are not ours are copied in (`fs.copy external`, local server only); else cut = `fs.rename` per entry (once), copy = `fs.copy` (a taken name becomes `name copy.ext`, `name copy 2.ext`) |
+| Delete to the recycle bin, several at once (`삭제` with `항목 N개를 삭제할까요?`) | `DeleteEntryForm.more`; `fs.delete{trash: true}` per entry (server `trash` crate) |
+| Drag rows onto a folder (or a row inside it): move | `TreeMessage::DragStart/DragOver/DragLeave/DragEnd` (rows wrapped in `Reorder`); the drop folder row gets an accent border; `TreeEvent::Move` -> `fs.rename` per entry (not into itself, not where it already is) |
+| Drag rows out of the tree (input box / agent terminal) | `TreeEvent::DragStart(paths)` sets `App::file_drag`; released over the composer or terminal -> chips / pasted paths (`composer.rs::end_file_drag`); a ghost label (`name +N`) follows the pointer |
+| 원격 파일 URL 복사 | `git.remote_url` -> `<origin web>/blob/<branch>/<path>` (`pr::origin_repo`) |
 
 ## History (Desk `ChangesPanel` History, `CommitRow`, `CommitFileRow`)
 

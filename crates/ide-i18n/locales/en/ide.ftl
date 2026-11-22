@@ -64,6 +64,12 @@ start-agent = Start { $agent }
 show-detail = Show detail
 hide-detail = Hide detail
 detail-toggle = Detail area
+composer-toggle = Input
+composer-show = Show the input box under the terminal
+composer-hide = Hide the input box (type in the terminal)
+composer-placeholder = Message (Enter to send, Shift+Enter for a new line, ↑ for earlier ones)
+composer-send-tip = Send (Enter): paste into the terminal and press Enter
+attach-no-folder-remote = A folder cannot be sent to a remote server; drop its files instead.
 tab-web = Web
 web-back = Back
 web-forward = Forward
@@ -327,6 +333,8 @@ err-last-configuration = Cannot delete the last profile “{ $name }”.
 err-skill-not-found = Skill “{ $name }” not found.
 err-skill-exists = A skill named “{ $name }” exists already.
 err-skill-invalid = Not a skill folder (no SKILL.md): { $path }
+err-attach-too-large = The attachment is larger than { $max } MB.
+err-attach-not-found = The attachment upload “{ $name }” was not found.
 err-provider-not-found = The agent “{ $provider }” is not available on the server.
 err-provider-no-login = The agent “{ $provider }” has no accounts or login command.
 err-invalid-mcp-name = MCP server “{ $name }”: use a unique name of letters, digits, - and _, and a command.
@@ -344,9 +352,26 @@ err-program-not-found = “{ $program }” not found on PATH; install it or add 
 
 ## File views (ide-views): file tree, code view, diff view, changes list
 
-tree-open = Open
 tree-new-file = New file
 tree-new-folder = New folder
+tree-attach = Attach to the input
+tree-attach-many = Attach to the input ({ NUMBER($count) })
+tree-cut = Cut
+tree-copy = Copy
+tree-paste = Paste
+tree-copy-remote-url = Copy remote file URL
+explore-cut-done = { $count ->
+    [one] Cut 1 item
+   *[other] Cut { $count } items
+}
+explore-copied-done = { $count ->
+    [one] Copied 1 item
+   *[other] Copied { $count } items
+}
+explore-reveal-remote = The files are on the remote server: they cannot be shown in this machine's file manager.
+explore-paste-remote = Files from this machine cannot be pasted on a remote server yet.
+explore-paste-other-repo = Cut or copied in another repository: paste it there.
+explore-remote-url-copied = Copied the remote file URL
 tree-loading = Loading…
 tree-name-placeholder = Name
 code-find-placeholder = Find
@@ -454,8 +479,13 @@ quick-open-placeholder = Go to file
 quick-open-none = No matching files.
 def-pick-title = Definitions of “{ $name }”
 delete-entry-title = Delete “{ $name }”?
-delete-entry-body = The file is deleted permanently.
-delete-folder-body = The folder and everything in it are deleted permanently.
+delete-entry-body = The file goes to the recycle bin.
+delete-folder-body = The folder and everything in it go to the recycle bin.
+delete-many-title = { $count ->
+    [one] Delete 1 item?
+   *[other] Delete { $count } items?
+}
+delete-many-body = The selected items go to the recycle bin.
 unsaved-title = Save changes to “{ $name }”?
 unsaved-body = Your changes are lost if you don't save them.
 dont-save = Don't save

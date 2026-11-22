@@ -96,6 +96,8 @@ pub struct UiState {
     pub split_ratio: f32,
     /// Detail area collapsed to a thin strip.
     pub detail_collapsed: bool,
+    /// The input box under agent terminals (`composer.rs`).
+    pub composer_open: bool,
     /// Last URL of each session's web tab, by session id.
     pub web_urls: BTreeMap<String, String>,
     /// Last repository folder used in the new-session dialog.
@@ -207,6 +209,7 @@ impl Default for UiState {
             configuration: None,
             split_ratio: DEFAULT_SPLIT,
             detail_collapsed: false,
+            composer_open: true,
             web_urls: BTreeMap::new(),
             last_repo: None,
             language: LanguagePref::System,

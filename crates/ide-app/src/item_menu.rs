@@ -415,7 +415,7 @@ fn native(path: &str) -> String {
 }
 
 /// Show `path` selected in the OS file manager.
-fn reveal_in_file_manager(path: &str) -> Result<(), String> {
+pub(crate) fn reveal_in_file_manager(path: &str) -> Result<(), String> {
     #[cfg(windows)]
     let r = std::process::Command::new("explorer.exe")
         .arg(format!("/select,{path}"))

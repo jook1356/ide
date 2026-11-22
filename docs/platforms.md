@@ -118,8 +118,21 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 - [ ] **Daemon detach** (`ide-server/src/daemon.rs`): own process group. Check that the daemon
   survives quitting the app and that the 10 min idle exit works.
 - [ ] **Retina.** Scale factor 2: pixel-exact web frames, 1 px borders, editor scrollbar.
+- [ ] **Attachments in the input box** (`ide-app/src/composer.rs`): file drops (winit
+  `FileDropped`), files copied in Finder (`clipboard::read_files`) and clipboard images
+  (`read_image`, arboard) as chips; Cmd+V is the paste key there. Check that Finder copies
+  arrive as paths, that a screenshot (Cmd+Ctrl+Shift+4) pastes as an image, and that Claude
+  Code turns the pasted image path into `[Image #n]`.
 - [ ] **App end-to-end script** (`IDE_APP_SCRIPT=1`, see `AGENTS.md`): run it on a Mac. The footer
   pass needs a shell-script twin of `crates/ide-app/tests/fake-gh/gh.cmd`.
+- [ ] **Explore cut / copy / paste with the OS clipboard.** `explore_actions.rs` writes the
+  entries as `clipboard::Content::Files` and pastes `read_files()` results (files copied in
+  Finder). Assumption: iced's winit clipboard supports file lists on macOS like on Windows.
+  Check: copy a file in Explore, paste in Finder; copy in Finder, paste in Explore (Cmd+C / Cmd+V).
+- [ ] **Explore delete to the Trash.** `fsops::trash` uses the `trash` crate (Finder's Trash on
+  macOS). Check: delete a file in Explore, find it in the Trash with "Put Back".
+- [ ] **Explore "Finder에서 보기" label and reveal.** `tree.rs::reveal_os_label` and
+  `item_menu::reveal_in_file_manager` (`open -R`). Check the label and that Finder selects the entry.
 
 ### 3. Shipping
 
@@ -139,6 +152,11 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: Explore cut / copy / paste via the OS file clipboard, delete to the Trash
+  (`trash` crate), reveal label per OS (`explore_actions.rs`, `fsops.rs`, `tree.rs`); unbuilt on
+  macOS / Linux.
+- 2026-11-23: input-box attachments: Cmd+V pastes files / images as chips (`composer.rs`);
+  unbuilt on macOS.
 - 2026-11-22: `frame.rs` macOS title bar (traffic lights, no grips); `detail_window.rs` pin =
   always on top off Windows; `ide-web` `backend()` per OS, `native_key_code` per OS, Cmd as Ctrl
   in web views; iced `x11` / `wayland` features. All unbuilt on macOS / Linux.

@@ -92,6 +92,18 @@ enum Step {
     WaitText(usize, &'static str, u64),
     /// Terminal input as typed keys (sent to the server).
     Write(usize, &'static str),
+    /// Text sent from the input box under the terminal (`composer.rs`).
+    Compose(usize, &'static str),
+    /// Text put in the input box without sending (screenshots of a long draft).
+    ComposeDraft(usize, &'static str),
+    /// An attachment chip inserted at the input box's cursor.
+    ComposeChip(usize, &'static str),
+    /// A clipboard image pasted into the input box (synthetic: the real clipboard is the
+    /// user's), and a file dropped on the window from this repo.
+    ComposeImage(usize),
+    DropFile(usize, &'static str),
+    /// Wait until the input box's text contains the needle.
+    WaitComposer(usize, &'static str, u64),
     Select(usize),
     ExpectText(usize, &'static str),
     /// Exactly `n` visible lines of session `i` contain the text.
@@ -261,6 +273,12 @@ enum Step {
     App(Message),
     TreeReveal(&'static str),
     TreeKey(Named),
+    /// Ctrl+<char> on the tree (copy / cut / paste).
+    TreeCtrl(&'static str),
+    /// Drag an entry onto the row of another (its folder) inside the tree.
+    TreeDrag(&'static str, &'static str),
+    /// Open the tree's context menu on an entry (None: close it).
+    TreeMenu(Option<&'static str>),
     TreeRename(&'static str, &'static str),
     WaitDir(&'static str, u64),
     /// The file is open, shown and loaded.
@@ -580,6 +598,28 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitText(0, ">", 15_000),
         Write(0, "echo hello from A\r"),
         WaitText(0, "hello from A", 5000),
+        // The input box under the terminal: two lines (cmd has no bracketed paste, so each
+        // runs as typed).
+        Compose(0, "echo composer one\necho composer two"),
+        WaitText(0, "composer two", 5000),
+        ExpectText(0, "composer one"),
+        // One line: the send button sits with the same gap on all sides.
+        ComposeDraft(0, "look at "),
+        ComposeChip(0, "C:\\shots\\screen shot.png"),
+        // A pasted screenshot goes to the server (attach.put) and comes back as a chip; a
+        // dropped file of this machine (local server) keeps its own path.
+        ComposeImage(0),
+        WaitComposer(0, "screenshot-", 5000),
+        DropFile(0, "README.md"),
+        WaitComposer(0, "README.md", 3000),
+        Wait(300),
+        Pause("composer_one_line"),
+        // A long draft: the box stops growing and scrolls (its last lines in view).
+        ComposeDraft(0, "draft line 1\ndraft line 2\ndraft line 3\ndraft line 4\ndraft line 5\ndraft line 6\ndraft line 7\ndraft line 8\ndraft line 9\ndraft line 10\ndraft line 11\ndraft line 12\ndraft line 13\ndraft line 14\ndraft line 15"),
+        Wait(400),
+        Shot("03b_composer_long_draft"),
+        Pause("composer_long_draft"),
+        ComposeDraft(0, ""),
         // The shell starts in the session folder; the repo is a worktree below it.
         Write(0, "dir /b /s README.md\r"),
         WaitText(0, "README.md", 5000),
@@ -692,7 +732,7 @@ fn steps(claude: bool) -> Vec<Step> {
         WaitConfigSaved("work", 5000),
         CfgDelete("default"),
         Wait(1000),
-        ExpectSettingsError("configuration “default”; delete them first"),
+        ExpectSettingsError("profile “default”; delete them first"),
         GoPage(Page::Work),
         FillNew {
             repo: Repo::Test,
@@ -1243,6 +1283,24 @@ fn phase2() -> Vec<Step> {
         WaitExists("logo.bin", false, 10_000),
         Wait(300),
         Shot("51_deleted"),
+        Log("--- Explore: copy / paste into a folder, drag a file to the root"),
+        TreeReveal("README.md"),
+        TreeCtrl("c"),
+        TreeReveal("src/main.ts"),
+        TreeCtrl("v"),
+        WaitExists("src/README.md", true, 10_000),
+        TreeCtrl("v"),
+        WaitExists("src/README copy.md", true, 10_000),
+        TreeDrag("src/README copy.md", "README.md"),
+        WaitExists("README copy.md", true, 10_000),
+        WaitExists("src/README copy.md", false, 5000),
+        Wait(300),
+        Shot("51b_explore_moved"),
+        TreeMenu(Some("src/main.ts")),
+        Wait(300),
+        Shot("51c_explore_menu"),
+        Pause("explore_menu"),
+        TreeMenu(None),
         ExpectSavedDetail("file:src/main.ts"),
         Log("--- History: commits newest first, a commit's files, file and whole-commit diffs"),
         D(DetailMsg::Side(SideTab::History)),
@@ -2230,6 +2288,46 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             ));
             true
         }
+        Step::TreeCtrl(c) => {
+            task = app.update(Message::Detail(
+                sid,
+                DetailMsg::Tree(TreeMessage::Key(Key::Character(c.into()), Modifiers::CTRL)),
+            ));
+            true
+        }
+        Step::TreeDrag(from, onto) => {
+            let (qf, qo) = (qp(sc, app, from), qp(sc, app, onto));
+            let t1 = app.tree_reveal(&sid, &qf);
+            let t2 = app.tree_reveal(&sid, &qo);
+            let rows = p2_detail(sc, app).map(|d| (d.tree.row_of(from), d.tree.row_of(onto)));
+            // The rows appear once the tree has listed their folders.
+            let Some((Some(a), Some(b))) = rows else {
+                let done = wait!(false, 10_000, format!("drag {from} onto {onto}: rows {rows:?}"));
+                return (done, Task::batch([t1, t2]));
+            };
+            let m = |x| Message::Detail(sid.clone(), DetailMsg::Tree(x));
+            let t3 = app.update(m(TreeMessage::DragStart(a)));
+            let t4 = app.update(m(TreeMessage::DragOver(b)));
+            let t5 = app.update(m(TreeMessage::DragEnd));
+            task = Task::batch([t1, t2, t3, t4, t5]);
+            true
+        }
+        Step::TreeMenu(path) => {
+            let m = |x| Message::Detail(sid.clone(), DetailMsg::Tree(x));
+            let Some(path) = path else {
+                task = app.update(m(TreeMessage::Menu(ide_views::MenuAction::Close)));
+                return (true, task);
+            };
+            let row = p2_detail(sc, app).and_then(|d| d.tree.row_of(path));
+            let Some(row) = row else {
+                sc.check(false, &format!("menu on {path}: no row"));
+                return (true, task);
+            };
+            let t1 = app.update(m(TreeMessage::Context(row)));
+            let t2 = app.update(m(TreeMessage::ContextAt(iced::Point::new(120.0, 160.0))));
+            task = Task::batch([t1, t2]);
+            true
+        }
         Step::TreeRename(from, to) => {
             let q = qp(sc, app, from);
             let t1 = app.tree_reveal(&sid, &q);
@@ -2850,6 +2948,89 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     log(&format!("grid: {:#?}", visible(app, &sid)));
                 } else {
                     next = false;
+                }
+            }
+            Step::Compose(i, s) => {
+                if let Some(sid) = sc.id(i) {
+                    log(&format!("compose into #{i}: {s:?}"));
+                    let shown = app
+                        .live(&sid)
+                        .is_some_and(|l| app.composer_shown(l) && l.state.is_alive());
+                    sc.check(shown, &format!("session #{i} shows the input box"));
+                    if let Some(l) = app.live_mut(&sid) {
+                        l.composer.set_text(s);
+                    }
+                    tasks.push(app.update(Message::Composer(
+                        crate::composer::ComposerMsg::Send(sid.clone()),
+                    )));
+                    let cleared = app
+                        .live(&sid)
+                        .is_some_and(|l| l.composer.content.text().trim().is_empty());
+                    sc.check(cleared, "input box cleared after sending");
+                }
+            }
+            Step::ComposeImage(i) => {
+                if let Some(sid) = sc.id(i) {
+                    log(&format!("paste a 4x2 image into #{i}"));
+                    let image = iced::clipboard::Image {
+                        rgba: iced::advanced::graphics::core::Bytes::from(vec![200u8; 4 * 2 * 4]),
+                        size: iced::Size::new(4, 2),
+                    };
+                    tasks.push(app.update(Message::Composer(
+                        crate::composer::ComposerMsg::PasteImage(
+                            sid,
+                            crate::composer::Dest::Composer,
+                            image,
+                        ),
+                    )));
+                }
+            }
+            Step::DropFile(i, rel) => {
+                if sc.id(i).is_some() {
+                    let path = sc.repo.join(rel);
+                    log(&format!("drop {} on the window", path.display()));
+                    tasks.push(app.update(Message::FileDropped(path)));
+                }
+            }
+            Step::WaitComposer(i, needle, ms) => {
+                let text = sc
+                    .id(i)
+                    .and_then(|sid| {
+                        app.live(&sid)
+                            .map(|l| format!("{} {}", l.composer.content.text(), l.composer.labels().join(" ")))
+                    })
+                    .unwrap_or_default();
+                if text.contains(needle) {
+                    sc.check(true, &format!("input box of #{i} has {needle:?}"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("input box of #{i} never had {needle:?}: {text:?}"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::ComposeChip(i, path) => {
+                if let Some(sid) = sc.id(i) {
+                    log(&format!("chip into #{i}: {path}"));
+                    if let Some(l) = app.live_mut(&sid) {
+                        l.composer.insert_chip(path);
+                    }
+                }
+            }
+            Step::ComposeDraft(i, s) => {
+                if let Some(sid) = sc.id(i) {
+                    use iced::widget::text_editor::{Action, Edit, Motion};
+                    use std::sync::Arc;
+                    log(&format!("draft into #{i}: {} line(s)", s.lines().count()));
+                    // As typed: select all, paste the text (the box follows the cursor).
+                    let edit = |a| Message::Composer(crate::composer::ComposerMsg::Edit(sid.clone(), a));
+                    tasks.push(app.update(edit(Action::SelectAll)));
+                    let a = if s.is_empty() {
+                        Action::Edit(Edit::Delete)
+                    } else {
+                        Action::Edit(Edit::Paste(Arc::new(s.to_owned())))
+                    };
+                    tasks.push(app.update(edit(a)));
+                    tasks.push(app.update(edit(Action::Move(Motion::DocumentEnd))));
                 }
             }
             Step::Write(i, s) => {
@@ -3637,6 +3818,9 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             | Step::App(_)
             | Step::TreeReveal(_)
             | Step::TreeKey(_)
+            | Step::TreeCtrl(_)
+            | Step::TreeDrag(..)
+            | Step::TreeMenu(_)
             | Step::TreeRename(..)
             | Step::WaitDir(..)
             | Step::WaitFile(..)

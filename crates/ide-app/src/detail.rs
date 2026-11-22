@@ -581,6 +581,11 @@ pub enum DetailMsg {
     ),
     /// A tree operation in repo `.0` finished.
     FsDone(String, FsOp, Result<(), ProtoError>),
+    /// Explore's 붙여넣기: what the OS clipboard held (files copied in the file manager), for
+    /// the repo's folder `.1` (`explore_actions.rs`).
+    ExplorePaste(String, String, Option<Vec<std::path::PathBuf>>),
+    /// Explore's 원격 파일 URL 복사 answered.
+    RemoteUrl(Result<String, ProtoError>),
     /// Explore's search input changed (file names at once, text after [`SEARCH_DELAY`]).
     SearchInput(String),
     /// The typing pause of query `.0` ended.
@@ -782,7 +787,7 @@ fn search_stream(
     })
 }
 
-fn msg(sid: &str, m: DetailMsg) -> Message {
+pub(crate) fn msg(sid: &str, m: DetailMsg) -> Message {
     Message::Detail(sid.to_owned(), m)
 }
 
@@ -1487,7 +1492,10 @@ impl App {
                 }
             }
             DetailMsg::Tree(tm) => {
+                let mods = self.modifiers;
                 let d = self.detail_mut(sid).expect("session");
+                // Ctrl / Shift+click select several (the tree sees only key presses).
+                d.tree.set_modifiers(mods);
                 let (task, ev) = d.tree.update(tm);
                 let sid2 = sid.to_owned();
                 let task = task.map(move |m| msg(&sid2, DetailMsg::Tree(m)));
@@ -1674,6 +1682,8 @@ impl App {
                 Task::none()
             }
             DetailMsg::FsDone(repo, op, r) => self.on_fs_done(sid, &repo, op, r),
+            DetailMsg::ExplorePaste(repo, dir, files) => self.explore_paste(sid, &repo, &dir, files),
+            DetailMsg::RemoteUrl(r) => self.remote_url_done(sid, r),
             DetailMsg::SearchInput(q) => {
                 let s = &mut self.detail_mut(sid).expect("session").search;
                 if q.is_empty() {
@@ -1945,6 +1955,18 @@ impl App {
             TreeEvent::Expand(dir) => self.list_dirs(sid, vec![dir]),
             TreeEvent::Collapse(_) | TreeEvent::Select(_) => Task::none(),
             TreeEvent::Open(path) => self.open_file_at(sid, &qualify(&r, &path), 0, 0),
+            // Explore's menu and drag actions (`explore_actions.rs`).
+            ev @ (TreeEvent::DragStart(_)
+            | TreeEvent::DragEnd
+            | TreeEvent::Move { .. }
+            | TreeEvent::Attach(_)
+            | TreeEvent::Cut(_)
+            | TreeEvent::Copy(_)
+            | TreeEvent::Paste(_)
+            | TreeEvent::Reveal(_)
+            | TreeEvent::CopyPath(_)
+            | TreeEvent::CopyRelPath(_)
+            | TreeEvent::CopyRemoteUrl(_)) => self.on_explore_event(sid, &r, ev),
             TreeEvent::CreateFile { dir, name } => {
                 let path = join(&dir, &name);
                 let op = FsOp::Created {
@@ -1978,7 +2000,11 @@ impl App {
                     done(op),
                 )
             }
-            TreeEvent::Delete(path) => {
+            TreeEvent::Delete(mut paths) => {
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let path = paths.remove(0);
                 let is_dir = self
                     .detail(sid)
                     .is_some_and(|d| d.loaded_dirs.contains(&path) || d.tree.is_expanded(&path));
@@ -1986,6 +2012,7 @@ impl App {
                     session: sid.to_owned(),
                     repo: r,
                     path,
+                    more: paths,
                     is_dir,
                     error: None,
                     busy: false,
@@ -2005,13 +2032,21 @@ impl App {
         };
         f.busy = true;
         f.error = None;
-        let (s, repo, path) = (f.session.clone(), f.repo.clone(), f.path.clone());
-        let (sid, r) = (s.clone(), repo.clone());
-        let op = FsOp::Deleted { path: path.clone() };
-        Task::perform(
-            async move { c.fs_delete(&s, &r, &path, true).await },
-            move |res| msg(&sid, DetailMsg::FsDone(repo.clone(), op.clone(), res)),
-        )
+        // To the recycle bin (Desk), each entry on its own (the tree follows each).
+        let all: Vec<String> = std::iter::once(f.path.clone()).chain(f.more.clone()).collect();
+        let (session, repo) = (f.session.clone(), f.repo.clone());
+        let tasks: Vec<Task<Message>> = all
+            .into_iter()
+            .map(|path| {
+                let (c, s, r, sid, repo) = (c.clone(), session.clone(), repo.clone(), session.clone(), repo.clone());
+                let op = FsOp::Deleted { path: path.clone() };
+                Task::perform(
+                    async move { c.fs_trash(&s, &r, &path).await },
+                    move |res| msg(&sid, DetailMsg::FsDone(repo.clone(), op.clone(), res)),
+                )
+            })
+            .collect();
+        Task::batch(tasks)
     }
 
     fn on_fs_done(

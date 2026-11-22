@@ -86,7 +86,12 @@ pub fn address_to_url(input: &str) -> Option<String> {
         return Some(search());
     }
     let lower = text.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
+    // Web addresses, and the page schemes a browser opens as they are (Desk searches every
+    // other scheme; `data:` / `about:` / `file:` pages must still open here).
+    if ["http://", "https://", "data:", "about:", "file:", "view-source:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
+    {
         return Some(text.to_owned());
     }
     // Another scheme (not `host:port`) is searched.
@@ -420,6 +425,9 @@ mod tests {
         assert_eq!(address_to_url("example.com/a").as_deref(), Some("https://example.com/a"));
         assert_eq!(address_to_url("10.0.0.1:80").as_deref(), Some("http://10.0.0.1:80"));
         assert_eq!(address_to_url("https://x.dev").as_deref(), Some("https://x.dev"));
+        assert_eq!(address_to_url("data:text/html,hi").as_deref(), Some("data:text/html,hi"));
+        assert_eq!(address_to_url("about:blank").as_deref(), Some("about:blank"));
+        assert!(address_to_url("mailto:a@b.c").unwrap().starts_with(SEARCH_URL));
         assert!(address_to_url("rust iced").unwrap().starts_with(SEARCH_URL));
         assert_eq!(address_to_url("file.txt").as_deref(), Some("https://file.txt"));
         assert!(address_to_url("word").unwrap().starts_with(SEARCH_URL));

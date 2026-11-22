@@ -280,6 +280,7 @@ impl App {
             let window = stack![
                 column![bar, root],
                 self.item_menu_layer(false),
+                self.drag_ghost(),
                 self.side_menu_layer()
             ]
                 .width(Fill)
@@ -908,6 +909,11 @@ impl App {
                     .wrapping(text::Wrapping::None)
                     .ellipsis(text::Ellipsis::Start)
                     .width(Fill),
+                if self.composer_shown_kind(live) {
+                    self.composer_toggle()
+                } else {
+                    space().width(0).boxed()
+                },
                 self.detail_toggle(live),
             ]
             .spacing(10)
@@ -941,7 +947,16 @@ impl App {
                         .boxed(),
                 );
             }
-            col = col.push(view.boxed());
+            // A file dragged in the app may drop on the terminal too (`composer.rs`).
+            col = col.push(
+                mouse_area(view)
+                    .on_enter(Message::DropHover(crate::composer::Dest::Terminal, true))
+                    .on_exit(Message::DropHover(crate::composer::Dest::Terminal, false))
+                    .boxed(),
+            );
+            if self.composer_shown(live) && live.state.is_alive() {
+                col = col.push(self.composer_view(live));
+            }
             let exited = match live.state {
                 RunState::Exited(code) => Some(match code {
                     Some(c) => tr::process_exited_code(&c.to_string()),
@@ -2605,11 +2620,18 @@ impl App {
             }
             Modal::DeleteEntry(f) => {
                 let name = crate::detail::file_name(&f.path);
+                let many = !f.more.is_empty();
                 let mut c = column![
-                    text(tr::delete_entry_title(name))
-                        .size(18)
-                        .font(style::BOLD),
-                    text(if f.is_dir {
+                    text(if many {
+                        tr::delete_many_title(f.more.len() as i64 + 1)
+                    } else {
+                        tr::delete_entry_title(name)
+                    })
+                    .size(18)
+                    .font(style::BOLD),
+                    text(if many {
+                        tr::delete_many_body()
+                    } else if f.is_dir {
                         tr::delete_folder_body()
                     } else {
                         tr::delete_entry_body()
