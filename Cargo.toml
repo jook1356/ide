@@ -20,7 +20,8 @@ publish = false
 
 [workspace.dependencies]
 # iced master pinned (0.15-dev, wgpu 30). Move to the 0.15 release once it ships.
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "98bd48fe011efc0ec5819fee0fa7673a7169ff11", default-features = false }
+# Linux: X11 and Wayland (libwayland loaded at run time); ignored on Windows and macOS.
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "98bd48fe011efc0ec5819fee0fa7673a7169ff11", default-features = false, features = ["x11", "wayland", "wayland-dlopen"] }
 # CEF 156 / Chromium 156. Never enable the default "sandbox" feature (needs ATL; breaks the wrapper build).
 cef = { version = "=156.7.0", default-features = false }
 alacritty_terminal = "0.26"

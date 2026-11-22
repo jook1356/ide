@@ -53,6 +53,9 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   screenshots and exiting are fine. Opt-in real-CLI checks of the generated provider flags (scratch
   account dirs, nothing typed, no login): `IDE_REAL_CLI=1 cargo test -p ide-agents real_cli --
   --ignored` and `IDE_REAL_CLI=1 cargo test -p ide-server --test real_cli -- --ignored`.
+- OS-specific code: keep `docs/platforms.md` current. The maintainer has no Mac, so every change
+  that adds or touches macOS / Linux code (or guesses what another OS needs) adds or updates an
+  item in its to-do lists (file, assumption, how to check) and a line in its log.
 - Provider-specific code (flags, env vars, files of an agent CLI) lives only in `ide-agents`; never
   `match` on a provider id elsewhere (see `docs/agent-providers.md`).
 - Commit messages: imperative, one topic per commit.
