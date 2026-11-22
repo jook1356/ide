@@ -33,6 +33,7 @@ use iced::{Background, Color, Event, Font, Length, Pixels, Point, Rectangle, Siz
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Palette, TermConfig};
+use crate::mouse::{self as report, Action};
 use crate::glyphs::builtin_glyph;
 use crate::keys::key_bytes;
 use crate::model::{ModelId, TermModel};
@@ -79,6 +80,11 @@ struct State {
     /// Grid size from the last layout, and the size last reported through `on_resize`.
     grid: Option<(u16, u16)>,
     reported: Option<(u16, u16)>,
+    /// Keyboard modifiers (for mouse reports), the button whose press was reported to the
+    /// program, and the cell of the last motion report.
+    mods: keyboard::Modifiers,
+    report_button: Option<report::Button>,
+    report_cell: Option<(usize, usize)>,
 }
 
 impl State {
@@ -95,6 +101,9 @@ impl State {
             last_ime: None,
             grid: None,
             reported: None,
+            mods: keyboard::Modifiers::empty(),
+            report_button: None,
+            report_cell: None,
         }
     }
     fn m(&self) -> Option<Metrics> {
@@ -228,6 +237,106 @@ impl<'a, Message> TerminalView<'a, Message> {
         Metrics { cw: b.width / 40.0, ch: key.line_height.max(b.height.round()) }
     }
 
+    /// The viewport cell under `p` (0-based column, row).
+    fn cell_at(&self, m: Metrics, bounds: Rectangle, p: Point) -> (usize, usize) {
+        let pad = self.config.padding;
+        let g = self.model.grid_size();
+        let x = (p.x - bounds.x - pad).max(0.0);
+        let y = (p.y - bounds.y - pad).max(0.0);
+        (
+            ((x / m.cw) as usize).min(g.cols.max(1) as usize - 1),
+            ((y / m.ch) as usize).min(g.rows.max(1) as usize - 1),
+        )
+    }
+
+    /// Mouse reporting (see `mouse.rs`): while the program asked for it and Shift is not held,
+    /// clicks, drags, motion and the wheel go to the PTY instead of selecting / scrolling here.
+    /// Returns whether the event was used.
+    fn report_mouse(
+        &self,
+        state: &mut State,
+        ev: &mouse::Event,
+        m: Metrics,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        shell: &mut Shell<'_, Message>,
+    ) -> bool {
+        let mode = *self.model.lock_term().mode();
+        let mods = state.mods;
+        let send = |this: &Self, shell: &mut Shell<'_, Message>, a, b, (c, r)| {
+            if report::wanted(mode, a, b)
+                && let Some(bytes) = report::encode(mode, a, b, c, r, mods)
+            {
+                this.input(shell, bytes);
+            }
+        };
+        let button = |b: &mouse::Button| match b {
+            mouse::Button::Left => Some(report::Button::Left),
+            mouse::Button::Middle => Some(report::Button::Middle),
+            mouse::Button::Right => Some(report::Button::Right),
+            _ => None,
+        };
+        match ev {
+            mouse::Event::ButtonPressed(b) if report::reporting(mode, mods) => {
+                let (Some(p), Some(b)) = (cursor.position_over(bounds), button(b)) else {
+                    return false;
+                };
+                self.set_focus(state, true, shell);
+                self.model.lock_term().selection = None;
+                let cell = self.cell_at(m, bounds, p);
+                send(self, shell, Action::Press, b, cell);
+                state.report_button = Some(b);
+                state.report_cell = Some(cell);
+                shell.capture_event();
+                shell.request_redraw();
+                true
+            }
+            mouse::Event::ButtonReleased(b) if state.report_button.is_some() => {
+                let Some(b) = button(b).filter(|b| Some(*b) == state.report_button) else {
+                    return false;
+                };
+                state.report_button = None;
+                let p = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                send(self, shell, Action::Release, b, self.cell_at(m, bounds, p));
+                shell.capture_event();
+                true
+            }
+            mouse::Event::CursorMoved { .. } if report::reporting(mode, mods) && !state.dragging => {
+                let held = state.report_button;
+                let p = match (held, cursor.position(), cursor.position_over(bounds)) {
+                    // A drag keeps reporting outside the view (clamped to its edge).
+                    (Some(_), Some(p), _) => p,
+                    (None, _, Some(p)) => p,
+                    _ => return false,
+                };
+                let cell = self.cell_at(m, bounds, p);
+                if state.report_cell != Some(cell) {
+                    state.report_cell = Some(cell);
+                    send(self, shell, Action::Motion, held.unwrap_or(report::Button::None), cell);
+                }
+                false
+            }
+            mouse::Event::WheelScrolled { delta } if report::reporting(mode, mods) => {
+                let Some(p) = cursor.position_over(bounds) else {
+                    return false;
+                };
+                let lines = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y * self.config.wheel_lines,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / m.ch,
+                };
+                let n = lines.round() as i32;
+                let b = if n > 0 { report::Button::WheelUp } else { report::Button::WheelDown };
+                let cell = self.cell_at(m, bounds, p);
+                for _ in 0..n.unsigned_abs().min(10) {
+                    send(self, shell, Action::Press, b, cell);
+                }
+                shell.capture_event();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn grid_point(&self, m: Metrics, bounds: Rectangle, p: Point) -> (GPoint, Side) {
         let pad = self.config.padding;
         let g = self.model.grid_size();
@@ -283,6 +392,14 @@ impl<'a, Message> TerminalView<'a, Message> {
 
     fn handle(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor, shell: &mut Shell<'_, Message>) {
         let Some(m) = state.m() else { return };
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(mods)) = event {
+            state.mods = *mods;
+        }
+        if let Event::Mouse(me) = event
+            && self.report_mouse(state, me, m, bounds, cursor, shell)
+        {
+            return;
+        }
         match event {
             Event::Window(window::Event::RedrawRequested(_)) => {
                 if state.focused {

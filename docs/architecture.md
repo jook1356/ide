@@ -12,7 +12,7 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 | `ide-core` | Accounts, configurations, sessions, git worktrees, launch helpers, persistence. Pure logic, unit-tested. Used by the server only. | no |
 | `ide-proto` / `ide-server` / `ide-client` | Client/server split (see `docs/server-architecture.md`): wire protocol, the per-user daemon owning PTYs/sessions/git, the client library. | no (client: optional iced adapter) |
 | `ide-i18n` | UI translations: Fluent files embedded at build time, generated type-safe `tr::` API, current language. | no |
-| `ide-term` | Client-side terminal model fed by server bytes (`TermModel`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME. No PTY. | iced |
+| `ide-term` | Client-side terminal model fed by server bytes (`TermModel`) and the iced terminal widget (`TerminalView`): rendering, selection/copy, scrollback, resize, Korean IME, xterm mouse reporting (`mouse.rs`: clicks, drags, motion and the wheel go to the program when it asked for them, SGR / UTF-8 / legacy encoding; Shift bypasses it for selection; Claude Code's clickable UI uses it). No PTY. | iced |
 | `ide-web` | CEF runtime init/subprocess handling and an iced widget showing one browser off-screen (GPU texture import, input forwarding, IME). | iced |
 | `ide-views` | File tree, code view/editor, diff view, changes list widgets fed by plain view models. | iced |
 | `ide-app` | The binary (client only): window layout, sidebar, connection status, `ide-client` calls, one `TermModel` per session, the per-session detail area (web page, files, diffs, tree, changes, search), `ui.json`. | iced |

@@ -16,6 +16,7 @@ mod config;
 mod glyphs;
 mod keys;
 mod model;
+mod mouse;
 mod view;
 
 pub use config::{Palette, TermConfig};
