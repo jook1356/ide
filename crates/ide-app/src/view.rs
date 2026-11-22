@@ -841,7 +841,8 @@ impl App {
 
     fn centre(&self) -> El<'_> {
         let portion = (self.ui.split_ratio * 1000.0).round() as u16;
-        let width = if self.ui.detail_collapsed {
+        // The terminal takes the detail pane's room while it is hidden or in its own window.
+        let width = if !self.detail_in_app() {
             Fill
         } else {
             FillPortion(portion.max(1))
@@ -987,7 +988,7 @@ impl App {
     }
 
     fn divider(&self) -> El<'_> {
-        if self.ui.detail_collapsed {
+        if !self.detail_in_app() {
             return container(space())
                 .width(1)
                 .height(Fill)
@@ -1509,6 +1510,10 @@ impl App {
     /// A modal covers the window: the web view shows a dimmed, frozen snapshot (see
     /// [`App::detail`]).
     pub fn web_covered(&self) -> bool {
+        // In the detail window nothing of the app window covers it.
+        if self.ui.detail_detached {
+            return false;
+        }
         (self.modal.is_some() && !self.modal_web_unsafe) || !self.on_work_page()
     }
 

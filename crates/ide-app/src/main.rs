@@ -18,6 +18,7 @@ mod changes_actions;
 mod changes_view;
 mod detail;
 mod detail_view;
+mod detail_window;
 mod footer;
 mod footer_view;
 mod history;
@@ -69,17 +70,20 @@ fn main() -> anyhow::Result<()> {
 
     let rt = runtime.clone();
     let boot_data = data.clone();
-    let result = iced::application(
+    // A daemon (several windows): the app window is opened by `App::boot`, the detail area's
+    // own window by `detail_window.rs`. Closing the app window ends the daemon (`App::exit_app`).
+    let result = iced::daemon(
         move || app::App::boot(boot_data.clone(), rt.clone(), remote.clone()),
         app::App::update,
-        app::App::view,
+        app::App::view_window,
     )
     .title(app::App::title)
     .theme(app::App::theme)
     .subscription(app::App::subscription)
-    .window_size((1440.0, 880.0))
-    .exit_on_close_request(false)
-    .backend(ide_web::backend())
+    .settings(iced::Settings {
+        backend: ide_web::backend(),
+        ..iced::Settings::default()
+    })
     .run();
     runtime.shutdown();
     result.context("iced")?;

@@ -70,6 +70,18 @@ web-reload = Reload
 url-placeholder = Enter a URL
 no-session = No session
 
+## Detail window (the detail area in a window of its own, like Hermes Desk's region window)
+
+detail-popout = Open in a new window
+detail-window-title = Detail · { $session }
+detail-window-title-idle = Detail
+detail-window-pin = Always show above the app window
+detail-window-unpin = Unpin (no longer shown above the app)
+detail-window-merge = Merge into app
+detail-window-merge-tip = Merge into the app window
+detail-window-hide = Hide the detached detail window
+detail-window-show = Show the detail area in its window
+
 ## New-session dialog
 
 agent-label = AGENT

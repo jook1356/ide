@@ -46,6 +46,9 @@ mod changes;
 /// Changes / History footer steps (`script_footer.rs`).
 #[path = "script_footer.rs"]
 mod footer_steps;
+/// Detail window steps (`script_detail_window.rs`).
+#[path = "script_detail_window.rs"]
+mod detail_window_steps;
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
@@ -338,6 +341,8 @@ enum Step {
     Chg(changes::CStep),
     /// Changes / History footer (`script_footer.rs`).
     Foot(footer_steps::FStep),
+    /// Detail window steps.
+    Pop(detail_window_steps::PStep),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -378,6 +383,8 @@ pub struct Script {
     repo2: PathBuf,
     /// [`Step::MarkCleanup`]: (session folder, worktrees, branch).
     cleanup: Option<(PathBuf, Vec<PathBuf>, String)>,
+    /// The last screenshot (name, pixels).
+    last_shot: Option<(String, window::Screenshot)>,
 }
 
 fn data_url(html: &str) -> String {
@@ -441,7 +448,10 @@ impl Script {
         let claude = std::env::var("IDE_APP_SCRIPT_CLAUDE").is_ok_and(|v| v == "1");
         install_fake_provider(data);
         // `IDE_APP_SCRIPT_ONLY=p2`: startup, the phase 2 checks and the server stop only.
-        let only_p2 = std::env::var("IDE_APP_SCRIPT_ONLY").is_ok_and(|v| v == "p2");
+        let only = std::env::var("IDE_APP_SCRIPT_ONLY").unwrap_or_default();
+        let only_p2 = only == "p2";
+        // `IDE_APP_SCRIPT_ONLY=pop`: startup, the detail window checks and the server stop.
+        let only_pop = only == "pop";
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -450,13 +460,18 @@ impl Script {
         ));
         Some(Script {
             steps: {
-                let mut s = if only_p2 {
+                let mut s = if only_pop {
+                    detail_window_steps::steps_only()
+                } else if only_p2 {
                     steps_p2_only()
                 } else {
                     steps(claude)
                 };
-                changes::splice(&mut s);
-                footer_steps::splice(&mut s);
+                if !only_pop {
+                    changes::splice(&mut s);
+                    footer_steps::splice(&mut s);
+                    detail_window_steps::splice(&mut s);
+                }
                 s
             },
             pc: 0,
@@ -479,6 +494,7 @@ impl Script {
             p2: None,
             repo2,
             cleanup: None,
+            last_shot: None,
         })
     }
 
@@ -2700,6 +2716,7 @@ pub fn save_shot(app: &mut App, name: &str, shot: &window::Screenshot) {
         Ok(())
     })();
     script.luma.insert(name.to_owned(), luma);
+    script.last_shot = Some((name.to_owned(), shot.clone()));
     match result {
         Ok(()) => log(&format!(
             "screenshot {} ({}x{}, detail luma {luma:.1})",
@@ -2954,7 +2971,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     "close the app (drop client + state); session #0 shows {ttl} reply line(s) so far"
                 ));
                 sc.check(ttl < 6, "ping still running when the app closes");
-                app.close_for_reopen();
+                tasks.push(app.close_for_reopen());
             }
             Step::ReopenApp => {
                 log("reopen the app (new client, state from ui.json + server)");
@@ -3673,6 +3690,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::Foot(x) => {
                 let (n, t) = footer_steps::run(sc, app, x, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::Pop(x) => {
+                let (n, t) = detail_window_steps::run(sc, app, x, el);
                 next = n;
                 tasks.push(t);
             }

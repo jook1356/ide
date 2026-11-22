@@ -739,6 +739,8 @@ pub enum Message {
     ToggleDetail,
     DividerPressed,
     DragMoved(Point),
+    /// The pointer moved in a window while the divider is dragged.
+    WindowDrag(window::Id, Point),
     DragEnd,
 
     /// Detail area of a session.
@@ -824,8 +826,16 @@ pub enum Message {
     PickConfirm,
 
     WindowOpened(Option<window::Id>),
-    WindowResized(Size),
+    /// A window (the app window or the detail window) changed size.
+    WindowResized(window::Id, Size),
+    WindowMoved(window::Id, Point),
+    /// A window's close button (routed: the app window asks / exits, the detail window hides).
+    WindowCloseRequest(window::Id),
+    WindowClosed(window::Id),
+    /// The app window's close button.
     CloseRequested,
+    /// The detail area's own window (`detail_window.rs`).
+    DetailWindow(crate::detail_window::WinMsg),
 
     Tick,
     Shot(String, window::Screenshot),
@@ -957,6 +967,15 @@ pub struct App {
     pub term_config: TermConfig,
     pub window: Option<window::Id>,
     pub window_size: Size,
+    /// The detail area's own window while it is open (`detail_window.rs`).
+    pub detail_window: Option<window::Id>,
+    pub detail_window_size: Size,
+    /// The detail window's owner as last set by the pin: (app window, owner) handles.
+    pub detail_owner: Option<(Option<isize>, Option<isize>)>,
+    /// The detail window was created (its `window::open` finished).
+    pub detail_window_ready: bool,
+    /// The detail window's position (logical px) once known.
+    pub detail_window_pos: Option<Point>,
     pub dragging: bool,
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
@@ -987,7 +1006,13 @@ impl App {
         let mut app = Self::load(data_dir, runtime, remote_override);
         app.script = Script::from_env(&app.data_dir);
         app.connect();
-        let task = window::latest().map(Message::WindowOpened);
+        // The app window (a daemon opens none by itself); closing it is handled by the app.
+        let (_, open) = window::open(window::Settings {
+            size: Size::new(1440.0, 880.0),
+            exit_on_close_request: false,
+            ..window::Settings::default()
+        });
+        let task = open.map(|id| Message::WindowOpened(Some(id)));
         (app, task)
     }
 
@@ -1021,6 +1046,11 @@ impl App {
             term_config: TermConfig::default(),
             window: None,
             window_size: Size::new(1400.0, 860.0),
+            detail_window: None,
+            detail_window_size: Size::new(960.0, 640.0),
+            detail_owner: None,
+            detail_window_ready: false,
+            detail_window_pos: None,
             dragging: false,
             modal: None,
             settings,
@@ -1084,11 +1114,14 @@ impl App {
         }
     }
 
-    pub fn theme(&self) -> iced::Theme {
+    pub fn theme(&self, _window: window::Id) -> iced::Theme {
         crate::style::theme()
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self, window: window::Id) -> String {
+        if Some(window) == self.detail_window {
+            return self.detail_window_title();
+        }
         "ide".into()
     }
 
@@ -1511,6 +1544,12 @@ impl App {
     // ------------------------------------------------------------------ update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        // The detail window follows the state (detached, shown, a session to show).
+        Task::batch([task, self.sync_detail_window()])
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Client(generation, ev) => {
                 if generation != self.link_gen || self.link.is_none() {
@@ -2974,6 +3013,12 @@ impl App {
                 }
                 Task::none()
             }
+            Message::WindowDrag(id, p) => {
+                if Some(id) == self.window {
+                    return self.update_inner(Message::DragMoved(p));
+                }
+                Task::none()
+            }
             Message::DragEnd => {
                 if self.dragging {
                     self.dragging = false;
@@ -2985,14 +3030,35 @@ impl App {
             Message::WindowOpened(id) => {
                 self.window = id;
                 match id {
-                    Some(id) => window::size(id).map(Message::WindowResized),
+                    Some(id) => window::size(id).map(move |s| Message::WindowResized(id, s)),
                     None => Task::none(),
                 }
             }
-            Message::WindowResized(size) => {
-                self.window_size = size;
+            Message::WindowResized(id, size) => {
+                if Some(id) == self.detail_window {
+                    self.on_detail_window_resized(size);
+                } else if Some(id) == self.window {
+                    self.window_size = size;
+                }
                 Task::none()
             }
+            Message::WindowMoved(id, p) => {
+                if Some(id) == self.detail_window {
+                    self.on_detail_window_moved(p);
+                }
+                Task::none()
+            }
+            Message::WindowCloseRequest(id) => {
+                if Some(id) == self.detail_window {
+                    self.on_detail_window_close()
+                } else if Some(id) == self.window {
+                    self.on_close_requested()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::WindowClosed(id) => self.on_window_closed(id),
+            Message::DetailWindow(m) => self.on_detail_window(m),
             Message::CloseRequested => self.on_close_requested(),
             Message::CloseRemember(v) => {
                 if let Some(Modal::Close(f)) = &mut self.modal {
@@ -3067,9 +3133,9 @@ impl App {
                 crate::script::log(&format!("switch server to {pref:?}"));
                 // Sessions on the previous server keep running there.
                 self.ui.server = pref;
-                self.close_for_reopen();
+                let closed = self.close_for_reopen();
                 self.connect();
-                Task::none()
+                closed
             }
 
             Message::Tick => crate::script::tick(self),
@@ -3435,9 +3501,16 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             ide_web::events().map(Message::Web),
-            window::resize_events().map(|(_, s)| Message::WindowResized(s)),
-            window::close_requests().map(|_| Message::CloseRequested),
+            window::resize_events().map(|(id, s)| Message::WindowResized(id, s)),
+            window::close_requests().map(Message::WindowCloseRequest),
+            window::close_events().map(Message::WindowClosed),
         ];
+        if self.detail_window.is_some() {
+            subs.push(event::listen_with(|e, _, id| match e {
+                Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(id, p)),
+                _ => None,
+            }));
+        }
         if let Some(l) = &self.link {
             subs.push(
                 ide_client::iced_support::subscription(&l.client)
@@ -3446,9 +3519,10 @@ impl App {
             );
         }
         if self.dragging {
-            subs.push(event::listen_with(|e, _, _| match e {
+            // The divider is in the app window: the detail window's pointer does not drive it.
+            subs.push(event::listen_with(|e, _, id| match e {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::DragMoved(position))
+                    Some(Message::WindowDrag(id, position))
                 }
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                     Some(Message::DragEnd)
@@ -3536,8 +3610,10 @@ impl App {
 
     /// Simulates closing the app (test script): drop the client and every piece of state; the
     /// server keeps the sessions running. [`App::connect`] then acts like reopening it.
-    pub fn close_for_reopen(&mut self) {
+    pub fn close_for_reopen(&mut self) -> Task<Message> {
         self.save_ui();
+        // The detail window closes with the app (it stays detached in `ui.json`).
+        let detail_window = self.detail_window.take().map(window::close);
         self.link = None;
         for live in &self.sessions {
             if let Some(w) = &live.web {
@@ -3556,6 +3632,7 @@ impl App {
         self.window_size = size;
         self.script = script;
         self.conn = Conn::Disconnected(tr::conn_closed());
+        detail_window.unwrap_or_else(Task::none)
     }
 }
 

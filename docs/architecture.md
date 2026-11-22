@@ -31,7 +31,8 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
   time under a header with an "open items" switcher, plus a side panel (Changes / History /
   Explore, with the file and text search in Explore; see `docs/side-panel.md`). Items
   belong to a session, so switching sessions switches the detail area (see
-  `docs/server-architecture.md`, "App integration (phase 2)").
+  `docs/server-architecture.md`, "App integration (phase 2)"). The header + item part can be
+  detached into a window of its own (`docs/detail-window.md`; the app is an `iced::daemon`).
 
 ## Languages (i18n)
 - All UI text lives in `crates/ide-i18n/locales/<code>/ide.ftl` ([Project Fluent](https://projectfluent.org)).

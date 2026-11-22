@@ -66,6 +66,18 @@ web-reload = 새로고침
 url-placeholder = URL 입력
 no-session = 세션 없음
 
+## Detail window (the detail area in a window of its own, like Hermes Desk's region window)
+
+detail-popout = 새 창으로 분리
+detail-window-title = 상세 · { $session }
+detail-window-title-idle = 상세 보기
+detail-window-pin = 앱 창 위에 항상 같이 띄우기
+detail-window-unpin = 고정 해제 (앱 위에 같이 뜨지 않음)
+detail-window-merge = 앱으로 합치기
+detail-window-merge-tip = 앱 창으로 합치기
+detail-window-hide = 분리된 상세 창 숨기기
+detail-window-show = 상세 영역을 분리된 창으로 보기
+
 ## New-session dialog
 
 agent-label = 에이전트

@@ -11,8 +11,9 @@ anyhow.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# MapVirtualKeyW only (VK -> scan code for CEF's native_key_code); no input injection.
-windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+# MapVirtualKeyW (VK -> scan code for CEF's native_key_code) and the detail window's owner
+# (owner.rs); no input injection.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 png = "0.18"

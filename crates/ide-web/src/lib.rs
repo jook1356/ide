@@ -29,12 +29,14 @@
 mod events;
 mod gpu;
 mod input;
+mod owner;
 mod runtime;
 pub mod testing;
 mod view;
 mod widget;
 
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
+pub use owner::{set_window_owner, window_owner};
 pub use runtime::{RuntimeSettings, WebRuntime, initialize, maybe_run_subprocess};
 pub use view::{FrameDump, RenderStats, ViewOptions, WebView};
 pub use widget::{DEFAULT_DIM, WebViewWidget, web_view};

@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use iced::widget::svg;
 use iced::{Color, Element, Widget as _};
 
-/// Icons used by the navigation rail and the side panel.
+/// Icons used by the navigation rail, the side panel and the detail window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Messages,
@@ -38,9 +38,15 @@ pub enum Icon {
     Plus,
     Folder,
     Refresh,
+    // Detail window (detail_window.rs).
+    WindowMaximize,
+    Pin,
+    /// Tabler's filled pin (no stroke).
+    PinFilled,
+    ArrowBarToLeft,
 }
 
-const SOURCES: [&str; 27] = [
+const SOURCES: [&str; 31] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -68,6 +74,10 @@ const SOURCES: [&str; 27] = [
     include_str!("../assets/icons/plus.svg"),
     include_str!("../assets/icons/folder.svg"),
     include_str!("../assets/icons/refresh.svg"),
+    include_str!("../assets/icons/window-maximize.svg"),
+    include_str!("../assets/icons/pin.svg"),
+    include_str!("../assets/icons/pin-filled.svg"),
+    include_str!("../assets/icons/arrow-bar-to-left.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -109,10 +119,15 @@ mod tests {
 
     #[test]
     fn icons_are_tabler_outlines_with_thin_strokes() {
-        for s in SOURCES {
-            assert!(s.contains("viewBox=\"0 0 24 24\"") && s.contains("stroke=\"currentColor\""));
+        for (i, s) in SOURCES.iter().enumerate() {
+            assert!(s.contains("viewBox=\"0 0 24 24\""));
+            if i == Icon::PinFilled as usize {
+                assert!(s.contains("fill=\"currentColor\"") && !s.contains("stroke="));
+                continue;
+            }
+            assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::Refresh as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::ArrowBarToLeft as usize + 1);
     }
 }

@@ -124,6 +124,25 @@ pub struct UiState {
     /// Folded groups of the session list: configuration slugs, or [`LOGIN_GROUP`].
     #[serde(deserialize_with = "lenient")]
     pub folded_groups: BTreeSet<String>,
+    /// The detail area lives in a window of its own (Hermes Desk's `region-detached:detail`):
+    /// kept while that window is hidden (its own close button, the detail toggle, quitting)
+    /// and across restarts; cleared only by "앱으로 합치기".
+    pub detail_detached: bool,
+    /// The detail window is owned by the app window: it stays in front of it and minimises
+    /// with it (Desk's `region-pinned:detail`).
+    pub detail_pinned: bool,
+    /// The detail window's last position and size (logical pixels).
+    #[serde(deserialize_with = "lenient")]
+    pub detail_window: Option<WindowGeom>,
+}
+
+/// Position and size of a window, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct WindowGeom {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// Key of the login-terminal group in [`UiState::folded_groups`] (not a valid slug).
@@ -147,6 +166,9 @@ impl Default for UiState {
             sessions_all: false,
             session_sort: Vec::new(),
             folded_groups: BTreeSet::new(),
+            detail_detached: false,
+            detail_pinned: false,
+            detail_window: None,
         }
     }
 }
@@ -218,6 +240,14 @@ mod tests {
                 dir: crate::session_sort::SortDir::Desc,
             }],
             folded_groups: [LOGIN_GROUP.to_owned()].into(),
+            detail_detached: true,
+            detail_pinned: true,
+            detail_window: Some(WindowGeom {
+                x: 120.0,
+                y: -40.0,
+                width: 900.0,
+                height: 640.0,
+            }),
             server: ServerPref::Ssh {
                 host: "me@devbox".into(),
                 command: "/opt/ide/ide-server --stdio".into(),
@@ -274,6 +304,17 @@ mod tests {
         .unwrap();
         let l = UiState::load(&base);
         assert_eq!((l.page, l.sessions_open), (Page::Settings, false));
+        // A broken window geometry is dropped; the detached / pin flags stay.
+        std::fs::write(
+            UiState::file(&base),
+            r#"{"detail_detached": true, "detail_pinned": true, "detail_window": {"x": "a"}}"#,
+        )
+        .unwrap();
+        let l = UiState::load(&base);
+        assert_eq!(
+            (l.detail_detached, l.detail_pinned, l.detail_window),
+            (true, true, None)
+        );
         std::fs::write(
             UiState::file(&base),
             r#"{"on_close": "stop", "server": {"kind": "ssh", "host": "h"}}"#,

@@ -67,6 +67,21 @@ fn vline<'a>() -> El<'a> {
         .boxed()
 }
 
+/// Desk's "새 창으로 분리" (`IconWindowMaximize` at the right end of the detail header).
+fn popout_button<'a>() -> El<'a> {
+    let b = button(
+        container(crate::icons::icon(Icon::WindowMaximize, 16.0, style::DIM)).center(28),
+    )
+    .width(28)
+    .height(28)
+    .padding(0)
+    .style(style::icon)
+    .on_press(Message::DetailWindow(
+        crate::detail_window::WinMsg::Popout,
+    ));
+    tip(b.boxed(), tr::detail_popout())
+}
+
 /// The commit of a commit item: remembered when it was opened, else from History.
 fn commit_info<'a>(key: &ItemKey, live: &'a Live) -> Option<&'a ide_client::CommitInfo> {
     let ItemKey::Commit { sha, .. } = key else {
@@ -170,14 +185,16 @@ fn item_icon<'a>(key: &ItemKey) -> El<'a> {
 
 impl App {
     pub fn detail_area(&self) -> El<'_> {
-        if self.ui.detail_collapsed {
+        if !self.detail_in_app() {
+            // The detail toggle (Desk's `DetailToggle`): shows the hidden area; while the area
+            // is in its own window it hides / shows that window.
+            let (glyph, label) = match (self.ui.detail_detached, self.ui.detail_collapsed) {
+                (false, _) => (I_EXPAND, tr::show_detail()),
+                (true, true) => (I_EXPAND, tr::detail_window_show()),
+                (true, false) => (I_COLLAPSE, tr::detail_window_hide()),
+            };
             return container(
-                column![icon_button(
-                    I_EXPAND,
-                    Some(Message::ToggleDetail),
-                    tr::show_detail()
-                )]
-                .padding([6, 2]),
+                column![icon_button(glyph, Some(Message::ToggleDetail), label)].padding([6, 2]),
             )
             .width(30)
             .height(Fill)
@@ -186,12 +203,13 @@ impl App {
         }
         let portion = 1000u16.saturating_sub((self.ui.split_ratio * 1000.0).round() as u16);
         let body: El<'_> = match self.selected_live() {
-            Some(live) => self.pane(live),
+            Some(live) => self.pane(live, false),
             None => column![
                 container(
                     row![
                         space().width(Fill),
                         icon_button(I_COLLAPSE, Some(Message::ToggleDetail), tr::hide_detail()),
+                        popout_button(),
                     ]
                     .align_y(Alignment::Center)
                 )
@@ -219,7 +237,10 @@ impl App {
 
     // ------------------------------------------------------------------ pane
 
-    fn pane<'a>(&'a self, live: &'a Live) -> El<'a> {
+    /// The detail pane of a session: in the app window (`in_window` false: with the hide and
+    /// "새 창으로 분리" buttons) or in the detail window (neither: the window's own close button
+    /// hides it).
+    pub(crate) fn pane<'a>(&'a self, live: &'a Live, in_window: bool) -> El<'a> {
         let d = &live.detail;
         let sid = live.info.id.clone();
         let identity: El<'a> = match &d.active {
@@ -285,16 +306,23 @@ impl App {
                 .boxed()
             }
         };
-        let header = container(
-            row![
-                container(identity).width(Fill),
-                vline_short(),
-                self.open_items_button(live),
-                icon_button(I_COLLAPSE, Some(Message::ToggleDetail), tr::hide_detail()),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
+        let mut header_row = row![
+            container(identity).width(Fill),
+            vline_short(),
+            self.open_items_button(live),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        if !in_window {
+            header_row = header_row
+                .push(icon_button(
+                    I_COLLAPSE,
+                    Some(Message::ToggleDetail),
+                    tr::hide_detail(),
+                ))
+                .push(popout_button());
+        }
+        let header = container(header_row)
         .height(HEADER_H)
         .padding([0, 8])
         .align_y(Alignment::Center)
