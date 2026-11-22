@@ -8,26 +8,48 @@ pub const SIDEBAR: Color = color!(0x18191c);
 pub const PANEL: Color = color!(0x202226);
 pub const HEADER: Color = color!(0x26282d);
 pub const BORDER: Color = color!(0x34363c);
+/// Ground of text inputs.
+pub const INPUT: Color = color!(0x16171a);
 pub const HOVER: Color = color!(0x2c2f35);
+/// Background of a selected / active item (session row, rail page, a toggle that is on).
 pub const SELECTED: Color = color!(0x323a4a);
 pub const TEXT: Color = color!(0xd4d6db);
 pub const DIM: Color = color!(0x8b8f98);
 pub const FAINT: Color = color!(0x5d616a);
-pub const ACCENT: Color = color!(0x4c8dff);
 pub const GREEN: Color = color!(0x3fb950);
 pub const AMBER: Color = color!(0xd29922);
 pub const RED: Color = color!(0xf85149);
+/// Category colours (Mantine orange-6 / yellow-6 / teal-5): the detail rail's groups, footer
+/// strips and notices.
+pub const ORANGE: Color = color!(0xfd7e14);
+pub const YELLOW: Color = color!(0xfab005);
+pub const TEAL: Color = color!(0x20c997);
+/// Branch badge colours of 커밋 보유 (Mantine cyan-5) and 머지됨 (GitHub's merged purple).
+pub const CYAN: Color = color!(0x22b8cf);
+pub const PURPLE: Color = color!(0xa371f7);
 
-// Navigation rail, from Hermes Desk's dark theme (its retuned Mantine `dark` scale and the solid
-// "violet light" accent): ground dark-9, border dark-6, hover dark-5, icons dark-0.
-pub const RAIL: Color = color!(0x0c0d10);
-pub const RAIL_BORDER: Color = color!(0x272930);
-pub const RAIL_HOVER: Color = color!(0x30323a);
-pub const RAIL_ICON: Color = color!(0xe6e7ec);
-/// `--mantine-color-violet-light` (oklch of violet-8 at L 0.37, 60 % chroma).
-pub const RAIL_ACTIVE: Color = color!(0x3f2e7f);
-/// `--mantine-color-violet-light-color` (violet-2).
-pub const RAIL_ACTIVE_ICON: Color = color!(0xd0bfff);
+// Accent: the one highlight hue of the app (a theme swaps these).
+/// Solid accent: primary buttons, focus rings, the rail's active bar, badges.
+pub const ACCENT: Color = color!(0x4c8dff);
+pub const ACCENT_HOVER: Color = color!(0x5d9bff);
+pub const ACCENT_DISABLED: Color = color!(0x2b3b5c);
+/// Accent for text and icons on dark grounds (active rail icon, links, accent buttons).
+pub const ACCENT_TEXT: Color = color!(0x8ab4ff);
+/// Text on a solid accent ground.
+pub const ON_ACCENT: Color = Color::WHITE;
+
+/// The accent at `alpha` (translucent fills such as Mantine's `variant="light"` buttons).
+pub const fn accent_alpha(alpha: f32) -> Color {
+    Color { a: alpha, ..ACCENT }
+}
+
+// Navigation rail: same palette as the app (sidebar ground, app border/hover/text).
+pub const RAIL: Color = SIDEBAR;
+pub const RAIL_BORDER: Color = BORDER;
+pub const RAIL_HOVER: Color = HOVER;
+pub const RAIL_ICON: Color = TEXT;
+pub const RAIL_ACTIVE: Color = SELECTED;
+pub const RAIL_ACTIVE_ICON: Color = ACCENT_TEXT;
 
 pub const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
@@ -132,11 +154,11 @@ pub fn icon(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Icon button that shows a setting is on (Hermes Desk's `variant="light" color="violet"`).
+/// Icon button that shows a setting is on (selected ground, accent icon).
 pub fn icon_toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let mut s = if on {
-            flat(Some(RAIL_ACTIVE), RAIL_ACTIVE_ICON)
+            flat(Some(SELECTED), ACCENT_TEXT)
         } else {
             icon(theme, status)
         };
@@ -155,7 +177,7 @@ pub fn divider(_: &Theme, status: button::Status) -> button::Style {
     s
 }
 
-/// A 44 x 44 navigation rail button: hover tint, the active page in violet.
+/// A 44 x 44 navigation rail button: hover tint, the active page selected like a session row.
 pub fn rail_link(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let bg = match (active, status) {
@@ -169,14 +191,10 @@ pub fn rail_link(active: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
     }
 }
 
-/// Accent bar on the rail's left edge beside the active page (Hermes Desk's `--accent-gradient`:
-/// 135deg, violet-5 to #6d8bff; rounded on the right).
+/// Accent bar on the rail's left edge beside the active page (rounded on the right).
 pub fn rail_accent(_: &Theme) -> container::Style {
-    let gradient = iced::gradient::Linear::new(iced::Radians(135f32.to_radians()))
-        .add_stop(0.0, color!(0x9775fa))
-        .add_stop(1.0, color!(0x6d8bff));
     container::Style {
-        background: Some(Background::Gradient(gradient.into())),
+        background: Some(ACCENT.into()),
         border: Border {
             radius: iced::border::Radius {
                 top_left: 0.0,
@@ -190,14 +208,15 @@ pub fn rail_accent(_: &Theme) -> container::Style {
     }
 }
 
-/// Tooltip of the navigation rail (Mantine's dark-scheme tooltip: light grey, dark text).
+/// Tooltip of the navigation rail (dark card matching the app theme).
 pub fn rail_tip(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(color!(0xe9ecef).into()),
-        text_color: Some(Color::BLACK),
+        background: Some(HEADER.into()),
+        text_color: Some(TEXT),
         border: Border {
+            color: BORDER,
+            width: 1.0,
             radius: 4.0.into(),
-            ..Default::default()
         },
         ..Default::default()
     }
@@ -274,9 +293,9 @@ pub fn tab_flat(active: bool) -> impl Fn(&Theme, button::Status) -> button::Styl
 
 pub fn primary(_: &Theme, status: button::Status) -> button::Style {
     match status {
-        button::Status::Hovered => flat(Some(color!(0x5d9bff)), Color::WHITE),
-        button::Status::Disabled => flat(Some(color!(0x2b3b5c)), DIM),
-        _ => flat(Some(ACCENT), Color::WHITE),
+        button::Status::Hovered => flat(Some(ACCENT_HOVER), ON_ACCENT),
+        button::Status::Disabled => flat(Some(ACCENT_DISABLED), DIM),
+        _ => flat(Some(ACCENT), ON_ACCENT),
     }
 }
 
@@ -297,7 +316,7 @@ pub fn secondary(_: &Theme, status: button::Status) -> button::Style {
 
 pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let mut s = text_input::default(theme, status);
-    s.background = Background::Color(color!(0x16171a));
+    s.background = Background::Color(INPUT);
     s.border.radius = 4.0.into();
     s.border.color = match status {
         text_input::Status::Focused { .. } => ACCENT,

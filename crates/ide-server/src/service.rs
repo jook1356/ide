@@ -16,8 +16,8 @@ use ide_core::{
 use ide_proto::{
     AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, NewSession, Notify,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderCaps, ProviderDetection, ProviderInfo,
-    RepoFailureInfo, RepoInfo, Request,
-    Response, SessionInfo, SessionRepo, SessionState, Support, TextSearch, UserInfo,
+    RepoFailureInfo, RepoInfo, Request, SkillInfo,
+    Response, SessionInfo, SessionRepo, SessionState, Support, TextSearch, UserInfo, UserTerm,
 };
 use tokio::sync::broadcast;
 
@@ -26,7 +26,7 @@ use crate::jail::{RootJail, normalize_rel};
 use crate::pty::TermHost;
 use crate::runner::{Runner, SameUserRunner, SpawnSpec};
 use crate::watch::Watchers;
-use crate::{def, fsops, git, search};
+use crate::{def, fsops, git, scripts, search};
 
 /// Server config file in the data dir. Its legacy `browse_roots` are only read once, by the
 /// migration to the repository registry (folders that are git repos get registered).
@@ -258,6 +258,8 @@ pub struct UserCtx {
     repos: Mutex<RepoStore>,
     sessions: Mutex<SessionStore>,
     hosts: Mutex<HashMap<String, Arc<TermHost>>>,
+    /// Sessions' user terminals (`uterm.*`).
+    uterms: Mutex<UTerms>,
     events: broadcast::Sender<Notify>,
     runner: Arc<dyn Runner>,
     audit: Arc<dyn Audit>,
@@ -330,6 +332,7 @@ impl UserCtx {
             repos: Mutex::new(repos),
             sessions: Mutex::new(sessions),
             hosts: Mutex::new(HashMap::new()),
+            uterms: Mutex::new(UTerms::default()),
             events: broadcast::channel(4096).0,
             runner,
             audit,
@@ -373,6 +376,7 @@ impl UserCtx {
     }
 
     fn stop_all(&self) {
+        self.uterm_kill_all();
         let hosts: Vec<(String, Arc<TermHost>)> = self
             .hosts
             .lock()
@@ -965,46 +969,109 @@ impl UserCtx {
             } => self
                 .account_login(&provider, &slug, cols, rows)
                 .map(Response::Session),
-            Request::ConfigurationList => Ok(Response::Configurations(
-                self.configs
-                    .lock()
-                    .unwrap()
-                    .list()
-                    .iter()
-                    .map(configuration_info)
-                    .collect(),
-            )),
+            Request::ConfigurationList => {
+                let store = self.configs.lock().unwrap();
+                Ok(Response::Configurations(
+                    store
+                        .list()
+                        .iter()
+                        .map(|c| configuration_info(&store, c))
+                        .collect(),
+                ))
+            }
             Request::ConfigurationCreate { name } => {
-                let c =
-                    configuration_info(self.configs.lock().unwrap().create(&name).map_err(core)?);
+                let c = {
+                    let mut store = self.configs.lock().unwrap();
+                    let slug = store.create(&name).map_err(core)?.slug.clone();
+                    self.configuration_of(&store, &slug)?
+                };
                 self.audit("configuration.create", &c.slug);
                 self.notify(Notify::ConfigurationsChanged);
                 Ok(Response::Configuration(c))
             }
             Request::ConfigurationUpdate(info) => {
-                let c = configuration_info(
-                    self.configs
-                        .lock()
-                        .unwrap()
+                let c = {
+                    let mut store = self.configs.lock().unwrap();
+                    let slug = store
                         .update(configuration_from_info(info))
-                        .map_err(core)?,
-                );
+                        .map_err(core)?
+                        .slug
+                        .clone();
+                    self.configuration_of(&store, &slug)?
+                };
                 self.audit("configuration.update", &c.slug);
-                // Workspace sessions of this configuration get their root files (skills,
-                // guidance) regenerated now; a running agent sees them on its next start.
-                let users: Vec<Session> = self
-                    .sessions
+                self.configuration_changed(&c.slug);
+                Ok(Response::Configuration(c))
+            }
+            Request::SkillRead {
+                configuration,
+                name,
+            } => Ok(Response::SkillText(
+                self.configs
                     .lock()
                     .unwrap()
-                    .list()
-                    .iter()
-                    .filter(|s| s.configuration == c.slug)
-                    .cloned()
-                    .collect();
-                for s in &users {
-                    self.refresh_root(s);
-                }
-                self.notify(Notify::ConfigurationsChanged);
+                    .skill_read(&configuration, &name)
+                    .map_err(core)?,
+            )),
+            r @ (Request::SkillCreate { .. }
+            | Request::SkillImport { .. }
+            | Request::SkillWrite { .. }
+            | Request::SkillDelete { .. }
+            | Request::SkillEnable { .. }) => {
+                let mut store = self.configs.lock().unwrap();
+                let (what, slug, name) = match r {
+                    Request::SkillCreate {
+                        configuration,
+                        name,
+                        description,
+                    } => {
+                        let n = store
+                            .skill_create(&configuration, &name, &description)
+                            .map_err(core)?;
+                        ("skill.create", configuration, n)
+                    }
+                    Request::SkillImport {
+                        configuration,
+                        path,
+                    } => {
+                        let n = store
+                            .skill_import(&configuration, std::path::Path::new(&path))
+                            .map_err(core)?;
+                        ("skill.import", configuration, n)
+                    }
+                    Request::SkillWrite {
+                        configuration,
+                        name,
+                        text,
+                    } => {
+                        store
+                            .skill_write(&configuration, &name, &text)
+                            .map_err(core)?;
+                        ("skill.write", configuration, name)
+                    }
+                    Request::SkillDelete {
+                        configuration,
+                        name,
+                    } => {
+                        store.skill_delete(&configuration, &name).map_err(core)?;
+                        ("skill.delete", configuration, name)
+                    }
+                    Request::SkillEnable {
+                        configuration,
+                        name,
+                        enabled,
+                    } => {
+                        store
+                            .skill_set_enabled(&configuration, &name, enabled)
+                            .map_err(core)?;
+                        ("skill.enable", configuration, name)
+                    }
+                    _ => unreachable!("matched above"),
+                };
+                let c = self.configuration_of(&store, &slug)?;
+                drop(store);
+                self.audit(what, &format!("{slug}/{name}"));
+                self.configuration_changed(&slug);
                 Ok(Response::Configuration(c))
             }
             Request::ConfigurationDelete { slug } => {
@@ -1023,6 +1090,35 @@ impl UserCtx {
             }
             other => self.handle_repos(other),
         }
+    }
+
+    /// Configuration `slug` as the protocol shows it (with its skills).
+    fn configuration_of(
+        &self,
+        store: &ide_core::ConfigurationStore,
+        slug: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        let c = store.require(slug).map_err(|e| core_error(&e))?;
+        Ok(configuration_info(store, c))
+    }
+
+    /// Configuration `slug` changed: workspace sessions using it get their root files (skills,
+    /// guidance) regenerated now (a running agent sees them on its next start), and clients
+    /// reload the list.
+    fn configuration_changed(&self, slug: &str) {
+        let users: Vec<Session> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .filter(|s| s.configuration == slug)
+            .cloned()
+            .collect();
+        for s in &users {
+            self.refresh_root(s);
+        }
+        self.notify(Notify::ConfigurationsChanged);
     }
 
     fn account_login(
@@ -1068,6 +1164,9 @@ impl UserCtx {
 
     /// Terminal input (fast; called inline so writes stay ordered).
     pub fn term_write(&self, session: &str, bytes: Vec<u8>) -> Result<(), ProtoError> {
+        if let Some(h) = self.uterm_host(session) {
+            return h.write(bytes);
+        }
         let s = self.resolve_session(session)?;
         self.existing_host(s.id.as_str())
             .ok_or_else(|| ProtoError::new("session-not-running").arg("id", session))?
@@ -1076,6 +1175,10 @@ impl UserCtx {
 
     /// Terminal resize.
     pub fn term_resize(&self, session: &str, cols: u16, rows: u16) -> Result<(), ProtoError> {
+        if let Some(h) = self.uterm_host(session) {
+            h.resize(cols, rows);
+            return Ok(());
+        }
         let s = self.resolve_session(session)?;
         self.host(&s).resize(cols, rows);
         Ok(())
@@ -1092,6 +1195,17 @@ impl UserCtx {
                 ))
             }
             Request::SessionCreate(req) => self.session_create(req),
+            Request::ScriptsList { session, repo } => {
+                let (_, _, j) = self.worktree_root(&session, &repo)?;
+                Ok(Response::Scripts(scripts::discover(j.root())))
+            }
+            r @ (Request::UTermOpen { .. }
+            | Request::UTermList { .. }
+            | Request::UTermShells
+            | Request::UTermPorts { .. }
+            | Request::UTermStop { .. }
+            | Request::UTermRerun { .. }
+            | Request::UTermRemove { .. }) => self.handle_uterm(r),
             Request::SessionStart { id } => {
                 let s = self.resolve_session(&id)?;
                 self.start(&s)?;
@@ -1114,6 +1228,7 @@ impl UserCtx {
             } => {
                 let s = self.resolve_session(&id)?;
                 self.stop(&s);
+                self.uterm_remove_session(s.id.as_str());
                 // Watchers hold the worktree folders open: stop them before deleting.
                 self.watchers.remove(s.id.as_str());
                 {
@@ -1276,6 +1391,32 @@ impl UserCtx {
                 let refs: Vec<(String, &std::path::Path)> =
                     roots.iter().map(|(r, j)| (r.clone(), j.root())).collect();
                 Ok(Response::FileMatches(search::files(&refs, &query, max_results)))
+            }
+            Request::SearchPaths {
+                session,
+                repo,
+                query,
+                max_results,
+                include_ignored,
+            } => {
+                let s = self.resolve_session(&session)?;
+                let mut roots: Vec<(String, RootJail)> = Vec::new();
+                for wt in &s.worktrees {
+                    if repo.as_deref().is_some_and(|r| r != wt.repo.as_str()) {
+                        continue;
+                    }
+                    if let Ok(j) = RootJail::new(&wt.path) {
+                        roots.push((wt.repo.to_string(), j));
+                    }
+                }
+                let refs: Vec<(String, &std::path::Path)> =
+                    roots.iter().map(|(r, j)| (r.clone(), j.root())).collect();
+                Ok(Response::PathMatches(search::paths(
+                    &refs,
+                    &query,
+                    max_results,
+                    include_ignored,
+                )))
             }
             Request::GitStatus {
                 session,
@@ -1582,13 +1723,12 @@ impl UserCtx {
                 .ok_or_else(|| core(ide_core::Error::ProviderNoLogin(s.provider.clone())))?;
             return ide_agents::login_spec(p, &acct, &s.root, &self.launch_env).map_err(core);
         }
-        let configuration = self
-            .configs
-            .lock()
-            .unwrap()
-            .require(&s.configuration)
-            .map_err(core)?
-            .clone();
+        let configuration = {
+            let mut store = self.configs.lock().unwrap();
+            // Picks up skill folders changed on disk since the last skill.* call.
+            let _ = store.skills(&s.configuration);
+            store.require(&s.configuration).map_err(core)?.clone()
+        };
         let repos = self.repos.lock().unwrap();
         let guidance = ide_core::session_guidance(s, &repos);
         let input = SessionInput::for_session(
@@ -1775,12 +1915,15 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
         }
         ErrorMessage::ConfigurationNotFound { name }
         | ErrorMessage::LastConfiguration { name }
+        | ErrorMessage::SkillNotFound { name }
+        | ErrorMessage::SkillExists { name }
         | ErrorMessage::InvalidMcpName { name } => p.arg("name", name),
         ErrorMessage::ProviderNotFound { provider }
         | ErrorMessage::ProviderNoLogin { provider } => p.arg("provider", provider),
         ErrorMessage::SessionNotFound { id } | ErrorMessage::InvalidSessionId { id } => {
             p.arg("id", id)
         }
+        ErrorMessage::InvalidSkill { path } => p.arg("path", path.display().to_string()),
         ErrorMessage::NotAGitRepo { path, detail } => p
             .arg("path", path.display().to_string())
             .arg("detail", detail),
@@ -1827,14 +1970,22 @@ fn support(s: ide_agents::Support) -> Support {
     }
 }
 
-fn configuration_info(c: &ide_core::Configuration) -> ConfigurationInfo {
+fn configuration_info(
+    store: &ide_core::ConfigurationStore,
+    c: &ide_core::Configuration,
+) -> ConfigurationInfo {
     ConfigurationInfo {
         slug: c.slug.clone(),
         name: c.name.clone(),
-        skills: c
-            .skills
-            .iter()
-            .map(|s| s.path.display().to_string())
+        skills: store
+            .skill_list(&c.slug)
+            .into_iter()
+            .map(|s| SkillInfo {
+                name: s.name,
+                title: s.title,
+                description: s.description,
+                enabled: s.enabled,
+            })
             .collect(),
         mcp_servers: c
             .mcp_servers
@@ -1859,15 +2010,9 @@ fn configuration_from_info(i: ConfigurationInfo) -> ide_core::Configuration {
     ide_core::Configuration {
         slug: i.slug,
         name: i.name,
-        skills: i
-            .skills
-            .into_iter()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .map(|s| ide_core::SkillRef {
-                path: PathBuf::from(s),
-            })
-            .collect(),
+        // Skills change through `skill.*` (the store keeps them).
+        skills: Vec::new(),
+        disabled_skills: Vec::new(),
         mcp_servers: i
             .mcp_servers
             .into_iter()
@@ -1885,5 +2030,441 @@ fn configuration_from_info(i: ConfigurationInfo) -> ide_core::Configuration {
                 .collect()
         }),
         created_at: i.created_at,
+    }
+}
+
+// --- user terminals (Hermes Desk's `main/terminals.ts`)
+
+/// The sessions' user terminals: kept while the server runs.
+#[derive(Default)]
+struct UTerms {
+    /// Last number given to a terminal (ids stay unique while the server runs).
+    seq: u64,
+    list: Vec<UTermEntry>,
+}
+
+struct UTermEntry {
+    id: String,
+    session: String,
+    title: String,
+    command: String,
+    /// How it is (re)started.
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    /// The shell's name for numbering shells (`None` for a command).
+    shell: Option<String>,
+    host: Arc<TermHost>,
+}
+
+/// What `uterm.open` asks for.
+struct OpenArgs {
+    session: String,
+    repo: Option<String>,
+    folder: Option<String>,
+    command: Option<String>,
+    title: Option<String>,
+    shell: Option<String>,
+    /// 공용: the folder to start in.
+    start: Option<String>,
+}
+
+/// A shell user terminals can run.
+struct Shell {
+    id: String,
+    name: String,
+    program: PathBuf,
+    /// Arguments of an interactive shell.
+    args: Vec<String>,
+    /// Arguments before a command line it runs (`-c`, `-Command`, ...).
+    run: Vec<String>,
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// The shells of this computer, the default first (Desk's `main/shells.ts`): on Windows
+/// PowerShell 7, Windows PowerShell, Command Prompt, Git Bash and WSL when installed; elsewhere
+/// the login shell (`$SHELL`) and the other shells of `/etc/shells`.
+fn shells() -> Vec<Shell> {
+    let mut out: Vec<Shell> = Vec::new();
+    if cfg!(windows) {
+        if let Some(p) = ide_core::which("pwsh") {
+            out.push(Shell {
+                id: "pwsh".into(),
+                name: "PowerShell 7".into(),
+                program: p,
+                args: strings(&["-NoLogo"]),
+                run: strings(&["-NoLogo", "-Command"]),
+            });
+        }
+        if let Some(p) = ide_core::which("powershell") {
+            out.push(Shell {
+                id: "powershell".into(),
+                name: "Windows PowerShell".into(),
+                program: p,
+                args: strings(&["-NoLogo"]),
+                run: strings(&["-NoLogo", "-Command"]),
+            });
+        }
+        if let Some(p) = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .or_else(|| ide_core::which("cmd"))
+        {
+            out.push(Shell {
+                id: "cmd".into(),
+                name: "Command Prompt".into(),
+                program: p,
+                args: Vec::new(),
+                run: strings(&["/C"]),
+            });
+        }
+        // Git for Windows: <git>\cmd\git.exe -> <git>\bin\bash.exe.
+        let git_bash = ide_core::which("git")
+            .and_then(|g| g.parent()?.parent().map(|d| d.join("bin").join("bash.exe")))
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let p = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+                p.is_file().then_some(p)
+            });
+        if let Some(p) = git_bash {
+            out.push(Shell {
+                id: "git-bash".into(),
+                name: "Git Bash".into(),
+                program: p,
+                args: strings(&["--login", "-i"]),
+                run: strings(&["--login", "-c"]),
+            });
+        }
+        if let Some(p) = ide_core::which("wsl") {
+            out.push(Shell {
+                id: "wsl".into(),
+                name: "WSL".into(),
+                program: p,
+                args: Vec::new(),
+                run: strings(&["-e", "sh", "-lc"]),
+            });
+        }
+        return out;
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(s) = std::env::var_os("SHELL").map(PathBuf::from) {
+        paths.push(s);
+    }
+    if let Ok(text) = std::fs::read_to_string("/etc/shells") {
+        paths.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with('/'))
+                .map(PathBuf::from),
+        );
+    }
+    paths.push(PathBuf::from("/bin/sh"));
+    for p in paths {
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !p.is_file() || out.iter().any(|s| s.id == id) {
+            continue;
+        }
+        out.push(Shell {
+            name: id.clone(),
+            id,
+            program: p,
+            args: strings(&["-l"]),
+            run: strings(&["-lc"]),
+        });
+    }
+    out
+}
+
+impl UserCtx {
+    /// The terminal behind a `term.*` id: a user terminal, else a session.
+    pub fn term_host(&self, id: &str) -> Result<Arc<TermHost>, ProtoError> {
+        if let Some(h) = self.uterm_host(id) {
+            return Ok(h);
+        }
+        let s = self.resolve_session(id)?;
+        Ok(self.host(&s))
+    }
+
+    fn uterm_host(&self, id: &str) -> Option<Arc<TermHost>> {
+        let u = self.uterms.lock().unwrap();
+        u.list.iter().find(|t| t.id == id).map(|t| t.host.clone())
+    }
+
+    fn uterm_info(t: &UTermEntry) -> UserTerm {
+        UserTerm {
+            id: t.id.clone(),
+            session: t.session.clone(),
+            title: t.title.clone(),
+            command: t.command.clone(),
+            cwd: t.cwd.display().to_string(),
+            state: t.host.state(),
+            end: t.host.end(),
+        }
+    }
+
+    /// Start (or restart) a user terminal's process; when it exits, a line saying so is added
+    /// to its output (Desk's `[종료됨: code N]`; terminal content is not translated).
+    fn uterm_spawn(
+        &self,
+        host: &Arc<TermHost>,
+        program: &std::path::Path,
+        args: &[String],
+        cwd: &std::path::Path,
+    ) -> Result<(), ProtoError> {
+        host.start(|cols, rows| {
+            self.runner.spawn_pty(
+                &self.user,
+                &SpawnSpec {
+                    program: program.to_path_buf(),
+                    args: args.to_vec(),
+                    cwd: cwd.to_path_buf(),
+                    env: Vec::new(),
+                    cols,
+                    rows,
+                },
+            )
+        })?;
+        let mut state = host.subscribe_state();
+        let host = host.clone();
+        tokio::runtime::Handle::current().spawn(async move {
+            while state.changed().await.is_ok() {
+                let s = *state.borrow();
+                if let SessionState::Exited(code) = s {
+                    let code = code.map_or_else(|| "?".to_owned(), |c| c.to_string());
+                    let line = format!("\r\n\x1b[90m[exited: code {code}]\x1b[0m\r\n");
+                    host.ingest(line.as_bytes());
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn uterm_open(&self, a: OpenArgs) -> Result<UserTerm, ProtoError> {
+        let OpenArgs {
+            session,
+            repo,
+            folder,
+            command,
+            title,
+            shell,
+            start,
+        } = a;
+        let session = session.as_str();
+        // An empty session: a 공용 terminal (no session; starts in the home folder).
+        let s = if session.is_empty() {
+            None
+        } else {
+            Some(self.resolve_session(session)?)
+        };
+        let cwd = match &repo {
+            Some(r) => {
+                let j = self.worktree_root(session, r)?.2;
+                match folder.as_deref().filter(|f| !f.is_empty()) {
+                    Some(f) => j.resolve(f)?,
+                    None => j.root().to_path_buf(),
+                }
+            }
+            None => match &s {
+                Some(s) => s.root.clone(),
+                // 공용: the folder picked for it, else the home folder.
+                None => match start.as_deref().filter(|p| !p.trim().is_empty()) {
+                    Some(p) => crate::jail::canonicalize(std::path::Path::new(p.trim()))
+                        .ok()
+                        .filter(|p| p.is_dir())
+                        .ok_or_else(|| ProtoError::new("fs-not-found").arg("path", p))?,
+                    None => home_dir().unwrap_or_else(|| PathBuf::from(".")),
+                },
+            },
+        };
+        let all = shells();
+        let sh = shell
+            .as_deref()
+            .and_then(|id| all.iter().find(|s| s.id == id))
+            .or_else(|| all.first())
+            .ok_or_else(|| ProtoError::new("uterm-no-shell"))?;
+        let (program, shell, shell_name) = (sh.program.clone(), sh.id.clone(), sh.name.clone());
+        let command = command.map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+        let args: Vec<String> = match &command {
+            Some(c) => sh.run.iter().cloned().chain([c.clone()]).collect(),
+            None => sh.args.clone(),
+        };
+        let mut u = self.uterms.lock().unwrap();
+        u.seq += 1;
+        let id = match &s {
+            Some(s) => format!("{}:t{}", s.id, u.seq),
+            None => format!("g:t{}", u.seq),
+        };
+        let title = title
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| match &command {
+                Some(c) => c.clone(),
+                None => {
+                    let n = u
+                        .list
+                        .iter()
+                        .filter(|t| {
+                            t.session == session && t.shell.as_deref() == Some(shell.as_str())
+                        })
+                        .count();
+                    format!("{shell_name} {}", n + 1)
+                }
+            });
+        let host = TermHost::new(&id, DEFAULT_COLS, DEFAULT_ROWS, self.events.clone());
+        self.uterm_spawn(&host, &program, &args, &cwd)?;
+        let entry = UTermEntry {
+            id: id.clone(),
+            session: session.to_owned(),
+            title,
+            command: command.clone().unwrap_or_else(|| shell.clone()),
+            program,
+            args,
+            cwd,
+            shell: command.is_none().then_some(shell),
+            host,
+        };
+        let info = Self::uterm_info(&entry);
+        u.list.push(entry);
+        drop(u);
+        self.audit("uterm.open", &format!("{id} {}", info.command));
+        self.notify(Notify::UTermsChanged {
+            session: session.to_owned(),
+        });
+        Ok(info)
+    }
+
+    fn uterm_find(&self, id: &str) -> Result<(String, Arc<TermHost>), ProtoError> {
+        let u = self.uterms.lock().unwrap();
+        u.list
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| (t.session.clone(), t.host.clone()))
+            .ok_or_else(|| ProtoError::new("uterm-not-found").arg("id", id))
+    }
+
+    /// Stop and forget the user terminals of `session` (it is being deleted).
+    fn uterm_remove_session(&self, session: &str) {
+        let gone: Vec<UTermEntry> = {
+            let mut u = self.uterms.lock().unwrap();
+            let (gone, keep) = std::mem::take(&mut u.list)
+                .into_iter()
+                .partition(|t| t.session == session);
+            u.list = keep;
+            gone
+        };
+        for t in gone {
+            t.host.kill();
+        }
+    }
+
+    /// Kill every user terminal (server shutdown).
+    fn uterm_kill_all(&self) {
+        for t in &self.uterms.lock().unwrap().list {
+            if t.host.is_running() {
+                t.host.kill();
+            }
+        }
+    }
+
+    /// `uterm.*` requests.
+    fn handle_uterm(&self, req: Request) -> Result<Response, ProtoError> {
+        match req {
+            Request::UTermOpen {
+                session,
+                repo,
+                folder,
+                command,
+                title,
+                shell,
+                cwd,
+            } => self
+                .uterm_open(OpenArgs {
+                    session,
+                    repo,
+                    folder,
+                    command,
+                    title,
+                    shell,
+                    start: cwd,
+                })
+                .map(Response::UTerm),
+            Request::UTermShells => Ok(Response::Shells(
+                shells()
+                    .into_iter()
+                    .map(|s| ide_proto::ShellInfo {
+                        id: s.id,
+                        name: s.name,
+                        path: s.program.display().to_string(),
+                    })
+                    .collect(),
+            )),
+            Request::UTermPorts { session } => {
+                let mut roots: Vec<u32> = Vec::new();
+                if !session.is_empty() {
+                    let s = self.resolve_session(&session)?;
+                    roots.extend(self.existing_host(s.id.as_str()).and_then(|h| h.pid()));
+                }
+                roots.extend(
+                    self.uterms
+                        .lock()
+                        .unwrap()
+                        .list
+                        .iter()
+                        .filter(|t| t.session == session)
+                        .filter_map(|t| t.host.pid()),
+                );
+                Ok(Response::Ports(crate::ports::under(&roots)))
+            }
+            Request::UTermList { session } => {
+                if !session.is_empty() {
+                    self.resolve_session(&session)?;
+                }
+                let u = self.uterms.lock().unwrap();
+                Ok(Response::UTerms(
+                    u.list
+                        .iter()
+                        .filter(|t| t.session == session)
+                        .map(Self::uterm_info)
+                        .collect(),
+                ))
+            }
+            Request::UTermStop { id } => {
+                let (_, host) = self.uterm_find(&id)?;
+                if host.is_running() {
+                    self.audit("uterm.stop", &id);
+                    host.kill();
+                }
+                Ok(Response::Unit)
+            }
+            Request::UTermRerun { id } => {
+                let (program, args, cwd, host) = {
+                    let u = self.uterms.lock().unwrap();
+                    let t = u
+                        .list
+                        .iter()
+                        .find(|t| t.id == id)
+                        .ok_or_else(|| ProtoError::new("uterm-not-found").arg("id", &id))?;
+                    (t.program.clone(), t.args.clone(), t.cwd.clone(), t.host.clone())
+                };
+                if !host.is_running() {
+                    self.audit("uterm.rerun", &id);
+                    self.uterm_spawn(&host, &program, &args, &cwd)?;
+                }
+                Ok(Response::Unit)
+            }
+            Request::UTermRemove { id } => {
+                let (session, host) = self.uterm_find(&id)?;
+                host.kill();
+                self.uterms.lock().unwrap().list.retain(|t| t.id != id);
+                self.audit("uterm.remove", &id);
+                self.notify(Notify::UTermsChanged { session });
+                Ok(Response::Unit)
+            }
+            _ => Err(ProtoError::new("bad-request")),
+        }
     }
 }

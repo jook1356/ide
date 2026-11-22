@@ -32,6 +32,10 @@ pub const FIND_MATCH: Color = over(color!(0xfab005), 0.22, BG);
 pub const FIND_MATCH_BORDER: Color = over(color!(0xfab005), 0.45, BG);
 pub const FIND_CURRENT: Color = over(color!(0xfab005), 0.45, BG);
 pub const SELECTION: Color = Color::from_rgba(0.22, 0.55, 0.99, 0.30);
+/// The code editor's scrollbar thumb: idle, hovered, dragged.
+pub const SCROLL_THUMB: Color = Color { a: 0.30, ..DIM };
+pub const SCROLL_THUMB_HOVER: Color = Color { a: 0.50, ..DIM };
+pub const SCROLL_THUMB_DRAG: Color = Color { a: 0.65, ..DIM };
 
 /// `fg` with opacity `a` painted over `bg`, blended in sRGB like the browser does. iced blends
 /// translucent colours in linear space, which makes low-alpha tints look much stronger than in

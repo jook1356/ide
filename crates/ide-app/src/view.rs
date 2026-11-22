@@ -4,15 +4,15 @@
 
 use iced::widget::{
     Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, popover,
-    row, scrollable, space, stack, text, text_editor, text_input, tooltip,
+    row, scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
-use ide_client::{AccountState, BrowseEntry, Support};
+use ide_client::{AccountState, BrowseEntry};
 use ide_i18n::LanguagePref;
 use ide_term::TerminalView;
 
 use crate::app::{
-    ALL_CONFIGURATIONS, App, CONFIG_NAME_ID, Choice, Conn, DIVIDER_W, Live, McpField, Message,
+    ALL_CONFIGURATIONS, App, Choice, Conn, DIVIDER_W, Live, Message,
     Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, REPO_INPUT_ID,
     RENAME_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
     TERM_ID,
@@ -88,7 +88,7 @@ fn label<'a>(s: String) -> El<'a> {
 }
 
 /// A section of a page in a bordered card (Hermes Desk's `Paper withBorder p="md"`).
-fn card(content: El<'_>) -> El<'_> {
+pub(crate) fn card(content: El<'_>) -> El<'_> {
     container(content)
         .padding(16)
         .width(Fill)
@@ -229,7 +229,7 @@ fn vline_full<'a>() -> El<'a> {
         .boxed()
 }
 
-fn error_box<'a>(e: &'a str) -> El<'a> {
+pub(crate) fn error_box<'a>(e: &'a str) -> El<'a> {
     container(text(e).size(12))
         .padding(8)
         .width(Fill)
@@ -270,11 +270,22 @@ impl App {
         };
         let base = row![self.rail(), stack![work, page].width(Fill).height(Fill),].height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
-        let overlay: El<'_> = match &self.modal {
-            Some(m) => self.modal_view(m),
-            None => space().boxed(),
-        };
-        let root = stack![base, overlay].boxed();
+        let overlay = self.modal_layer(false);
+        let mut root = stack![base, overlay].boxed();
+        // Frameless window (`frame.rs`): the title bar stays usable above modals.
+        if let Some(id) = self.window {
+            let max = self.window_maximized;
+            let bar = crate::frame::title_bar(id, "ide".into(), space().boxed(), max);
+            // The item menu is placed in window coordinates: a layer over the whole window.
+            let window = stack![
+                column![bar, root],
+                self.item_menu_layer(false),
+                self.side_menu_layer()
+            ]
+                .width(Fill)
+                .height(Fill);
+            root = crate::frame::with_grips(id, window.boxed(), max);
+        }
         if self.script.is_some() {
             ide_web::testing::Injector::new(root).into()
         } else {
@@ -299,7 +310,8 @@ impl App {
             Page::Repos => (Icon::GitBranch, tr::nav_repos()),
             Page::Settings => (Icon::Settings, tr::settings()),
         };
-        if page != Page::Work || !self.on_work_page() {
+        // On its own page the work / profiles button shows or hides the list beside the rail.
+        if page != self.ui.page || !matches!(page, Page::Work | Page::Configurations) {
             return (icon, label);
         }
         let open = self.ui.sessions_open;
@@ -308,10 +320,11 @@ impl App {
             (true, true) => Icon::SidebarCollapse,
             (true, false) => Icon::SidebarExpand,
         };
-        let label = if open {
-            tr::sessions_hide()
-        } else {
-            tr::sessions_show()
+        let label = match (page, open) {
+            (Page::Work, true) => tr::sessions_hide(),
+            (Page::Work, false) => tr::sessions_show(),
+            (_, true) => tr::profiles_hide(),
+            (_, false) => tr::profiles_show(),
         };
         (icon, label)
     }
@@ -375,7 +388,7 @@ impl App {
         ] {
             let (icon, label) = self.rail_entry(page);
             let mut b: El<'static> = link(icon, self.ui.page == page, Message::Page(page)).boxed();
-            if page == Page::Work {
+            if matches!(page, Page::Work | Page::Configurations) {
                 b = mouse_area(b)
                     .on_enter(Message::RailHover(true))
                     .on_exit(Message::RailHover(false))
@@ -581,7 +594,7 @@ impl App {
             tr::session_sort_default()
         };
         let icon_color = if on {
-            style::RAIL_ACTIVE_ICON
+            style::ACCENT_TEXT
         } else {
             style::DIM
         };
@@ -775,14 +788,23 @@ impl App {
         } else {
             i18n::status_label(live.state)
         };
+        let mut title = row![
+            text(s.title.as_str())
+                .size(13)
+                .wrapping(text::Wrapping::None)
+                .ellipsis(text::Ellipsis::End)
+                .width(Fill)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
+        if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
+            title = title.push(b);
+        }
         let main = button(
             row![
                 text(glyph).size(14).color(gcolor).width(18),
                 column![
-                    text(s.title.as_str())
-                        .size(13)
-                        .wrapping(text::Wrapping::None)
-                        .ellipsis(text::Ellipsis::End),
+                    title,
                     text(subtitle)
                         .size(11)
                         .color(style::DIM)
@@ -886,6 +908,7 @@ impl App {
                     .wrapping(text::Wrapping::None)
                     .ellipsis(text::Ellipsis::Start)
                     .width(Fill),
+                self.detail_toggle(live),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -987,13 +1010,47 @@ impl App {
             .boxed()
     }
 
+    /// Desk's `DetailToggle` at the right end of the session header: shows / hides the detail
+    /// area (its window while detached), with the count of open items.
+    fn detail_toggle<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let on = !self.ui.detail_collapsed;
+        let label = match (self.ui.detail_detached, on) {
+            (false, true) => tr::hide_detail(),
+            (false, false) => tr::show_detail(),
+            (true, true) => tr::detail_window_hide(),
+            (true, false) => tr::detail_window_show(),
+        };
+        let count = live.detail.items.len();
+        let mut content = row![text(tr::detail_toggle()).size(12)]
+            .spacing(6)
+            .align_y(Alignment::Center);
+        if count > 0 {
+            content = content.push(
+                container(text(count.min(99).to_string()).size(10).font(style::BOLD))
+                    .padding([0, 5])
+                    .style(|_| container::Style {
+                        background: Some(style::BORDER.into()),
+                        text_color: Some(style::TEXT),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .boxed(),
+            );
+        }
+        let b = button(content)
+            .padding([2, 8])
+            .style(style::choice(on))
+            .on_press(Message::ToggleDetail);
+        tip(b.boxed(), label)
+    }
+
     fn divider(&self) -> El<'_> {
+        // Hidden or detached detail area: no divider (the side panel's edge is the border).
         if !self.detail_in_app() {
-            return container(space())
-                .width(1)
-                .height(Fill)
-                .style(style::bg(style::BORDER))
-                .boxed();
+            return space().width(0).boxed();
         }
         let color = if self.dragging {
             style::ACCENT
@@ -1409,7 +1466,15 @@ impl App {
         }
         let target = f.target();
         let mut c = column![
-            text(tr::pick_root_title()).size(18).font(style::BOLD),
+            text(if f.purpose == crate::app::PickPurpose::Terminal {
+                tr::pick_term_title()
+            } else if matches!(f.purpose, crate::app::PickPurpose::Skill(_)) {
+                tr::pick_skill_title()
+            } else {
+                tr::pick_root_title()
+            })
+            .size(18)
+            .font(style::BOLD),
             text(tr::pick_root_note()).size(12).color(style::DIM),
             browser_frame(body.boxed()),
         ]
@@ -1510,11 +1575,28 @@ impl App {
     /// A modal covers the window: the web view shows a dimmed, frozen snapshot (see
     /// [`App::detail`]).
     pub fn web_covered(&self) -> bool {
-        // In the detail window nothing of the app window covers it.
+        // In the detail window only its own dialogs cover it.
         if self.ui.detail_detached {
-            return false;
+            return self.modal_in_detail() && !self.modal_web_unsafe;
         }
         (self.modal.is_some() && !self.modal_web_unsafe) || !self.on_work_page()
+    }
+
+    /// The open dialog came from the detail pane's content (unsaved-file close, definition
+    /// picker) and the pane is in its own window: the dialog is drawn there.
+    pub fn modal_in_detail(&self) -> bool {
+        self.ui.detail_detached
+            && self.detail_window.is_some()
+            && matches!(self.modal, Some(Modal::CloseDirty(_) | Modal::DefPicker(_)))
+    }
+
+    /// The open dialog over the window (`detail_window`: the detail window's layer), or
+    /// `space()` when it belongs to the other window.
+    pub(crate) fn modal_layer(&self, detail_window: bool) -> El<'_> {
+        match &self.modal {
+            Some(m) if self.modal_in_detail() == detail_window => self.modal_view(m),
+            _ => space().boxed(),
+        }
     }
 
     // ------------------------------------------------------------------ pages
@@ -1530,10 +1612,8 @@ impl App {
                 tr::nav_accounts(),
                 vec![card(self.accounts_section(f, online))],
             ),
-            Page::Configurations => (
-                tr::nav_configurations(),
-                vec![card(self.configurations_section(f, online))],
-            ),
+            // Its own layout (list beside the rail + sections): `profiles_view.rs`.
+            Page::Configurations => return self.profiles_page(),
             Page::Repos => (tr::repos_title(), vec![card(self.repos_section(f, online))]),
             Page::Settings => (
                 tr::settings(),
@@ -2184,221 +2264,6 @@ impl App {
         .boxed()
     }
 
-    /// Configurations page: configurations (list, add, delete) and a plain editor for one of them.
-    fn configurations_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
-        let mut list: Column<El<'_>> = Column::new().spacing(4);
-        for c in &self.configs {
-            let (total, running) = self.sessions_in_configuration(&c.slug);
-            let editing = f.cfg_edit.as_ref().is_some_and(|e| e.base.slug == c.slug);
-            let row_el = row![
-                text(c.name.as_str()).size(13).width(Fill),
-                text(tr::configuration_sessions(
-                    i18n::count(total),
-                    i18n::count(running)
-                ))
-                .size(11)
-                .color(style::DIM),
-                icon_button(
-                    I_EDIT,
-                    (online && !editing).then(|| Message::CfgEdit(c.slug.clone())),
-                    tr::configuration_edit()
-                ),
-                icon_button(
-                    I_DELETE,
-                    online.then(|| Message::CfgDelete(c.slug.clone())),
-                    tr::configuration_delete_tooltip()
-                ),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center);
-            list = list.push(
-                container(row_el)
-                    .padding([4, 8])
-                    .style(style::bg(style::HEADER))
-                    .boxed(),
-            );
-            if editing && let Some(e) = &f.cfg_edit {
-                list = list.push(self.config_editor(e, f.busy, online));
-            }
-        }
-        column![
-            text(tr::configurations_note()).size(12).color(style::DIM),
-            list,
-            row![
-                text_input(tr::configuration_name_placeholder(), &f.cfg_name)
-                    .id(CONFIG_NAME_ID)
-                    .on_input(Message::CfgName)
-                    .on_submit(Message::CfgAdd)
-                    .size(13)
-                    .padding([5, 8])
-                    .style(style::input)
-                    .width(Fill),
-                button(text(tr::add()).size(13))
-                    .padding([5, 12])
-                    .style(style::secondary)
-                    .on_press_maybe((online && !f.busy).then_some(Message::CfgAdd)),
-            ]
-            .spacing(6),
-        ]
-        .spacing(8)
-        .boxed()
-    }
-
-    fn config_editor<'a>(
-        &'a self,
-        e: &'a crate::app::ConfigEdit,
-        busy: bool,
-        online: bool,
-    ) -> El<'a> {
-        let small = |s: String| text(s).size(11).color(style::DIM);
-        let input = |ph: String, v: &'a str| {
-            text_input(ph, v)
-                .size(12)
-                .padding([4, 6])
-                .style(style::input)
-        };
-        // Which features the providers pass on (native / fallback / not supported).
-        let support = self
-            .providers
-            .iter()
-            .filter(|p| p.caps.accounts)
-            .map(|p| {
-                let s = |x: Support| match x {
-                    Support::Native => "✓",
-                    Support::Fallback => "~",
-                    Support::Unsupported => "✕",
-                };
-                // Per session mode (workspace / original repo).
-                tr::provider_support_modes(
-                    &p.name,
-                    &format!(
-                        "{}{}{}",
-                        s(p.caps.skills),
-                        s(p.caps.mcp),
-                        s(p.caps.instructions)
-                    ),
-                    &format!(
-                        "{}{}{}",
-                        s(p.caps.original_repo.skills),
-                        s(p.caps.original_repo.mcp),
-                        s(p.caps.original_repo.instructions)
-                    ),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("   ");
-        // Desk's "기본 레포": pre-checked in the new-session dialog.
-        let registered: Vec<String> = self.repos.iter().map(|r| r.id.clone()).collect();
-        let defaults = crate::app::default_repos_for(e.default_repos.as_ref(), &registered);
-        let mut default_repos: Column<El<'_>> = Column::new().spacing(3);
-        for r in &self.repos {
-            let on = defaults.contains(&r.id);
-            let id = r.id.clone();
-            default_repos = default_repos.push(
-                checkbox(on)
-                    .label(format!("{}  ·  {}", r.name, r.path))
-                    .on_toggle(move |v| Message::CfgDefaultRepo(id.clone(), v))
-                    .size(14)
-                    .text_size(12)
-                    .boxed(),
-            );
-        }
-        if self.repos.is_empty() {
-            default_repos =
-                default_repos.push(text(tr::repos_none()).size(11).color(style::DIM).boxed());
-        }
-        let mut skills: Column<El<'_>> = Column::new().spacing(4);
-        for (i, sk) in e.skills.iter().enumerate() {
-            skills = skills.push(
-                row![
-                    input(tr::configuration_skill_placeholder(), sk)
-                        .on_input(move |v| Message::CfgSkill(i, v))
-                        .width(Fill),
-                    icon_button(I_DELETE, Some(Message::CfgSkillRemove(i)), tr::remove()),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .boxed(),
-            );
-        }
-        let mut mcp: Column<El<'_>> = Column::new().spacing(4);
-        for (i, m) in e.mcp.iter().enumerate() {
-            mcp = mcp.push(
-                row![
-                    input(tr::mcp_name_placeholder(), &m.name)
-                        .on_input(move |v| Message::CfgMcp(i, McpField::Name, v))
-                        .width(90),
-                    input(tr::mcp_command_placeholder(), &m.command)
-                        .on_input(move |v| Message::CfgMcp(i, McpField::Command, v))
-                        .width(90),
-                    input(tr::mcp_args_placeholder(), &m.args)
-                        .on_input(move |v| Message::CfgMcp(i, McpField::Args, v))
-                        .width(Fill),
-                    input(tr::mcp_env_placeholder(), &m.env)
-                        .on_input(move |v| Message::CfgMcp(i, McpField::Env, v))
-                        .width(110),
-                    icon_button(I_DELETE, Some(Message::CfgMcpRemove(i)), tr::remove()),
-                ]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .boxed(),
-            );
-        }
-        container(
-            column![
-                small(tr::configuration_name_label()),
-                input(tr::configuration_name_placeholder(), &e.name).on_input(Message::CfgEditName),
-                small(tr::configuration_instructions()),
-                text_editor(&e.instructions)
-                    .on_action(Message::CfgInstructions)
-                    .size(12)
-                    .height(90),
-                row![
-                    small(tr::configuration_skills()),
-                    space().width(Fill),
-                    button(text(tr::add()).size(11))
-                        .padding([2, 8])
-                        .style(style::secondary)
-                        .on_press(Message::CfgSkillAdd),
-                ]
-                .align_y(Alignment::Center),
-                skills,
-                row![
-                    small(tr::configuration_mcp()),
-                    space().width(Fill),
-                    button(text(tr::add()).size(11))
-                        .padding([2, 8])
-                        .style(style::secondary)
-                        .on_press(Message::CfgMcpAdd),
-                ]
-                .align_y(Alignment::Center),
-                mcp,
-                small(tr::configuration_default_repos()),
-                default_repos,
-                text(tr::configuration_default_repos_note())
-                    .size(10)
-                    .color(style::FAINT),
-                text(support).size(10).color(style::FAINT),
-                row![
-                    space().width(Fill),
-                    button(text(tr::cancel()).size(12))
-                        .padding([4, 12])
-                        .style(style::secondary)
-                        .on_press(Message::CfgCancel),
-                    button(text(tr::save()).size(12))
-                        .padding([4, 12])
-                        .style(style::primary)
-                        .on_press_maybe((online && !busy).then_some(Message::CfgSave)),
-                ]
-                .spacing(6),
-            ]
-            .spacing(6),
-        )
-        .padding(8)
-        .style(style::bg(style::BG))
-        .boxed()
-    }
-
     fn modal_view<'a>(&'a self, modal: &'a Modal) -> El<'a> {
         let card = match modal {
             Modal::NewSession(f) => {
@@ -2665,6 +2530,8 @@ impl App {
             Modal::QuickOpen(f) => self.quick_open_card(f),
             Modal::Changes(f) => self.changes_modal_card(f),
             Modal::Footer(f) => self.footer_modal_card(f),
+            Modal::SkillEdit(f) => self.skill_modal_card(f),
+            Modal::AddProfile => self.add_profile_card(),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {
@@ -2779,8 +2646,9 @@ impl App {
                 );
                 c.width(460).boxed()
             }
-            Modal::CloseDirty(f) => column![
-                text(tr::unsaved_title(crate::detail::file_name(&f.path)))
+            // One file: "save “x”?"; several items: Desk's 저장하지 않은 변경 with the list.
+            Modal::CloseDirty(f) if f.keys.len() == 1 && f.dirty.len() == 1 => column![
+                text(tr::unsaved_title(crate::detail::file_name(&f.dirty[0])))
                     .size(18)
                     .font(style::BOLD),
                 text(tr::unsaved_body()).size(13).color(style::DIM),
@@ -2804,6 +2672,36 @@ impl App {
             .spacing(10)
             .width(460)
             .boxed(),
+            Modal::CloseDirty(f) => {
+                let mut names = Column::new().spacing(2);
+                for p in &f.dirty {
+                    names = names.push(text(crate::detail::file_name(p)).size(12).font(style::MONO));
+                }
+                column![
+                    text(tr::close_many_title()).size(18).font(style::BOLD),
+                    text(tr::close_many_body()).size(13).color(style::DIM),
+                    names,
+                    row![
+                        button(text(tr::cancel()).size(13))
+                            .padding([6, 14])
+                            .style(style::secondary)
+                            .on_press(Message::CloseModal),
+                        space().width(Fill),
+                        button(text(tr::close_many_discard()).size(13))
+                            .padding([6, 14])
+                            .style(style::danger)
+                            .on_press(Message::CloseDirtyDiscard),
+                        button(text(tr::close_many_save()).size(13))
+                            .padding([6, 14])
+                            .style(style::primary)
+                            .on_press_maybe(self.when_connected(Message::CloseDirtySave)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10)
+                .width(460)
+                .boxed()
+            }
         };
         opaque(
             mouse_area(

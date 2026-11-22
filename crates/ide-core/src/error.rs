@@ -163,6 +163,18 @@ pub enum Error {
     #[error("cannot delete the last configuration {0:?}")]
     LastConfiguration(String),
 
+    /// The configuration has no skill with this folder name.
+    #[error("skill {0:?} not found")]
+    SkillNotFound(String),
+
+    /// A skill with this folder name exists already.
+    #[error("skill {0:?} exists already")]
+    SkillExists(String),
+
+    /// The folder is not a skill (no `SKILL.md`).
+    #[error("{0:?} is not a skill folder (no SKILL.md)")]
+    InvalidSkill(PathBuf),
+
     /// No agent provider with this id is registered.
     #[error("agent provider {0:?} not found")]
     ProviderNotFound(String),
@@ -348,6 +360,15 @@ pub enum ErrorMessage<'a> {
     LastConfiguration {
         name: &'a str,
     },
+    SkillNotFound {
+        name: &'a str,
+    },
+    SkillExists {
+        name: &'a str,
+    },
+    InvalidSkill {
+        path: &'a Path,
+    },
     ProviderNotFound {
         provider: &'a str,
     },
@@ -449,6 +470,9 @@ impl ErrorMessage<'_> {
             ErrorMessage::ConfigurationNotFound { .. } => "configuration-not-found",
             ErrorMessage::ConfigurationInUse { .. } => "configuration-in-use",
             ErrorMessage::LastConfiguration { .. } => "last-configuration",
+            ErrorMessage::SkillNotFound { .. } => "skill-not-found",
+            ErrorMessage::SkillExists { .. } => "skill-exists",
+            ErrorMessage::InvalidSkill { .. } => "skill-invalid",
             ErrorMessage::ProviderNotFound { .. } => "provider-not-found",
             ErrorMessage::ProviderNoLogin { .. } => "provider-no-login",
             ErrorMessage::InvalidMcpName { .. } => "invalid-mcp-name",
@@ -526,6 +550,9 @@ impl Error {
                 count: *count,
             },
             Error::LastConfiguration(name) => ErrorMessage::LastConfiguration { name },
+            Error::SkillNotFound(name) => ErrorMessage::SkillNotFound { name },
+            Error::SkillExists(name) => ErrorMessage::SkillExists { name },
+            Error::InvalidSkill(path) => ErrorMessage::InvalidSkill { path },
             Error::ProviderNotFound(provider) => ErrorMessage::ProviderNotFound { provider },
             Error::ProviderNoLogin(provider) => ErrorMessage::ProviderNoLogin { provider },
             Error::InvalidMcpName(name) => ErrorMessage::InvalidMcpName { name },

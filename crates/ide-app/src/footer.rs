@@ -157,6 +157,8 @@ pub fn branch_name_ok(name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoreKind {
     Merge,
+    /// The PR is behind its base: GitHub's "Update branch" (Desk's 브랜치 업데이트).
+    UpdateBranch,
     View,
     Close,
     Recheck,
@@ -536,6 +538,9 @@ pub enum FooterMsg {
     OpenClosePr,
     ClosePrConfirm,
     PrClosed(Result<PrClosed, ProtoError>),
+    /// "브랜치 업데이트" (the open PR is behind its base), and GitHub's answer for `repo`.
+    UpdateBranch,
+    BranchUpdated(String, Result<Option<String>, ProtoError>),
     // PR dialog
     OpenPr,
     /// The "올리지 않은 PR 내용" strip: the dialog in AI mode, where the text can be reused.
@@ -738,13 +743,22 @@ impl App {
             } else {
                 None
             };
-            let hint = local.or_else(|| ide_client::merge_blocker(pr).map(blocker_text));
+            let blocker = ide_client::merge_blocker(pr);
+            let hint = local.or_else(|| blocker.map(blocker_text));
             out.push(MoreEntry {
                 kind: MoreKind::Merge,
                 enabled: hint.is_none(),
                 title: tr::foot_merge_item(&n),
                 hint: Some(hint.unwrap_or_else(tr::foot_merge_hint)),
             });
+            if blocker == Some(ide_client::MergeBlocker::Behind) {
+                out.push(MoreEntry {
+                    kind: MoreKind::UpdateBranch,
+                    enabled: f.is_some_and(|f| f.running.is_none()),
+                    title: tr::foot_update_branch(),
+                    hint: Some(tr::foot_update_branch_hint()),
+                });
+            }
             out.push(MoreEntry {
                 kind: MoreKind::View,
                 enabled: true,
@@ -1253,6 +1267,33 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            FooterMsg::UpdateBranch => {
+                if let Some(d) = self.detail_mut(sid) {
+                    d.footer.menu = None;
+                }
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let Some(pr) = self.footer(sid, &repo_now).and_then(RepoFooter::open_pr) else {
+                    return Task::none();
+                };
+                let (s, r, n, sha) = (sid.to_owned(), repo_now.clone(), pr.number, pr.head_sha.clone());
+                let repo = repo_now.clone();
+                perform(
+                    sid,
+                    async move { c.pr_update_branch(&s, &r, n, &sha).await },
+                    move |res| FooterMsg::BranchUpdated(repo, res),
+                )
+            }
+            FooterMsg::BranchUpdated(repo, res) => {
+                let msg = match res {
+                    Ok(Some(m)) if !m.trim().is_empty() => m,
+                    Ok(_) => tr::foot_branch_updating(),
+                    Err(e) => tr::foot_update_branch_failed(&i18n::proto_error(&e)),
+                };
+                self.footer_toast(sid, msg);
+                self.footer_pr(sid, &repo)
             }
             FooterMsg::OpenPr => self.footer_open_pr(sid, &repo_now, true),
             FooterMsg::OpenLeftover => self.footer_open_pr(sid, &repo_now, false),

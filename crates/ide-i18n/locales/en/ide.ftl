@@ -14,7 +14,7 @@ language-name = English
 
 nav-work = Work
 nav-accounts = Accounts
-nav-configurations = Configurations
+nav-configurations = Profiles
 nav-repos = Repos
 sessions-hide = Hide session list
 sessions-show = Show session list
@@ -63,6 +63,7 @@ start-agent = Start { $agent }
 
 show-detail = Show detail
 hide-detail = Hide detail
+detail-toggle = Detail area
 tab-web = Web
 web-back = Back
 web-forward = Forward
@@ -81,6 +82,133 @@ detail-window-merge = Merge into app
 detail-window-merge-tip = Merge into the app window
 detail-window-hide = Hide the detached detail window
 detail-window-show = Show the detail area in its window
+window-minimize = Minimize
+window-maximize = Maximize
+window-restore = Restore Down
+rail-settings = Open items settings
+rail-show-as = Show open items as
+rail-tabs = Vertical tabs
+rail-popover = Popover
+rail-side = Tab position
+rail-left = Left
+rail-right = Right
+close-all = Close all tabs
+close-all-tip = Closes every tab opened from Changes, History and Explore (the web page stays)
+close-idle = Close idle items
+close-idle-tip = Closes saved files, changes and commits; files with unsaved edits stay
+close-others = Close other items
+close-many-title = Unsaved changes
+close-many-body = These files have unsaved edits. Closing them discards the edits.
+close-many-discard = Discard and close
+close-many-save = Save and close
+open-items-none = None
+item-copy-path = Copy path
+item-copy-rel = Copy relative path
+item-reveal-windows = Show in Windows Explorer
+item-reveal-finder = Reveal in Finder
+item-reveal-files = Show in the file manager
+item-open-vscode = Open in VS Code
+item-copy-sha = Copy commit SHA
+item-copy-subject = Copy commit subject
+item-copy-url = Copy address
+item-open-external = Open in external browser
+item-copied-path = Path copied
+item-copied-rel = Relative path copied
+item-copied-sha = Commit SHA copied
+item-copied-subject = Commit subject copied
+item-copied-url = Address copied
+item-reveal-os-failed = Could not open the file explorer: { $error }
+item-vscode-failed = Could not open VS Code: { $error }
+item-external-failed = Could not open the external browser: { $error }
+chg-filter = Filter
+explore-settings = File search settings
+explore-hide-ignored = Hide gitignored files
+explore-hide-ignored-tip = When checked, files and folders matched by .gitignore are left out of the results
+explore-more = { $count ->
+    [one] 1 more. Narrow the search.
+   *[other] { $count } more. Narrow the search.
+}
+foot-update-branch = Update branch
+foot-update-branch-hint = Brings the base branch's new commits into the PR branch on GitHub
+foot-branch-updating = Updating the branch
+foot-update-branch-failed = Branch update refused: { $error }
+badge-checking = Checking
+badge-failed = Check failed
+badge-none = No changes
+badge-none-tip = Nothing to commit, push or merge
+badge-dirty = Commit needed
+badge-ahead = Push needed
+badge-publish = Publish needed
+badge-ahead-tip = { $count ->
+    [one] 1 commit not on the remote yet
+   *[other] { $count } commits not on the remote yet
+}
+badge-pr = PR open
+badge-pr-conflict = PR conflict
+badge-unmerged = Has commits
+badge-unmerged-tip = { $count ->
+    [one] 1 commit the base branch does not have yet · no PR
+   *[other] { $count } commits the base branch does not have yet · no PR
+}
+badge-unmerged-conflict-tip = { $count ->
+    [one] Conflicts with the base branch · cannot tell (1 commit) · no PR
+   *[other] Conflicts with the base branch · cannot tell ({ $count } commits) · no PR
+}
+badge-merged = Merged
+group-terminal = Terminal
+browser-new-tab = New tab
+bookmark-add = Add to bookmarks
+bookmark-remove = Remove from bookmarks
+bookmark-rename = Rename
+new-scope-session = This session
+new-scope-global = Shared
+new-scope-session-hint = Belongs to this session. Closed when the session is deleted.
+new-scope-global-hint = Opens without a session. Stays when you switch or delete sessions.
+new-web = Web
+new-web-open = Open web page
+new-web-placeholder = Address or search (e.g. localhost:5173)
+uterm-in-home = Home folder
+uterm-pick-folder = Choose folder…
+uterm-start-in = Start in
+uterm-default-shell = Default shell
+uterm-make-default = Make default
+pick-term-title = Terminal start folder
+pick-skill-title = Import a skill folder
+new-running-servers = { $count ->
+    [one] Running server · 1
+   *[other] Running servers · { $count }
+}
+global-item-tip = Shared (no session · stays when the session is deleted)
+common-current = current
+common-pin = Pin as a common tab (shown in every session)
+common-unpin = Unpin (back to this session)
+new-item = New
+new-item-tip = Open new (terminal · web page · Alt+click: shared)
+uterm-new-title = Terminal
+uterm-in-session = Terminal · session folder
+uterm-running = Running
+uterm-done = Exited
+uterm-failed = Exited (code { $code })
+uterm-stop = Stop
+uterm-rerun = Run again
+uterm-remove = Remove from list
+uterm-stop-remove = Stop and remove from list
+uterm-copy-command = Copy command
+err-uterm-no-shell = No shell was found on the server.
+err-uterm-not-found = The terminal is gone: { $id }
+item-copied-command = Command copied
+scripts-title = Scripts
+scripts-refresh = Find again
+scripts-search = Scripts · file name
+scripts-run = Run
+scripts-running = Running · show the terminal
+scripts-loading = Finding scripts…
+scripts-none = No scripts to run were found
+scripts-no-match = No matching scripts
+rail-pin = Pin the tab list
+rail-unpin = Unpin the tab list
+rail-empty = No open items
+rail-to-tabs = Show as vertical tabs
 
 ## New-session dialog
 
@@ -190,12 +318,15 @@ err-account-in-use = { $count ->
     [one] 1 session uses
    *[other] { $count } sessions use
 } account “{ $name }”; delete them first.
-err-configuration-not-found = Configuration “{ $name }” not found.
+err-configuration-not-found = Profile “{ $name }” not found.
 err-configuration-in-use = { $count ->
     [one] 1 session uses
    *[other] { $count } sessions use
-} configuration “{ $name }”; delete them first.
-err-last-configuration = Cannot delete the last configuration “{ $name }”.
+} profile “{ $name }”; delete them first.
+err-last-configuration = Cannot delete the last profile “{ $name }”.
+err-skill-not-found = Skill “{ $name }” not found.
+err-skill-exists = A skill named “{ $name }” exists already.
+err-skill-invalid = Not a skill folder (no SKILL.md): { $path }
 err-provider-not-found = The agent “{ $provider }” is not available on the server.
 err-provider-no-login = The agent “{ $provider }” has no accounts or login command.
 err-invalid-mcp-name = MCP server “{ $name }”: use a unique name of letters, digits, - and _, and a command.
@@ -366,7 +497,7 @@ err-def-not-found = No definition found for “{ $name }”.
 
 ## Accounts and configurations (settings, new-session dialog)
 
-configuration-label = CONFIGURATION
+configuration-label = PROFILE
 account-label = ACCOUNT
 account-default = Default login (the CLI's own settings)
 accounts-note = An account is one login of an agent CLI with its own config folder. Adding one opens its login in a terminal.
@@ -380,13 +511,45 @@ account-logged-out = not logged in
 account-status-unknown = unknown
 account-delete-tooltip = Delete the account and its login files
 configurations-note = Skills, MCP servers and instructions, added to any agent and account.
-configuration-name-placeholder = Configuration name
+configuration-name-placeholder = Profile name
 configuration-name-label = Name
-configuration-edit = Edit
-configuration-delete-tooltip = Delete the configuration
+profile-add = Add profile
+profiles-hide = Hide the profile list
+profiles-show = Show the profile list
+profiles-none = No profiles yet.
+profile-row-detail = { $sessions ->
+    [one] 1 session
+   *[other] { $sessions } sessions
+} · { $skills ->
+    [one] 1 skill
+   *[other] { $skills } skills
+}
+profile-unsaved = Unsaved
+profile-revert = Revert
+profile-delete-question = Delete this profile?
+profile-section-basic = Basics
+profile-instructions-note = Added after the system (developer) prompt of agents started with this profile.
+profile-mcp-note = Local (stdio) MCP servers added to the agent: name, command, arguments, KEY=VALUE environment variables.
+mcp-none = No MCP servers.
+configuration-delete-tooltip = Delete the profile
 configuration-instructions = Instructions
-configuration-skills = Skills (folders with a SKILL.md)
-configuration-skill-placeholder = Skill folder on the server
+configuration-skills = Skills
+skills-count = { $total ->
+    [one] 1 skill
+   *[other] { $total } skills
+}, { NUMBER($on) } on
+skills-none = No skills yet.
+skills-note = Changes apply right away, to new sessions. Each skill is a folder with a SKILL.md, kept with the profile.
+skill-new = New skill
+skill-import = Import folder
+skill-name-placeholder = Name (e.g. pdf-tools)
+skill-description-placeholder = What it does and when to use it
+skill-new-note = Creates a SKILL.md you can edit afterwards.
+skill-create = Create
+skill-edit = Edit
+skill-edit-tip = Edit SKILL.md
+skill-delete-tip = Delete the skill
+skill-edit-title = Edit skill
 configuration-mcp = MCP servers (stdio)
 configuration-sessions = { $total ->
     [one] 1 session
@@ -418,14 +581,14 @@ repo-sessions-label = { $count ->
 }
 provider-support-modes = { $provider }: workspace { $workspace } · original repo { $original } (skills, MCP, instructions)
 configuration-default-repos = Default repositories
-configuration-default-repos-note = Pre-checked when a session is created with this configuration; each session can change them.
+configuration-default-repos-note = Pre-checked when a session is created with this profile; each session can change them.
 workspace-label = WORKSPACE
 use-worktrees = Use worktrees
 use-worktrees-note = The session gets its own folder with a worktree of each repository (branch ide/<session-id>), separate from the originals.
 worktree-repos-label = Repositories to create worktrees for
 no-repos-empty-workspace = No repositories registered: the session starts with an empty workspace.
 empty-workspace-note = No repository checked: the session starts with an empty workspace.
-worktree-repos-note = The first selection is the configuration's default repositories; repositories can be added later from the session's ⚙.
+worktree-repos-note = The first selection is the profile's default repositories; repositories can be added later from the session's ⚙.
 original-repo-warning = The agent edits and commits in the repository's own folder and current branch. Other sessions and your own work in that repository can get mixed up; clean up uncommitted changes first.
 original-repo-label = Repository to work in
 no-repos-register-first = No repositories registered. Register one on the Repos page first.
@@ -516,7 +679,7 @@ session-sort-default = Default order
 session-sort-reset = Default order
 session-sort-default-note = Default order. Add a criterion to sort automatically.
 session-sort-add = Add sort criterion
-session-sort-help = Criteria apply from the top; use the arrows to change priority. Configuration groups stay, equal values keep their previous order and items without a value come last.
+session-sort-help = Criteria apply from the top; use the arrows to change priority. Profile groups stay, equal values keep their previous order and items without a value come last.
 sort-key-name = Name
 sort-key-updated = Last activity
 sort-key-created = Created

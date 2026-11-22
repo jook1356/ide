@@ -73,6 +73,16 @@ impl Paths {
         self.root.join("configurations.json")
     }
 
+    /// `configurations/<slug>/skills`: the skills of a configuration.
+    pub fn configuration_skills_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("configurations").join(slug).join("skills")
+    }
+
+    /// `configurations/<slug>`: the files of a configuration.
+    pub fn configuration_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("configurations").join(slug)
+    }
+
     /// `accounts/<provider>/<slug>`: the config home of a new account.
     pub fn account_dir(&self, provider: &str, slug: &str) -> PathBuf {
         self.root.join("accounts").join(provider).join(slug)

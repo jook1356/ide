@@ -8,10 +8,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use ide_proto::{
     AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
-    ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat,
+    ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat, PathMatches,
     GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
-    SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, Welcome,
+    SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, ScriptGroup, UserTerm, Welcome, PortInfo, ShellInfo,
 };
 // --- local git actions (Changes / History footer)
 use ide_proto::git_actions::{
@@ -461,6 +461,102 @@ impl Client {
         expect_configuration(self.call(Request::ConfigurationUpdate(c)).await)
     }
 
+    /// `skill.create`: a new skill (a `SKILL.md` from `name` and `description`).
+    pub async fn skill_create(
+        &self,
+        configuration: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::SkillCreate {
+                configuration: configuration.into(),
+                name: name.into(),
+                description: description.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `skill.import`: copy a skill folder (server path) into the configuration.
+    pub async fn skill_import(
+        &self,
+        configuration: &str,
+        path: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::SkillImport {
+                configuration: configuration.into(),
+                path: path.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `skill.read`: the skill's `SKILL.md`.
+    pub async fn skill_read(&self, configuration: &str, name: &str) -> Result<String, ProtoError> {
+        expect(
+            self.call(Request::SkillRead {
+                configuration: configuration.into(),
+                name: name.into(),
+            })
+            .await,
+            |r| match r {
+                Response::SkillText(t) => Some(t),
+                _ => None,
+            },
+        )
+    }
+
+    /// `skill.write`: replace the skill's `SKILL.md`.
+    pub async fn skill_write(
+        &self,
+        configuration: &str,
+        name: &str,
+        text: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::SkillWrite {
+                configuration: configuration.into(),
+                name: name.into(),
+                text: text.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `skill.delete`.
+    pub async fn skill_delete(
+        &self,
+        configuration: &str,
+        name: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::SkillDelete {
+                configuration: configuration.into(),
+                name: name.into(),
+            })
+            .await,
+        )
+    }
+
+    /// `skill.enable`: offer the skill to new sessions or not.
+    pub async fn skill_enable(
+        &self,
+        configuration: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::SkillEnable {
+                configuration: configuration.into(),
+                name: name.into(),
+                enabled,
+            })
+            .await,
+        )
+    }
+
     /// `configuration.delete`.
     pub async fn delete_configuration(&self, slug: &str) -> Result<(), ProtoError> {
         expect_unit(
@@ -670,6 +766,91 @@ impl Client {
     /// `session.restart`.
     pub async fn restart_session(&self, id: &str) -> Result<SessionInfo, ProtoError> {
         expect_session(self.call(Request::SessionRestart { id: id.into() }).await)
+    }
+
+    /// `uterm.open`: a shell (or `command`) in `repo`'s worktree (`None` = the session folder).
+    pub async fn uterm_open(&self, o: UTermOpen) -> Result<UserTerm, ProtoError> {
+        expect(
+            self.call(Request::UTermOpen {
+                session: o.session,
+                repo: o.repo,
+                folder: o.folder,
+                command: o.command,
+                title: o.title,
+                shell: o.shell,
+                cwd: o.cwd,
+            })
+            .await,
+            |r| match r {
+                Response::UTerm(t) => Some(t),
+                _ => None,
+            },
+        )
+    }
+
+    /// `uterm.shells`: the shells terminals can run (the default first).
+    pub async fn uterm_shells(&self) -> Result<Vec<ShellInfo>, ProtoError> {
+        expect(self.call(Request::UTermShells).await, |r| match r {
+            Response::Shells(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// `uterm.ports`: ports listening in the session's terminals (`""`: the 공용 ones).
+    pub async fn uterm_ports(&self, session: &str) -> Result<Vec<PortInfo>, ProtoError> {
+        expect(
+            self.call(Request::UTermPorts {
+                session: session.into(),
+            })
+            .await,
+            |r| match r {
+                Response::Ports(p) => Some(p),
+                _ => None,
+            },
+        )
+    }
+
+    /// `scripts.list`: runnable scripts of `repo`'s worktree.
+    pub async fn scripts_list(&self, session: &str, repo: &str) -> Result<Vec<ScriptGroup>, ProtoError> {
+        expect(
+            self.call(Request::ScriptsList {
+                session: session.into(),
+                repo: repo.into(),
+            })
+            .await,
+            |r| match r {
+                Response::Scripts(s) => Some(s),
+                _ => None,
+            },
+        )
+    }
+
+    /// `uterm.list`: the session's user terminals.
+    pub async fn uterm_list(&self, session: &str) -> Result<Vec<UserTerm>, ProtoError> {
+        expect(
+            self.call(Request::UTermList {
+                session: session.into(),
+            })
+            .await,
+            |r| match r {
+                Response::UTerms(t) => Some(t),
+                _ => None,
+            },
+        )
+    }
+
+    pub async fn uterm_stop(&self, id: &str) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::UTermStop { id: id.into() }).await)
+    }
+
+    pub async fn uterm_rerun(&self, id: &str) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::UTermRerun { id: id.into() }).await)
+    }
+
+    /// `uterm.remove` (stops it first).
+    pub async fn uterm_remove(&self, id: &str) -> Result<(), ProtoError> {
+        self.forget(id);
+        expect_unit(self.call(Request::UTermRemove { id: id.into() }).await)
     }
 
     /// `session.delete` (stops it first; optionally removes worktree + branch).
@@ -1021,6 +1202,31 @@ impl Client {
     }
 
     /// `search.files`: fuzzy file-name search (`max_results` 0 = 100), best first.
+    /// Explore's 파일 찾기 (`search.paths`): files and folders whose path contains `query`.
+    pub async fn search_paths(
+        &self,
+        session: &str,
+        repo: Option<&str>,
+        query: &str,
+        max_results: u32,
+        include_ignored: bool,
+    ) -> Result<PathMatches, ProtoError> {
+        expect(
+            self.call(Request::SearchPaths {
+                session: session.into(),
+                repo: repo.map(str::to_owned),
+                query: query.into(),
+                max_results,
+                include_ignored,
+            })
+            .await,
+            |r| match r {
+                Response::PathMatches(m) => Some(m),
+                _ => None,
+            },
+        )
+    }
+
     pub async fn search_files(
         &self,
         session: &str,
@@ -2329,4 +2535,18 @@ impl Drop for ClientEvents {
             *self.slot.lock().unwrap() = Some((c, t));
         }
     }
+}
+
+/// What `uterm.open` asks for: a shell (or `command`) in `repo`'s worktree / its `folder`, the
+/// session folder, or for a 공용 terminal (empty `session`) `cwd` or the home folder.
+#[derive(Debug, Clone, Default)]
+pub struct UTermOpen {
+    pub session: String,
+    pub repo: Option<String>,
+    pub folder: Option<String>,
+    pub command: Option<String>,
+    pub title: Option<String>,
+    /// `uterm.shells` id (`None` = the default).
+    pub shell: Option<String>,
+    pub cwd: Option<String>,
 }

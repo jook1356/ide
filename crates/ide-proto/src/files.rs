@@ -223,6 +223,24 @@ pub struct FileMatch {
     pub indices: Vec<u32>,
 }
 
+/// `search.paths` result entry (Explore's 파일 찾기).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathMatch {
+    /// Repo id the path belongs to.
+    pub repo: String,
+    /// Root-relative path (no trailing `/`).
+    pub path: String,
+    /// A folder (an ignored folder is listed once, not its contents).
+    pub dir: bool,
+}
+
+/// `search.paths` result: the first matches by path and how many there are in all.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PathMatches {
+    pub matches: Vec<PathMatch>,
+    pub total: u32,
+}
+
 /// One changed path in `git.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitChange {

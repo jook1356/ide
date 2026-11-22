@@ -33,6 +33,8 @@ encoding_rs = "0.8"
 chardetng = "0.1"
 # pr.*: GitHub REST/GraphQL over HTTPS with git's credential token (rustls, no gzip).
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+listeners = "0.6"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 ide-client.workspace = true

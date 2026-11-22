@@ -21,6 +21,7 @@ pub struct Interact<'a, M> {
     on_right_press: Option<Box<dyn Fn(Point) -> M + 'a>>,
     focus_within: bool,
     intercept: bool,
+    absolute: bool,
 }
 
 #[derive(Default)]
@@ -50,6 +51,7 @@ impl<'a, M> Interact<'a, M> {
             on_right_press: None,
             focus_within: false,
             intercept: false,
+            absolute: false,
         }
     }
 
@@ -77,6 +79,13 @@ impl<'a, M> Interact<'a, M> {
     }
 
     /// Right button pressed inside; the point is relative to this widget's top-left corner.
+    /// [`Interact::on_right_press`] reports the point in window coordinates instead (for menus
+    /// drawn at the window's root).
+    pub fn absolute(mut self) -> Self {
+        self.absolute = true;
+        self
+    }
+
     pub fn on_right_press(mut self, f: impl Fn(Point) -> M + 'a) -> Self {
         self.on_right_press = Some(Box::new(f));
         self
@@ -179,8 +188,13 @@ impl<M> Widget<M, Theme, iced::Renderer> for Interact<'_, M> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
                 state.focused = cursor.is_over(bounds);
+                let at = if self.absolute {
+                    cursor.position_over(bounds)
+                } else {
+                    cursor.position_in(bounds)
+                };
                 if *button == mouse::Button::Right
-                    && let Some(p) = cursor.position_in(bounds)
+                    && let Some(p) = at
                     && let Some(f) = &self.on_right_press
                 {
                     shell.publish(f(p));

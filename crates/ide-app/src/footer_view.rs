@@ -1,7 +1,7 @@
 //! View of the Changes / History footer and its dialogs (state and logic in `footer.rs`).
-//! Layout follows Hermes Desk's `.ai-actions` row: round `xl` buttons — 커밋 맡기기 (violet
+//! Layout follows Hermes Desk's `.ai-actions` row: buttons — 커밋 맡기기 (accent
 //! light, sparkles, count badge when only some files are checked), the sync split button
-//! (`SyncButton`) and the round "…" menu at the top end — with the PR strips and the PR job
+//! (`SyncButton`) and the "…" menu at the top end — with the PR strips and the PR job
 //! notice above it.
 
 use std::sync::LazyLock;
@@ -119,12 +119,9 @@ fn ic<'a>(i: FIcon, size: f32, c: Color) -> El<'a> {
 
 // ---------------------------------------------------------------------------- styles
 
-/// Mantine violet (`violet-6` / `violet-4`).
-const VIOLET: Color = color!(0x7950f2);
-const VIOLET_TEXT: Color = color!(0xb197fc);
-const ORANGE: Color = color!(0xfd7e14);
-const YELLOW: Color = color!(0xfab005);
-const TEAL: Color = color!(0x20c997);
+const ORANGE: Color = style::ORANGE;
+const YELLOW: Color = style::YELLOW;
+const TEAL: Color = style::TEAL;
 
 fn alpha(c: Color, a: f32) -> Color {
     Color { a, ..c }
@@ -144,26 +141,26 @@ fn bstyle(bg: Option<Color>, fg: Color, border: Color, radius: f32) -> button::S
     }
 }
 
-/// Desk `variant="light" color="violet" radius="xl"`.
-fn pill_violet(_: &Theme, s: button::Status) -> button::Style {
+/// Desk `variant="light"` in the app's accent: translucent accent ground, accent text.
+fn accent_light(_: &Theme, s: button::Status) -> button::Style {
     match s {
         button::Status::Hovered | button::Status::Pressed => bstyle(
-            Some(alpha(VIOLET, 0.26)),
-            VIOLET_TEXT,
+            Some(style::accent_alpha(0.26)),
+            style::ACCENT_TEXT,
             Color::TRANSPARENT,
-            16.0,
+            4.0,
         ),
         button::Status::Disabled => bstyle(
-            Some(alpha(VIOLET, 0.08)),
-            alpha(VIOLET_TEXT, 0.4),
+            Some(style::accent_alpha(0.08)),
+            alpha(style::ACCENT_TEXT, 0.4),
             Color::TRANSPARENT,
-            16.0,
+            4.0,
         ),
         button::Status::Active => bstyle(
-            Some(alpha(VIOLET, 0.16)),
-            VIOLET_TEXT,
+            Some(style::accent_alpha(0.16)),
+            style::ACCENT_TEXT,
             Color::TRANSPARENT,
-            16.0,
+            4.0,
         ),
     }
 }
@@ -192,10 +189,10 @@ fn menu_item(_: &Theme, s: button::Status) -> button::Style {
 fn link_btn(_: &Theme, s: button::Status) -> button::Style {
     match s {
         button::Status::Hovered | button::Status::Pressed => {
-            bstyle(Some(style::HOVER), VIOLET_TEXT, Color::TRANSPARENT, 4.0)
+            bstyle(Some(style::HOVER), style::ACCENT_TEXT, Color::TRANSPARENT, 4.0)
         }
         button::Status::Disabled => bstyle(None, style::FAINT, Color::TRANSPARENT, 4.0),
-        button::Status::Active => bstyle(None, VIOLET_TEXT, Color::TRANSPARENT, 4.0),
+        button::Status::Active => bstyle(None, style::ACCENT_TEXT, Color::TRANSPARENT, 4.0),
     }
 }
 
@@ -212,7 +209,7 @@ fn strip_style(c: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
 
 fn tone_color(t: Tone) -> Color {
     match t {
-        Tone::Info => VIOLET_TEXT,
+        Tone::Info => style::ACCENT_TEXT,
         Tone::Success => style::GREEN,
         Tone::Warning => ORANGE,
         Tone::Error => style::RED,
@@ -375,7 +372,7 @@ impl App {
             tr::foot_commit_all()
         };
         let mut label = row![
-            ic(FIcon::Sparkles, 14.0, VIOLET_TEXT),
+            ic(FIcon::Sparkles, 14.0, style::ACCENT_TEXT),
             text(tr::foot_commit())
                 .size(12)
                 .font(style::BOLD)
@@ -388,8 +385,8 @@ impl App {
                 container(text(files.len().to_string()).size(10).font(style::BOLD))
                     .padding([0, 5])
                     .style(|_| container::Style {
-                        background: Some(VIOLET.into()),
-                        text_color: Some(Color::WHITE),
+                        background: Some(style::ACCENT.into()),
+                        text_color: Some(style::ON_ACCENT),
                         border: Border {
                             radius: 8.0.into(),
                             ..Default::default()
@@ -402,7 +399,7 @@ impl App {
             button(container(label).center_x(Fill))
                 .padding([6, 8])
                 .width(Fill)
-                .style(pill_violet)
+                .style(accent_light)
                 .on_press_maybe(
                     (!files.is_empty() && self.connected()).then(|| fm(sid, FooterMsg::Commit)),
                 ),
@@ -417,7 +414,7 @@ impl App {
             .width(30)
             .height(30)
             .padding(0)
-            .style(default_btn(15.0))
+            .style(default_btn(4.0))
             .on_press(fm(sid, FooterMsg::Menu(FooterMenu::More))),
             tr::foot_more(),
         );
@@ -441,7 +438,7 @@ impl App {
                     .align_y(Alignment::Center),
                 )
                 .padding([6, 10])
-                .style(default_btn(16.0)),
+                .style(default_btn(4.0)),
                 tr::foot_no_remote_tip(),
             );
         }
@@ -486,10 +483,10 @@ impl App {
                 .padding([6, 10])
                 .height(30)
                 .style(|t, s| {
-                    let mut b = default_btn(16.0)(t, s);
+                    let mut b = default_btn(4.0)(t, s);
                     b.border.radius = iced::border::Radius {
-                        top_left: 16.0,
-                        bottom_left: 16.0,
+                        top_left: 4.0,
+                        bottom_left: 4.0,
                         top_right: 0.0,
                         bottom_right: 0.0,
                     };
@@ -511,12 +508,12 @@ impl App {
             .height(30)
             .padding(0)
             .style(|t, s| {
-                let mut b = default_btn(16.0)(t, s);
+                let mut b = default_btn(4.0)(t, s);
                 b.border.radius = iced::border::Radius {
                     top_left: 0.0,
                     bottom_left: 0.0,
-                    top_right: 16.0,
-                    bottom_right: 16.0,
+                    top_right: 4.0,
+                    bottom_right: 4.0,
                 };
                 b
             })
@@ -625,6 +622,7 @@ impl App {
         for e in self.footer_more(sid) {
             let (icon, c) = match e.kind {
                 MoreKind::Merge => (FIcon::GitMerge, style::TEXT),
+                MoreKind::UpdateBranch => (FIcon::Refresh, style::TEXT),
                 MoreKind::View => (FIcon::ExternalLink, style::TEXT),
                 MoreKind::Close => (FIcon::GitPullRequestClosed, style::RED),
                 MoreKind::Recheck => (FIcon::AlertTriangle, ORANGE),
@@ -633,6 +631,7 @@ impl App {
             };
             let msg = match e.kind {
                 MoreKind::Merge => FooterMsg::OpenMerge,
+                MoreKind::UpdateBranch => FooterMsg::UpdateBranch,
                 MoreKind::View => FooterMsg::ViewPr,
                 MoreKind::Close => FooterMsg::OpenClosePr,
                 MoreKind::Recheck => FooterMsg::JobAction(repo.clone(), JobAction::Recheck),
@@ -715,7 +714,7 @@ impl App {
                 JobAction::Open(_) => (tr::foot_job_open(), true),
             };
             acts = acts.pb(button(text(label).size(11).color(if color_on {
-                VIOLET_TEXT
+                style::ACCENT_TEXT
             } else {
                 style::RED
             }))
@@ -810,7 +809,7 @@ impl App {
             if !parts.is_empty() {
                 c = c.pb(text(tr::foot_excluded(&parts.join(" · ")))
                     .size(11)
-                    .color(VIOLET_TEXT));
+                    .color(style::ACCENT_TEXT));
             }
         }
         if let Some(e) = &f.request_error {
@@ -1287,7 +1286,7 @@ fn strip<'a>(
             text(label).size(11).width(Fill),
             text(action)
                 .size(11)
-                .color(if c == ORANGE { ORANGE } else { VIOLET_TEXT }),
+                .color(if c == ORANGE { ORANGE } else { style::ACCENT_TEXT }),
         ]
         .spacing(8)
         .align_y(Alignment::Center),

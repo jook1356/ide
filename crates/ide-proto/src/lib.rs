@@ -17,13 +17,13 @@ pub mod rpc;
 pub mod term;
 
 pub use agents::{
-    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
+    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
     ProviderDetection, ProviderInfo, RepoInfo, BaseRuleInfo, BaseRulePreview, SessionKind, SessionMode, SessionRepo, Support,
 };
 pub use error::ProtoError;
 pub use files::{
     AheadBehind, BrowseEntry, BrowseListing, ByteRange, ChangeKind, CommitInfo, DefResult,
-    DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent, FileMatch,
+    DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent, FileMatch, PathMatch, PathMatches,
     FsEntry, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus,
     LineKind, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
@@ -40,7 +40,7 @@ pub use mux::{
 };
 pub use rpc::{
     Attached, Hello, NewSession, Notify, PROTO_VERSION, RepoFailureInfo, Request, Response,
-    ResumeToken, RpcMessage, SessionInfo, SessionState, UserInfo, Welcome,
+    ResumeToken, RpcMessage, PortInfo, ScriptGroup, ScriptItem, SessionInfo, ShellInfo, SessionState, UserInfo, UserTerm, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};
 // --- pull requests and agent prompts

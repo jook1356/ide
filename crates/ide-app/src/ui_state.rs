@@ -134,6 +134,58 @@ pub struct UiState {
     /// The detail window's last position and size (logical pixels).
     #[serde(deserialize_with = "lenient")]
     pub detail_window: Option<WindowGeom>,
+    /// How 열린 항목 shows in the detail window (Desk's `detail-rail`).
+    #[serde(deserialize_with = "lenient")]
+    pub detail_rail: RailPrefs,
+    /// Width of the side panel (Changes / History / Explore), set by dragging its left edge
+    /// (Desk's `changes-panel-width`); clamped to the window when drawn.
+    pub side_width: f32,
+    /// Explore's 파일 찾기 leaves gitignored files and folders out (Desk's
+    /// `explore-search-hide-ignored`, on by default).
+    pub explore_hide_ignored: bool,
+    /// Default shell of new terminals (☆ in "+ 새로 열기"; `None` = the server's first), and the
+    /// last 공용 start folders.
+    pub default_shell: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub recent_term_dirs: Vec<String>,
+    /// Browser 즐겨찾기, shared by every session (Desk's `browser-bookmarks.json`).
+    #[serde(deserialize_with = "lenient")]
+    pub bookmarks: Vec<Bookmark>,
+}
+
+/// A browser bookmark.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub url: String,
+    pub title: String,
+}
+
+/// How 열린 항목 shows in the detail window (Hermes Desk's `lib/detailRail.ts`): a vertical tab
+/// list beside the content or the header's popover. The app window's pane always uses the
+/// popover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RailPrefs {
+    pub mode: RailMode,
+    pub side: RailSide,
+    /// The list stays open beside the content (else an icon rail that opens on hover).
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RailMode {
+    #[default]
+    Tabs,
+    Popover,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RailSide {
+    #[default]
+    Left,
+    Right,
 }
 
 /// Position and size of a window, in logical pixels.
@@ -169,6 +221,12 @@ impl Default for UiState {
             detail_detached: false,
             detail_pinned: false,
             detail_window: None,
+            detail_rail: RailPrefs::default(),
+            side_width: crate::detail::SIDE_W,
+            explore_hide_ignored: true,
+            bookmarks: Vec::new(),
+            default_shell: None,
+            recent_term_dirs: Vec::new(),
         }
     }
 }

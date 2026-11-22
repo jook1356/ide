@@ -62,10 +62,15 @@ pub fn proto_error(e: &ProtoError) -> String {
         "configuration-not-found" => tr::err_configuration_not_found(&a("name")),
         "configuration-in-use" => tr::err_configuration_in_use(n("count"), &a("name")),
         "last-configuration" => tr::err_last_configuration(&a("name")),
+        "skill-not-found" => tr::err_skill_not_found(&a("name")),
+        "skill-exists" => tr::err_skill_exists(&a("name")),
+        "skill-invalid" => tr::err_skill_invalid(&a("path")),
         "provider-not-found" => tr::err_provider_not_found(&a("provider")),
         "provider-no-login" => tr::err_provider_no_login(&a("provider")),
         "invalid-mcp-name" => tr::err_invalid_mcp_name(&a("name")),
         "session-not-found" => tr::err_session_not_found(&a("id")),
+        "uterm-no-shell" => tr::err_uterm_no_shell(),
+        "uterm-not-found" => tr::err_uterm_not_found(&a("id")),
         "invalid-session-id" => tr::err_invalid_session_id(&a("id")),
         "not-a-git-repo" => tr::err_not_a_git_repo(&a("path"), &a("detail")),
         "git-spawn" => tr::err_git_spawn(&a("detail")),
@@ -270,6 +275,9 @@ mod tests {
             "configuration-not-found",
             "configuration-in-use",
             "last-configuration",
+            "skill-not-found",
+            "skill-exists",
+            "skill-invalid",
             "provider-not-found",
             "provider-no-login",
             "invalid-mcp-name",
@@ -302,7 +310,7 @@ mod tests {
                     .arg("name", "Web")
                     .arg("count", "1")
             ),
-            "1 session uses configuration “Web”; delete them first."
+            "1 session uses profile “Web”; delete them first."
         );
     }
 }

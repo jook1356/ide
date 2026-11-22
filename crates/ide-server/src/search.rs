@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks};
-use ide_proto::{ByteRange, FileMatch, ProtoError, SearchMatch, SearchSummary, TextSearch};
+use ide_proto::{
+    ByteRange, FileMatch, PathMatch, PathMatches, ProtoError, SearchMatch, SearchSummary, TextSearch,
+};
 use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
 
@@ -318,6 +320,82 @@ pub fn files(roots: &[(String, &Path)], query: &str, max: u32) -> Vec<FileMatch>
         .collect()
 }
 
+/// `search.paths` (Hermes Desk's Explore 파일 찾기): files and folders under every
+/// `(repo id, root)` whose root-relative path contains `query` (case-insensitive), sorted by
+/// path, at most `max`, with the total count. Gitignored entries are left out unless
+/// `include_ignored`; then an ignored folder is listed once (not what is inside it), like
+/// Desk's `listIgnored`.
+pub fn paths(roots: &[(String, &Path)], query: &str, max: u32, include_ignored: bool) -> PathMatches {
+    let max = if max == 0 { DEFAULT_MAX_FILES } else { max } as usize;
+    let q = query.trim().to_lowercase();
+    let mut all: Vec<PathMatch> = Vec::new();
+    'roots: for (repo, root) in roots {
+        let root: &Path = root;
+        let mut kept: std::collections::HashSet<std::path::PathBuf> = Default::default();
+        let mut dirs: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+        let mut w = WalkBuilder::new(root);
+        w.hidden(false)
+            .parents(true)
+            .follow_links(false)
+            .sort_by_file_name(|a, b| a.cmp(b))
+            .filter_entry(|e| e.file_name() != ".git");
+        for ent in w.build().flatten() {
+            if ent.depth() == 0 || is_dot_git(&ent) {
+                continue;
+            }
+            let dir = ent.file_type().is_some_and(|t| t.is_dir());
+            if include_ignored {
+                kept.insert(ent.path().to_path_buf());
+                if dir {
+                    dirs.push(ent.path().to_path_buf());
+                }
+            }
+            if let Some(rel) = rel_of(root, ent.path()) {
+                all.push(PathMatch {
+                    repo: repo.clone(),
+                    path: rel,
+                    dir,
+                });
+            }
+            if all.len() >= MAX_WALK_FILES {
+                break 'roots;
+            }
+        }
+        if include_ignored {
+            // What the walk left out of each listed folder is ignored: listed, not entered.
+            for d in &dirs {
+                let Ok(rd) = std::fs::read_dir(d) else {
+                    continue;
+                };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if e.file_name() == ".git" || kept.contains(&p) {
+                        continue;
+                    }
+                    if let Some(rel) = rel_of(root, &p) {
+                        all.push(PathMatch {
+                            repo: repo.clone(),
+                            path: rel,
+                            dir: e.file_type().is_ok_and(|t| t.is_dir()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut hits: Vec<PathMatch> = all
+        .into_iter()
+        .filter(|m| q.is_empty() || m.path.to_lowercase().contains(&q))
+        .collect();
+    hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.repo.cmp(&b.repo)));
+    let total = hits.len() as u32;
+    hits.truncate(max);
+    PathMatches {
+        matches: hits,
+        total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +543,22 @@ mod tests {
         let f = files(&both, "x.md", 10);
         assert_eq!((f[0].repo.as_str(), f[0].path.as_str()), ("r2", "x.md"));
         assert!(files(&[("r1".into(), root.as_path())], "zzzzqqq", 10).is_empty());
+
+        // Explore 파일 찾기: substring of the path (any case), folders too, path order, total.
+        let r1 = [("r1".to_owned(), root.as_path())];
+        let p = super::paths(&r1, "SRC", 10, false);
+        let got: Vec<_> = p.matches.iter().map(|m| (m.path.as_str(), m.dir)).collect();
+        assert_eq!(got, [("src", true), ("src/lib.rs", false), ("src/main.rs", false)]);
+        assert_eq!(p.total, 3);
+        let p = super::paths(&r1, "src", 1, false);
+        assert_eq!((p.matches.len(), p.total), (1, 3));
+        // The ignored folder: left out, or listed once (not its contents).
+        assert!(super::paths(&r1, "target", 10, false).matches.is_empty());
+        let p = super::paths(&r1, "target", 10, true);
+        let got: Vec<_> = p.matches.iter().map(|m| (m.path.as_str(), m.dir)).collect();
+        assert_eq!(got, [("target", true)]);
+        let g = super::paths(&r1, ".git", 10, true);
+        assert!(g.matches.iter().all(|m| m.path != ".git" && !m.path.starts_with(".git/")));
         let _ = std::fs::remove_dir_all(&t);
     }
 }

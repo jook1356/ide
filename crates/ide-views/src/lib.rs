@@ -18,6 +18,7 @@ pub mod diff;
 pub mod editor;
 pub mod icons;
 mod interact;
+mod reorder;
 pub mod syntax;
 pub mod theme;
 pub mod tree;
@@ -26,6 +27,8 @@ mod vlist;
 pub use changes::{ChangeEntry, ChangeGroup, ChangesEvent, ChangesList, ChangesMessage};
 pub use code::{CodeEvent, CodeMessage, CodeView};
 pub use diff::{DiffFile, DiffLine, DiffMode, DiffView, DiffViewEvent, DiffViewMessage, Hunk, LineKind};
+pub use interact::Interact;
+pub use reorder::Reorder;
 pub use tree::{FileTree, MenuAction, TreeEntry, TreeEvent, TreeMessage};
 
 use iced::Color;

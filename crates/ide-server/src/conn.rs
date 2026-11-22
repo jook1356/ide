@@ -366,8 +366,7 @@ async fn forward_notifications(mux: Mux, mut rx: broadcast::Receiver<Notify>) {
 }
 
 fn attach(conn: &Arc<Conn>, session: &str, from: Option<u64>) -> Result<Attached, ProtoError> {
-    let s = conn.ctx.resolve_session(session)?;
-    let host = conn.ctx.host(&s);
+    let host = conn.ctx.term_host(session)?;
     let (start, reset) = host.resolve(from);
     let stream = conn
         .mux

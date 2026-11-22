@@ -14,18 +14,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod branch_badge;
+mod browser;
 mod changes_actions;
 mod changes_view;
 mod detail;
+mod detail_rail;
 mod detail_view;
 mod detail_window;
 mod footer;
 mod footer_view;
+mod frame;
 mod history;
 mod i18n;
 mod icons;
+mod item_menu;
+mod uterm;
 mod script;
+mod scripts_view;
 mod session_sort;
+mod profiles_view;
+mod skills_ui;
 mod style;
 mod ui_state;
 mod view;

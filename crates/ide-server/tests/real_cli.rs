@@ -44,7 +44,7 @@ async fn real_cli_launch() {
     let cfg = c.create_configuration("Launch probe").await.unwrap();
     let cfg = c
         .update_configuration(ConfigurationInfo {
-            skills: vec![skill.display().to_string()],
+            skills: Vec::new(),
             mcp_servers: vec![McpServerInfo {
                 name: "probe".into(),
                 command: "cmd.exe".into(),
@@ -54,6 +54,10 @@ async fn real_cli_launch() {
             instructions: "Launch probe: say \"hi\" & stop.".into(),
             ..cfg
         })
+        .await
+        .unwrap();
+    let cfg = c
+        .skill_import(&cfg.slug, &skill.display().to_string())
         .await
         .unwrap();
     for p in c.providers(true).await.unwrap() {

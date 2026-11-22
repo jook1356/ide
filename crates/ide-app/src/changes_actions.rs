@@ -35,6 +35,8 @@ use crate::i18n::{self, tr};
 pub const STASH_MEMO_ID: &str = "ide-stash-memo";
 pub const BRANCH_QUERY_ID: &str = "ide-branch-query";
 pub const MODAL_INPUT_ID: &str = "ide-changes-modal-input";
+/// The 새 브랜치 dialog's base search input.
+pub const BASE_QUERY_ID: &str = "ide-changes-base-query";
 /// Rows per branch group (Desk's `MAX_ROWS`); a long list is narrowed with the search box.
 pub const MAX_ROWS: usize = 200;
 
@@ -262,6 +264,9 @@ pub enum ModalKind {
         base: Option<String>,
         dirty: usize,
         mode: SwitchMode,
+        /// The base picker's list is open, filtered by this (Desk's searchable `Select`).
+        base_open: bool,
+        base_query: String,
     },
 }
 
@@ -282,6 +287,8 @@ pub enum ActMsg {
     Check(String, bool),
     /// The select-all checkbox.
     CheckAll(bool),
+    /// Desk's `Filter` input above the changed files (only the shown rows change).
+    Filter(String),
     /// Open (`Some(row)`) / close the context menu of a changed file.
     Menu(Option<(ide_views::ChangeGroup, String)>),
     /// Ask to discard the changes of these paths (the modal).
@@ -306,6 +313,8 @@ pub enum ActMsg {
     StashDone(StashAction, Result<StashActionResult, ProtoError>),
     /// Open (`Some(sha)`) / close a History commit's context menu.
     CommitMenu(Option<String>),
+    /// Click outside the open row / commit menu.
+    CloseMenus,
     /// Copy a commit's sha (`false`) or subject (`true`).
     Copy(String, bool),
     Copied(bool, bool),
@@ -328,6 +337,9 @@ pub enum ActMsg {
     /// Dialog fields and buttons.
     ModalInput(String),
     ModalBase(String),
+    /// The base picker's list opened / closed, and its search text.
+    ModalBaseOpen(bool),
+    ModalBaseQuery(String),
     ModalMode(SwitchMode),
     ModalConfirm,
     Switched(Result<(), ProtoError>),
@@ -470,6 +482,10 @@ impl App {
             }
             ActMsg::Menu(p) => {
                 a.menu = p;
+                Task::none()
+            }
+            ActMsg::Filter(q) => {
+                d.changes.set_filter(q);
                 Task::none()
             }
             ActMsg::Discard(paths) => {
@@ -651,6 +667,11 @@ impl App {
                 a.commit_menu = sha;
                 Task::none()
             }
+            ActMsg::CloseMenus => {
+                a.menu = None;
+                a.commit_menu = None;
+                Task::none()
+            }
             ActMsg::Copy(sha, subject) => {
                 a.commit_menu = None;
                 let Some(c) = d.history.commit(&sha) else {
@@ -827,6 +848,8 @@ impl App {
                         base: (!from.is_empty()).then_some(from),
                         dirty,
                         mode: SwitchMode::Carry,
+                        base_open: false,
+                        base_query: String::new(),
                     },
                 }));
                 // The base list comes from `git.branches`.
@@ -849,11 +872,49 @@ impl App {
             }
             ActMsg::ModalBase(v) => {
                 if let Some(ChangesModal {
-                    kind: ModalKind::Create { base, .. },
+                    kind:
+                        ModalKind::Create {
+                            base,
+                            base_open,
+                            base_query,
+                            ..
+                        },
                     ..
                 }) = self.changes_modal()
                 {
                     *base = Some(v);
+                    *base_open = false;
+                    base_query.clear();
+                }
+                Task::none()
+            }
+            ActMsg::ModalBaseOpen(open) => {
+                if let Some(ChangesModal {
+                    kind:
+                        ModalKind::Create {
+                            base_open,
+                            base_query,
+                            ..
+                        },
+                    ..
+                }) = self.changes_modal()
+                {
+                    *base_open = open;
+                    base_query.clear();
+                }
+                if open {
+                    iced::widget::operation::focus(BASE_QUERY_ID)
+                } else {
+                    Task::none()
+                }
+            }
+            ActMsg::ModalBaseQuery(q) => {
+                if let Some(ChangesModal {
+                    kind: ModalKind::Create { base_query, .. },
+                    ..
+                }) = self.changes_modal()
+                {
+                    *base_query = q;
                 }
                 Task::none()
             }

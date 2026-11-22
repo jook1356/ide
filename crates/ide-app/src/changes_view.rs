@@ -4,10 +4,10 @@
 //! commit menu, the reveal button of commit file rows and the dialogs.
 
 use iced::widget::{
-    Column, Row, button, column, container, hover, mouse_area, pick_list, popover, row, scrollable,
+    Column, Row, button, column, container, hover, mouse_area, popover, row, scrollable,
     space, text, text_input,
 };
-use iced::{Alignment, Color, Element, Fill, Length, Padding, Widget as _};
+use iced::{Alignment, Color, Element, Fill, Length, Padding, Point, Widget as _};
 use ide_client::{ChangeKind, CommitInfo, StashAction, SwitchMode};
 use ide_views::{ChangeEntry, ChangeGroup, icons as file_icons};
 
@@ -16,7 +16,7 @@ use crate::changes_actions::{
     ActMsg, BRANCH_QUERY_ID, ChangesActs, ChangesModal, CommitKind, MAX_ROWS, MODAL_INPUT_ID,
     ModalKind, STASH_MEMO_ID, branch_rows, session_of, stash_title,
 };
-use crate::detail::{DetailMsg, SIDE_W, file_name, view_status};
+use crate::detail::{DetailMsg, file_name, view_status};
 use crate::history;
 use crate::i18n::{self, tr};
 use crate::icons::{Icon, icon};
@@ -25,12 +25,6 @@ use crate::view::tip;
 
 type El<'a> = Element<'a, Message>;
 
-/// Desk's violet-4 (`.picker-check`, `.picker-add`).
-const VIOLET: Color = Color::from_rgb(
-    0x91 as f32 / 255.0,
-    0x71 as f32 / 255.0,
-    0xf8 as f32 / 255.0,
-);
 /// Space the hover buttons of a change row leave for the kind box on the right.
 const KIND_W: f32 = 12.0 + 16.0 + 8.0;
 
@@ -244,7 +238,30 @@ impl App {
             move |g, k, e, selected| self.change_row(live, g, k, e, selected),
             move |m| Message::Detail(s2.clone(), DetailMsg::Changes(m)),
         );
-        column![self.changes_head(live), list, self.stash_section(live)].boxed()
+        let filter = container(
+            text_input(tr::chg_filter(), d.changes.filter())
+                .on_input({
+                    let sid = sid.clone();
+                    move |v| act(&sid, ActMsg::Filter(v))
+                })
+                .size(12)
+                .padding([4, 8])
+                .style(style::input),
+        )
+        .padding(Padding {
+            top: 8.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 10.0,
+        });
+        column![
+            filter,
+            self.changes_head(live),
+            list,
+            self.stash_section(live),
+            self.scripts_section(live)
+        ]
+        .boxed()
     }
 
     /// Select-all, `N changed files`, the 임시 보관 button with its popover.
@@ -422,43 +439,7 @@ impl App {
         ];
         let el = mouse_area(row_actions(base, actions, KIND_W))
             .on_right_press(act(sid, ActMsg::Menu(Some((g, path.clone())))));
-        let open = a
-            .menu
-            .as_ref()
-            .is_some_and(|(mg, mp)| *mg == g && *mp == e.path);
-        let menu = open.then(|| {
-            let checked: Vec<String> = live
-                .detail
-                .checked_changes()
-                .into_iter()
-                .map(|f| f.path)
-                .collect();
-            let mut items = Column::<El<'a>>::new().add(menu_item(
-                Some(Icon::ArrowBackUp),
-                tr::chg_discard(),
-                style::RED,
-                act(sid, ActMsg::Discard(vec![path.clone()])),
-            ));
-            if checked.len() > 1 {
-                items = items.add(menu_item(
-                    Some(Icon::ArrowBackUp),
-                    tr::chg_discard_checked(i18n::count(checked.len())),
-                    style::RED,
-                    act(sid, ActMsg::Discard(checked)),
-                ));
-            }
-            items = items.add(menu_divider()).add(menu_item(
-                Some(Icon::ArrowRight),
-                tr::chg_reveal(),
-                style::TEXT,
-                act(sid, ActMsg::Reveal(path.clone())),
-            ));
-            menu_card(items, 250.0)
-        });
-        popover(el, menu)
-            .position(iced::widget::popover::Position::Bottom)
-            .on_close(act(sid, ActMsg::Menu(None)))
-            .boxed()
+        at_pointer(el.boxed())
     }
 
     /// Desk's `StashSection`: this branch's stashes (all on request) with pop / apply / drop;
@@ -903,8 +884,8 @@ impl App {
                 space().width(Fill),
                 button(
                     row![
-                        icon(Icon::Plus, 12.0, VIOLET),
-                        text(tr::chg_new_branch()).size(11).color(VIOLET),
+                        icon(Icon::Plus, 12.0, style::ACCENT_TEXT),
+                        text(tr::chg_new_branch()).size(11).color(style::ACCENT_TEXT),
                     ]
                     .spacing(4)
                     .align_y(Alignment::Center),
@@ -962,7 +943,7 @@ impl App {
                 240.0
             ),
         ])
-        .width(SIDE_W - 16.0)
+        .width(self.side_w() - 16.0)
         .style(style::modal_card)
         .boxed()
     }
@@ -977,20 +958,64 @@ impl App {
         row_el: El<'a>,
     ) -> El<'a> {
         let sid = live.info.id.as_str();
-        let open = live.detail.acts.commit_menu.as_deref() == Some(c.sha.as_str());
-        let menu = open.then(|| {
-            let mut items = Column::<El<'a>>::new()
+        at_pointer(
+            mouse_area(row_el)
+                .on_right_press(act(sid, ActMsg::CommitMenu(Some(c.sha.clone()))))
+                .boxed(),
+        )
+    }
+
+    /// The open Changes-row or commit menu, drawn at the pointer over the app window
+    /// (`space()` when none is open).
+    pub fn side_menu_layer(&self) -> El<'_> {
+        let Some(live) = self.selected_live() else {
+            return space().boxed();
+        };
+        let a = &live.detail.acts;
+        let sid = live.info.id.as_str();
+        let (card, width, rows) = if let Some((_, path)) = &a.menu {
+            let checked: Vec<String> = live
+                .detail
+                .checked_changes()
+                .into_iter()
+                .map(|f| f.path)
+                .collect();
+            let mut items = Column::<El<'_>>::new().add(menu_item(
+                Some(Icon::ArrowBackUp),
+                tr::chg_discard(),
+                style::RED,
+                act(sid, ActMsg::Discard(vec![path.clone()])),
+            ));
+            let mut rows = 3.0;
+            if checked.len() > 1 {
+                rows += 1.0;
+                items = items.add(menu_item(
+                    Some(Icon::ArrowBackUp),
+                    tr::chg_discard_checked(i18n::count(checked.len())),
+                    style::RED,
+                    act(sid, ActMsg::Discard(checked)),
+                ));
+            }
+            items = items.add(menu_divider()).add(menu_item(
+                Some(Icon::ArrowRight),
+                tr::chg_reveal(),
+                style::TEXT,
+                act(sid, ActMsg::Reveal(path.clone())),
+            ));
+            (menu_card(items, 250.0), 250.0, rows)
+        } else if let Some(sha) = &a.commit_menu {
+            let mut items = Column::<El<'_>>::new()
                 .add(menu_item(
                     None,
                     tr::chg_copy_sha(),
                     style::TEXT,
-                    act(sid, ActMsg::Copy(c.sha.clone(), false)),
+                    act(sid, ActMsg::Copy(sha.clone(), false)),
                 ))
                 .add(menu_item(
                     None,
                     tr::chg_copy_subject(),
                     style::TEXT,
-                    act(sid, ActMsg::Copy(c.sha.clone(), true)),
+                    act(sid, ActMsg::Copy(sha.clone(), true)),
                 ))
                 .add(menu_divider());
             for k in CommitKind::ALL {
@@ -998,18 +1023,28 @@ impl App {
                     None,
                     k.label(),
                     style::TEXT,
-                    act(sid, ActMsg::CommitPick(c.sha.clone(), k)),
+                    act(sid, ActMsg::CommitPick(sha.clone(), k)),
                 ));
             }
-            menu_card(items, 270.0)
-        });
-        popover(
-            mouse_area(row_el).on_right_press(act(sid, ActMsg::CommitMenu(Some(c.sha.clone())))),
-            menu,
-        )
-        .position(iced::widget::popover::Position::Bottom)
-        .on_close(act(sid, ActMsg::CommitMenu(None)))
-        .boxed()
+            (menu_card(items, 270.0), 270.0, 3.0 + CommitKind::ALL.len() as f32)
+        } else {
+            return space().boxed();
+        };
+        // Where the row was right-clicked; scripted menus open beside the side panel.
+        let at = self.side_menu_at.unwrap_or(Point::new(
+            self.window_size.width - self.side_w(),
+            120.0,
+        ));
+        let h = rows * 30.0 + 12.0;
+        let x = at.x.min(self.window_size.width - width - 4.0).max(0.0);
+        let y = at.y.min(self.window_size.height - h - 4.0).max(0.0);
+        let backdrop = mouse_area(space().width(Fill).height(Fill))
+            .on_press(act(sid, ActMsg::CloseMenus))
+            .on_right_press(act(sid, ActMsg::CloseMenus));
+        iced::widget::stack![backdrop, iced::widget::pin(card).x(x).y(y).width(Fill).height(Fill)]
+            .width(Fill)
+            .height(Fill)
+            .boxed()
     }
 
     // ------------------------------------------------------------------ dialogs
@@ -1187,7 +1222,8 @@ impl App {
                 base,
                 dirty,
                 mode,
-                ..
+                base_open,
+                base_query,
             } => {
                 width = 480.0;
                 let branches = self
@@ -1196,11 +1232,6 @@ impl App {
                     .and_then(|d| d.acts.branch.list.as_ref());
                 let trimmed = name.trim();
                 let taken = branches.is_some_and(|b| b.local.iter().any(|l| l.name == trimmed));
-                let mut bases: Vec<String> = Vec::new();
-                if let Some(b) = branches {
-                    bases.extend(b.local.iter().map(|l| l.name.clone()));
-                    bases.extend(b.remote.iter().map(|r| r.short_ref.clone()));
-                }
                 let mut name_col = column![
                     text(tr::chg_branch_name()).size(12),
                     text_input("feature/…", name)
@@ -1222,14 +1253,7 @@ impl App {
                 c = c.add(title(tr::chg_new_branch())).add(name_col).add(
                     column![
                         text(tr::chg_base_branch()).size(12),
-                        pick_list(base.clone(), bases, |b: &String| b.clone())
-                            .on_select({
-                                let sid = sid.to_owned();
-                                move |v| act(&sid, ActMsg::ModalBase(v))
-                            })
-                            .text_size(13)
-                            .padding([5, 8])
-                            .width(Fill),
+                        base_select(sid, branches, base.as_deref(), *base_open, base_query),
                     ]
                     .spacing(4),
                 );
@@ -1293,7 +1317,7 @@ fn picker_row<'a>(
     msg: Option<Message>,
 ) -> El<'a> {
     let check: El<'a> = if active {
-        icon(Icon::Check, 13.0, VIOLET)
+        icon(Icon::Check, 13.0, style::ACCENT_TEXT)
     } else {
         space().width(13).boxed()
     };
@@ -1323,4 +1347,103 @@ fn picker_row<'a>(
         .style(style::row(active))
         .on_press_maybe(msg)
         .boxed()
+}
+
+/// The 새 브랜치 dialog's base branch (Desk's searchable `Select`): the chosen branch, and when
+/// open a search box over the 로컬 / 원격 lists.
+fn base_select<'a>(
+    sid: &str,
+    branches: Option<&'a ide_client::GitBranches>,
+    base: Option<&str>,
+    open: bool,
+    query: &'a str,
+) -> El<'a> {
+    let field = button(
+        row![
+            text(base.unwrap_or_default().to_owned())
+                .size(13)
+                .width(Fill)
+                .wrapping(text::Wrapping::None)
+                .ellipsis(text::Ellipsis::End),
+            icon(Icon::ChevronDown, 14.0, style::DIM),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([5, 8])
+    .width(Fill)
+    .style(style::secondary)
+    .on_press(act(sid, ActMsg::ModalBaseOpen(!open)));
+    if !open {
+        return field.boxed();
+    }
+    let q = query.trim().to_lowercase();
+    let hit = |s: &str| q.is_empty() || s.to_lowercase().contains(&q);
+    let (local, remote): (Vec<String>, Vec<String>) = match branches {
+        Some(b) => (
+            b.local.iter().map(|l| l.name.clone()).filter(|n| hit(n)).collect(),
+            b.remote
+                .iter()
+                .map(|r| r.short_ref.clone())
+                .filter(|n| hit(n))
+                .collect(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let mut list = Column::<El<'a>>::new().spacing(1);
+    let mut any = false;
+    for (label, names) in [(tr::chg_local(), local), (tr::chg_remote(), remote)] {
+        if names.is_empty() {
+            continue;
+        }
+        list = list.add(
+            container(text(label).size(11).font(style::BOLD).color(style::DIM)).padding([4, 8]),
+        );
+        for n in names {
+            any = true;
+            let on = base == Some(n.as_str());
+            list = list.add(
+                button(text(n.clone()).size(12))
+                    .padding([4, 10])
+                    .width(Fill)
+                    .style(style::row(on))
+                    .on_press(act(sid, ActMsg::ModalBase(n))),
+            );
+        }
+    }
+    let empty = !any;
+    if empty {
+        list = list.add(
+            container(text(tr::chg_no_branch()).size(12).color(style::DIM)).padding([6, 8]),
+        );
+    }
+    column![
+        field,
+        container(
+            column![
+                text_input(tr::chg_branch_search(), query)
+                    .id(crate::changes_actions::BASE_QUERY_ID)
+                    .on_input({
+                        let sid = sid.to_owned();
+                        move |v| act(&sid, ActMsg::ModalBaseQuery(v))
+                    })
+                    .size(12)
+                    .padding([4, 8])
+                    .style(style::input),
+                scrollable(list).height(Length::Fixed(200.0)),
+            ]
+            .spacing(4),
+        )
+        .padding(4)
+        .style(style::modal_card),
+    ]
+    .spacing(2)
+    .boxed()
+}
+
+/// `row` reports where it was right-clicked (window coordinates) for the side panel's menus.
+fn at_pointer(row: El<'_>) -> El<'_> {
+    ide_views::Interact::new(row)
+        .absolute()
+        .on_right_press(Message::SideMenuAt)
+        .into()
 }

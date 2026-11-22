@@ -117,6 +117,19 @@ pub struct McpServerInfo {
     pub env: Vec<(String, String)>,
 }
 
+/// A skill of a configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SkillInfo {
+    /// Folder name (identifies it in `skill.*`).
+    pub name: String,
+    /// `name` of its front matter (else the folder name).
+    pub title: String,
+    /// `description` of its front matter.
+    pub description: String,
+    /// Offered to new sessions.
+    pub enabled: bool,
+}
+
 /// A configuration: skills, MCP servers, instructions.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConfigurationInfo {
@@ -124,8 +137,8 @@ pub struct ConfigurationInfo {
     pub slug: String,
     /// Display name.
     pub name: String,
-    /// Skill folders (server paths).
-    pub skills: Vec<String>,
+    /// Skills it owns (folder name order).
+    pub skills: Vec<SkillInfo>,
     /// MCP servers.
     pub mcp_servers: Vec<McpServerInfo>,
     /// Instructions text.

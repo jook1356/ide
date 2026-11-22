@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use ide_core::SkillRef;
+use ide_core::skill::front_matter;
 
 /// A loaded skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,30 +51,6 @@ pub(crate) fn load(refs: &[SkillRef], notes: &mut Vec<String>) -> Vec<Skill> {
         .collect()
 }
 
-/// `name` and `description` of a `---` YAML front matter block (single-line values, quotes
-/// stripped).
-fn front_matter(text: &str) -> (Option<String>, Option<String>) {
-    let text = text.trim_start_matches('\u{feff}');
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return (None, None);
-    }
-    let (mut name, mut desc) = (None, None);
-    for line in lines {
-        if line.trim() == "---" {
-            break;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            let v = v.trim().trim_matches('"').trim_matches('\'').to_owned();
-            match k.trim() {
-                "name" => name = Some(v),
-                "description" => desc = Some(v),
-                _ => {}
-            }
-        }
-    }
-    (name, desc)
-}
 
 #[cfg(test)]
 mod tests {

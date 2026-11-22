@@ -8,12 +8,12 @@ use crate::agents::{
 };
 use crate::error::ProtoError;
 use crate::files::{
-    BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry,
+    BrowseListing, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, PathMatches,
     FsStat, GitChange, GitLog, GitRev, GitStatus, SearchMatch, SearchSummary, TextEncoding, TextSearch,
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 6;
+pub const PROTO_VERSION: u32 = 8;
 
 /// The OS user a server runs as (and serves). Comes from the transport/auth step, never from
 /// request fields.
@@ -69,6 +69,64 @@ pub enum SessionState {
     Running,
     /// Process exited by itself (exit code if known).
     Exited(Option<u32>),
+}
+
+/// A user terminal of a session (Hermes Desk's `UserTerminal`): a shell or a command run in
+/// the session's folder. Kept by the server while it runs (not across server restarts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserTerm {
+    /// `<session id>:t<n>`; also the `session` of its `term.*` requests and notifications.
+    pub id: String,
+    pub session: String,
+    /// `<shell> <n>` or the given title.
+    pub title: String,
+    /// The shell or the command line.
+    pub command: String,
+    /// Working directory (server path).
+    pub cwd: String,
+    pub state: SessionState,
+    /// End offset of its output (to attach).
+    pub end: u64,
+}
+
+/// A shell a user terminal can run (`uterm.shells`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellInfo {
+    /// Stable id (`pwsh`, `cmd`, `git-bash`, `zsh`, ...).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Its program (server path).
+    pub path: String,
+}
+
+/// A TCP port listening in a terminal's process tree (`uterm.ports`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub port: u16,
+    pub pid: u32,
+    /// The listening process' name.
+    pub process: String,
+}
+
+/// Scripts of one file (Desk's `ScriptGroup`): `package.json`, a Makefile, `Cargo.toml`, ...
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptGroup {
+    /// Root-relative path of the file (also its id).
+    pub file: String,
+    /// Its folder (root-relative, empty = the root): where the scripts run.
+    pub folder: String,
+    /// The ecosystem (`npm`, `make`, `cargo`, ...).
+    pub kind: String,
+    pub scripts: Vec<ScriptItem>,
+}
+
+/// One runnable script: its name, the command line that runs it, and what it does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptItem {
+    pub name: String,
+    pub run: String,
+    pub detail: Option<String>,
 }
 
 /// A session as seen by clients. Paths are server paths (strings, the server's OS syntax).
@@ -206,11 +264,46 @@ pub enum Request {
     ConfigurationCreate {
         name: String,
     },
-    /// Replace name, skills, MCP servers and instructions of the configuration `slug`.
+    /// Replace name, MCP servers, instructions and default repos of the configuration `slug`
+    /// (its `skills` are ignored: they change with the `skill.*` requests).
     ConfigurationUpdate(ConfigurationInfo),
     /// Delete a configuration (`configuration-in-use`, `last-configuration`).
     ConfigurationDelete {
         slug: String,
+    },
+    /// Skills a configuration owns (`<data>/configurations/<slug>/skills/<name>/`). Each
+    /// change answers with the configuration (`Configuration`).
+    /// A new skill: a `SKILL.md` with `name` (made a folder name) and `description`.
+    SkillCreate {
+        configuration: String,
+        name: String,
+        description: String,
+    },
+    /// Copy a skill folder (server path, with a `SKILL.md`) into the configuration.
+    SkillImport {
+        configuration: String,
+        path: String,
+    },
+    /// The `SKILL.md` text (`SkillText`).
+    SkillRead {
+        configuration: String,
+        name: String,
+    },
+    /// Replace the `SKILL.md` text.
+    SkillWrite {
+        configuration: String,
+        name: String,
+        text: String,
+    },
+    SkillDelete {
+        configuration: String,
+        name: String,
+    },
+    /// Offer the skill to new sessions or not.
+    SkillEnable {
+        configuration: String,
+        name: String,
+        enabled: bool,
     },
     /// Registered repositories.
     RepoList,
@@ -278,6 +371,50 @@ pub enum Request {
         id: String,
     },
     SessionRestart {
+        id: String,
+    },
+    /// A user terminal in the session's folder (Hermes Desk's `term:openShell` / `term:run`):
+    /// a shell in `repo`'s worktree (`None` = the session folder), or `command` run by that
+    /// shell. Its output, input and size use `term.*` with the terminal's id.
+    UTermOpen {
+        session: String,
+        repo: Option<String>,
+        /// Folder inside `repo`'s worktree to start in (a script's folder).
+        folder: Option<String>,
+        command: Option<String>,
+        title: Option<String>,
+        /// Shell id of `uterm.shells` (`None` = the server's default).
+        shell: Option<String>,
+        /// 공용 terminals (empty `session`): the folder to start in (server path; `None` =
+        /// the home folder).
+        cwd: Option<String>,
+    },
+    /// Runnable scripts of `repo`'s worktree (Desk's `scripts:list`): one group per file that
+    /// names tasks (package.json, Makefile, ...) or per build tool with well-known commands.
+    ScriptsList {
+        session: String,
+        repo: String,
+    },
+    /// The shells `uterm.open` can start (first = the default).
+    UTermShells,
+    /// TCP ports listening in the session's terminals' process trees (its agent and user
+    /// terminals; empty `session`: the 공용 terminals): Desk's 실행 중인 서버.
+    UTermPorts {
+        session: String,
+    },
+    /// The session's user terminals, oldest first.
+    UTermList {
+        session: String,
+    },
+    UTermStop {
+        id: String,
+    },
+    /// Run an exited terminal's command again (same id, output appended).
+    UTermRerun {
+        id: String,
+    },
+    /// Stop (if running) and forget a terminal.
+    UTermRemove {
         id: String,
     },
     SessionDelete {
@@ -400,6 +537,17 @@ pub enum Request {
         repo: Option<String>,
         query: String,
         max_results: u32,
+    },
+    /// Hermes Desk's Explore 파일 찾기: files and folders whose root-relative path contains
+    /// `query` (case-insensitive), in path order; `include_ignored` also lists gitignored
+    /// files and ignored folders (once each, not their contents).
+    SearchPaths {
+        session: String,
+        /// `None` = every repo of the session.
+        repo: Option<String>,
+        query: String,
+        max_results: u32,
+        include_ignored: bool,
     },
     /// `base` = branch to compare with (`None` = the branch checked out in the main repo).
     GitStatus {
@@ -724,6 +872,12 @@ impl Request {
             Request::ConfigurationCreate { .. } => "configuration.create",
             Request::ConfigurationUpdate(_) => "configuration.update",
             Request::ConfigurationDelete { .. } => "configuration.delete",
+            Request::SkillCreate { .. } => "skill.create",
+            Request::SkillImport { .. } => "skill.import",
+            Request::SkillRead { .. } => "skill.read",
+            Request::SkillWrite { .. } => "skill.write",
+            Request::SkillDelete { .. } => "skill.delete",
+            Request::SkillEnable { .. } => "skill.enable",
             Request::RepoList => "repo.list",
             Request::RepoRegister { .. } => "repo.register",
             Request::RepoUnregister { .. } => "repo.unregister",
@@ -741,6 +895,14 @@ impl Request {
             Request::SessionStop { .. } => "session.stop",
             Request::SessionRestart { .. } => "session.restart",
             Request::SessionDelete { .. } => "session.delete",
+            Request::UTermOpen { .. } => "uterm.open",
+            Request::UTermShells => "uterm.shells",
+            Request::UTermPorts { .. } => "uterm.ports",
+            Request::ScriptsList { .. } => "scripts.list",
+            Request::UTermList { .. } => "uterm.list",
+            Request::UTermStop { .. } => "uterm.stop",
+            Request::UTermRerun { .. } => "uterm.rerun",
+            Request::UTermRemove { .. } => "uterm.remove",
             Request::SessionRename { .. } => "session.rename",
             Request::TermAttach { .. } => "term.attach",
             Request::TermDetach { .. } => "term.detach",
@@ -761,6 +923,7 @@ impl Request {
             Request::SearchText { .. } => "search.text",
             Request::SearchCancel { .. } => "search.cancel",
             Request::SearchFiles { .. } => "search.files",
+            Request::SearchPaths { .. } => "search.paths",
             Request::GitStatus { .. } => "git.status",
             Request::GitDiff { .. } => "git.diff",
             Request::GitFileAt { .. } => "git.file_at",
@@ -821,7 +984,14 @@ pub enum Response {
     AccountState(AccountState),
     Configurations(Vec<ConfigurationInfo>),
     Configuration(ConfigurationInfo),
+    /// A skill's `SKILL.md`.
+    SkillText(String),
     Sessions(Vec<SessionInfo>),
+    UTerm(UserTerm),
+    UTerms(Vec<UserTerm>),
+    Scripts(Vec<ScriptGroup>),
+    Shells(Vec<ShellInfo>),
+    Ports(Vec<PortInfo>),
     Session(SessionInfo),
     /// `session.create`: the session and the repos whose worktree failed.
     SessionCreated {
@@ -851,6 +1021,7 @@ pub enum Response {
     },
     Browse(BrowseListing),
     FileMatches(Vec<FileMatch>),
+    PathMatches(PathMatches),
     GitStatus(GitStatus),
     Diff(Vec<DiffFile>),
     FileAt(Option<FileContent>),
@@ -931,6 +1102,10 @@ pub enum Notify {
     State {
         session: String,
         state: SessionState,
+    },
+    /// A session's user terminals changed (opened, removed); re-fetch with `UTermList`.
+    UTermsChanged {
+        session: String,
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
@@ -1038,7 +1213,12 @@ mod tests {
                 req: Request::ConfigurationUpdate(ConfigurationInfo {
                     slug: "web".into(),
                     name: "Web".into(),
-                    skills: vec!["C:/skills/lint".into()],
+                    skills: vec![crate::SkillInfo {
+                        name: "lint".into(),
+                        title: "lint".into(),
+                        description: "Lints".into(),
+                        enabled: true,
+                    }],
                     mcp_servers: vec![crate::McpServerInfo {
                         name: "docs".into(),
                         command: "node".into(),

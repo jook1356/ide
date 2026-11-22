@@ -35,6 +35,11 @@ pub const RAIL_W: f32 = 64.0;
 pub const SIDEBAR_W: f32 = 264.0;
 /// Width of the draggable divider between centre and detail.
 pub const DIVIDER_W: f32 = 5.0;
+/// Narrowest side panel (Desk's `MIN_PANEL`), and what it leaves at least to the terminal and
+/// the detail pane when widened.
+const SIDE_MIN: f32 = 220.0;
+const CENTRE_MIN: f32 = 320.0;
+const DETAIL_MIN: f32 = 240.0;
 /// URL of a new session's web tab.
 pub const DEFAULT_URL: &str = "about:blank";
 /// Configuration slug a fresh server has (used before the configuration list arrived).
@@ -120,6 +125,10 @@ pub struct Live {
     pub loading: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    /// The session's user terminals (`uterm.rs`).
+    pub uterms: Vec<crate::uterm::UTermView>,
+    /// Browser tabs beyond the session's web page (`browser.rs`).
+    pub browsers: Vec<crate::browser::Browser>,
     /// Files, diffs, tree, changes and search of the session.
     pub detail: Detail,
 }
@@ -140,6 +149,8 @@ impl Live {
             loading: false,
             can_back: false,
             can_forward: false,
+            uterms: Vec::new(),
+            browsers: Vec::new(),
         }
     }
 
@@ -173,6 +184,18 @@ pub struct NewForm {
 }
 
 /// The repos page's folder picker: any folder the server's OS user can read
+/// What a folder picked with [`PickRootForm`] is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PickPurpose {
+    /// A repository to register (the repos page).
+    #[default]
+    Repo,
+    /// The start folder of a 공용 terminal.
+    Terminal,
+    /// A skill folder to copy into profile `.0`.
+    Skill(String),
+}
+
 /// (`browse.pick_list`), to register as a repository. Server-side, so it works over SSH too.
 #[derive(Default)]
 pub struct PickRootForm {
@@ -185,6 +208,8 @@ pub struct PickRootForm {
     pub dir: Option<String>,
     /// Highlighted entry of the listing (click, arrow keys).
     pub selected: Option<usize>,
+    /// What the picked folder is for.
+    pub purpose: PickPurpose,
 }
 
 impl PickRootForm {
@@ -325,9 +350,13 @@ pub struct SessionReposForm {
     pub busy: bool,
 }
 
+/// Closing items of which some are files with unsaved edits.
 pub struct CloseDirtyForm {
     pub session: String,
-    pub path: String,
+    /// The unsaved files (qualified paths).
+    pub dirty: Vec<String>,
+    /// Every item to close (the unsaved files included).
+    pub keys: Vec<ItemKey>,
 }
 
 pub struct DeleteForm {
@@ -348,7 +377,11 @@ pub struct SettingsForm {
     /// Last status check per account (provider, slug).
     pub acct_status: Vec<((String, String), Option<AccountState>)>,
     pub cfg_name: String,
-    /// Configuration being edited.
+    /// Profiles page (Desk's agents page): the profile picked in the list beside the rail
+    /// (`None` = the first) and the armed delete of the title row.
+    pub profile_sel: Option<String>,
+    pub profile_delete_armed: bool,
+    /// The shown profile's editor (follows `profile_sel`; `sync_profile_edit`).
     pub cfg_edit: Option<Box<ConfigEdit>>,
     pub error: Option<String>,
     pub busy: bool,
@@ -496,6 +529,10 @@ pub enum Modal {
     /// Changes / History footer dialogs (PR, merge, close, sync confirm, branch continue;
     /// `footer.rs`).
     Footer(Box<crate::footer::FooterModal>),
+    /// A profile skill's `SKILL.md` (`skills_ui.rs`).
+    SkillEdit(crate::skills_ui::SkillEditForm),
+    /// Profiles page: "프로필 추가" (the name).
+    AddProfile,
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -503,8 +540,8 @@ pub struct ConfigEdit {
     pub base: ConfigurationInfo,
     pub name: String,
     pub instructions: text_editor::Content,
-    /// Skill folders (server paths), one per row.
-    pub skills: Vec<String>,
+    /// The skills part (its changes apply at once; the list is `base.skills`).
+    pub skills: crate::skills_ui::SkillsEdit,
     pub mcp: Vec<McpRow>,
     /// Desk's "기본 레포" (`None` = every registered repo).
     pub default_repos: Option<Vec<String>>,
@@ -516,7 +553,7 @@ impl ConfigEdit {
             base: c.clone(),
             name: c.name.clone(),
             instructions: text_editor::Content::with_text(&c.instructions),
-            skills: c.skills.clone(),
+            skills: Default::default(),
             default_repos: c.default_repos.clone(),
             mcp: c
                 .mcp_servers
@@ -543,7 +580,7 @@ impl ConfigEdit {
         ConfigurationInfo {
             name: self.name.trim().to_owned(),
             instructions: text.trim_end_matches('\n').to_owned(),
-            skills: self.skills.clone(),
+            skills: Vec::new(),
             mcp_servers: self
                 .mcp
                 .iter()
@@ -565,6 +602,16 @@ impl ConfigEdit {
             default_repos: self.default_repos.clone(),
             ..self.base.clone()
         }
+    }
+
+    /// Edits not saved yet (name, instructions, MCP servers, default repos).
+    pub fn dirty(&self) -> bool {
+        let i = self.to_info();
+        let b = &self.base;
+        i.name != b.name
+            || i.instructions != b.instructions
+            || i.mcp_servers != b.mcp_servers
+            || i.default_repos != b.default_repos
     }
 }
 
@@ -620,7 +667,6 @@ pub enum SortChange {
 pub enum SettingsOp {
     AccountRenamed,
     AccountDeleted,
-    ConfigCreated,
     ConfigSaved,
     ConfigDeleted(String),
 }
@@ -698,9 +744,8 @@ pub enum Message {
     CfgEdit(String),
     CfgEditName(String),
     CfgInstructions(text_editor::Action),
-    CfgSkill(usize, String),
-    CfgSkillAdd,
-    CfgSkillRemove(usize),
+    /// The profile's own skills (`skills_ui.rs`).
+    Skill(crate::skills_ui::SkillMsg),
     CfgMcp(usize, McpField, String),
     CfgMcpAdd,
     CfgMcpRemove(usize),
@@ -709,6 +754,10 @@ pub enum Message {
     CfgSave,
     CfgCancel,
     CfgDelete(String),
+    /// Profiles page: the "프로필 추가" dialog, a created profile, the delete confirm.
+    ProfileAdding(bool),
+    ProfileCreated(Result<ConfigurationInfo, ProtoError>),
+    ProfileDeleteArm(bool),
     SettingsDone(SettingsOp, Result<(), ProtoError>),
     SetLanguage(LanguagePref),
 
@@ -738,6 +787,8 @@ pub enum Message {
 
     ToggleDetail,
     DividerPressed,
+    /// The side panel's left edge is pressed (width drag).
+    SideResizePressed,
     DragMoved(Point),
     /// The pointer moved in a window while the divider is dragged.
     WindowDrag(window::Id, Point),
@@ -836,6 +887,30 @@ pub enum Message {
     CloseRequested,
     /// The detail area's own window (`detail_window.rs`).
     DetailWindow(crate::detail_window::WinMsg),
+    /// A title bar or resize grip action on a window (`frame.rs`).
+    Frame(window::Id, crate::frame::FrameMsg),
+    /// The detail window's 열린 항목 tab list (`detail_rail.rs`).
+    Rail(crate::detail_rail::RailMsg),
+    /// An open item's right-click menu opened (at the pointer) or closed (`item_menu.rs`).
+    ItemMenu(Option<crate::item_menu::ItemMenu>),
+    ItemAct(crate::item_menu::ItemAct),
+    ItemDrag(crate::item_menu::DragMsg),
+    /// User terminals of the detail area (`uterm.rs`).
+    UTerm(crate::uterm::UTermMsg),
+    /// Browser tabs and 즐겨찾기 (`browser.rs`).
+    Browser(crate::browser::BrowserMsg),
+    /// The keyboard's modifiers changed.
+    Modifiers(keyboard::Modifiers),
+    /// "+ 새로 열기" → 폴더 선택… (the server folder picker, for a 공용 terminal).
+    PickTermFolder,
+    /// Where a Changes row or commit was right-clicked (window coordinates).
+    SideMenuAt(Point),
+    /// Check the sessions' branches again (`branch_badge.rs`), and one session's answer.
+    BadgeTick,
+    Badge(String, Result<crate::branch_badge::BranchInd, String>),
+    /// Explore's 파일 찾기 설정 popover, and its gitignore setting.
+    ExploreSettings(bool),
+    ExploreHideIgnored(bool),
 
     Tick,
     Shot(String, window::Screenshot),
@@ -967,6 +1042,11 @@ pub struct App {
     pub term_config: TermConfig,
     pub window: Option<window::Id>,
     pub window_size: Size,
+    /// The app window is maximised (its title bar shows the restore glyph, no resize grips).
+    pub window_maximized: bool,
+    /// The app window is minimised; while it is, whether the pinned detail window was maximised.
+    pub window_minimized: bool,
+    pub remaximize_detail: bool,
     /// The detail area's own window while it is open (`detail_window.rs`).
     pub detail_window: Option<window::Id>,
     pub detail_window_size: Size,
@@ -976,7 +1056,11 @@ pub struct App {
     pub detail_window_ready: bool,
     /// The detail window's position (logical px) once known.
     pub detail_window_pos: Option<Point>,
+    /// The detail window is maximised (its title bar shows the restore glyph, no resize grips).
+    pub detail_window_maximized: bool,
     pub dragging: bool,
+    /// The side panel's left edge is dragged.
+    pub side_dragging: bool,
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
     pub settings: SettingsForm,
@@ -993,6 +1077,44 @@ pub struct App {
     pub server_instance: Option<String>,
     /// The "open items" list of the detail header is open.
     pub open_items: bool,
+    /// The detail window's icon rail is widened (hovered; `detail_rail.rs`).
+    pub rail_open: bool,
+    /// The tab list's settings menu is open.
+    pub rail_menu: bool,
+    /// Count of hovers of the icon rail: a pending open only applies to the latest.
+    pub rail_arm: u64,
+    /// The open item menu (right-click on an item of the tab list or the popover).
+    pub item_menu: Option<crate::item_menu::ItemMenu>,
+    /// An open item dragged within its group.
+    pub item_drag: Option<crate::item_menu::ItemDrag>,
+    /// The "+ 새로 열기" menu is open.
+    pub new_menu: bool,
+    /// "+ 새로 열기" opens 공용 items (no session) instead of the session's.
+    pub new_global: bool,
+    /// Its address field, and the bookmark being renamed (url, name).
+    pub new_address: String,
+    pub bookmark_edit: Option<(String, String)>,
+    /// 공용 browser tabs (no session), and the last browser tab id given.
+    pub global_browsers: Vec<crate::browser::Browser>,
+    /// 공용 user terminals (no session).
+    pub global_uterms: Vec<crate::uterm::UTermView>,
+    /// 공통 tabs (Desk's common items): (owner session, item), shown at the top of every
+    /// session's 열린 항목; kept while the app runs.
+    pub common: Vec<(String, crate::detail::ItemKey)>,
+    /// "+ 새로 열기": the server's shells (asked once), the picked start folder (session: a
+    /// repo or the session folder, `None` = the Changes panel's repo; 공용: `None` = home),
+    /// the servers listening in its terminals, and the keyboard's modifiers (Alt+클릭 = 공용).
+    pub shells: Option<Vec<ide_client::ShellInfo>>,
+    pub new_dir_repo: Option<Option<String>>,
+    pub new_dir_global: Option<String>,
+    pub ports: Vec<ide_client::PortInfo>,
+    pub modifiers: keyboard::Modifiers,
+    pub next_browser: u32,
+    /// Where the side panel's open menu was asked for.
+    pub side_menu_at: Option<Point>,
+    pub explore_settings: bool,
+    /// The session list's branch badges by session id.
+    pub badges: crate::branch_badge::Badges,
     /// The session list's sort menu is open.
     pub sort_open: bool,
 }
@@ -1006,12 +1128,14 @@ impl App {
         let mut app = Self::load(data_dir, runtime, remote_override);
         app.script = Script::from_env(&app.data_dir);
         app.connect();
-        // The app window (a daemon opens none by itself); closing it is handled by the app.
-        let (_, open) = window::open(window::Settings {
+        // The app window (a daemon opens none by itself, frameless like the detail window);
+        // closing it is handled by the app.
+        let (_, open) = window::open(crate::frame::frameless(window::Settings {
             size: Size::new(1440.0, 880.0),
+            min_size: Some(Size::new(640.0, 400.0)),
             exit_on_close_request: false,
             ..window::Settings::default()
-        });
+        }));
         let task = open.map(|id| Message::WindowOpened(Some(id)));
         (app, task)
     }
@@ -1046,12 +1170,17 @@ impl App {
             term_config: TermConfig::default(),
             window: None,
             window_size: Size::new(1400.0, 860.0),
+            window_maximized: false,
+            window_minimized: false,
+            remaximize_detail: false,
             detail_window: None,
             detail_window_size: Size::new(960.0, 640.0),
             detail_owner: None,
             detail_window_ready: false,
             detail_window_pos: None,
+            detail_window_maximized: false,
             dragging: false,
+            side_dragging: false,
             modal: None,
             settings,
             rail_hover: false,
@@ -1061,6 +1190,27 @@ impl App {
             modal_web_unsafe: false,
             server_instance: None,
             open_items: false,
+            rail_open: false,
+            rail_menu: false,
+            rail_arm: 0,
+            item_menu: None,
+            item_drag: None,
+            new_menu: false,
+            new_global: false,
+            new_address: String::new(),
+            bookmark_edit: None,
+            global_browsers: Vec::new(),
+            global_uterms: Vec::new(),
+            common: Vec::new(),
+            shells: None,
+            new_dir_repo: None,
+            new_dir_global: None,
+            ports: Vec::new(),
+            modifiers: keyboard::Modifiers::empty(),
+            next_browser: 0,
+            side_menu_at: None,
+            explore_settings: false,
+            badges: Default::default(),
             sort_open: false,
         }
     }
@@ -1096,8 +1246,14 @@ impl App {
             input,
         });
         self.conn = Conn::Connecting;
+        for t in &mut self.global_uterms {
+            t.attached = false;
+        }
         for l in &mut self.sessions {
             l.attached = false;
+            for t in &mut l.uterms {
+                t.attached = false;
+            }
             l.detail.watched.clear();
             l.detail.stale = true;
         }
@@ -1107,8 +1263,14 @@ impl App {
     pub fn disconnect(&mut self, reason: String) {
         self.link = None;
         self.conn = Conn::Disconnected(reason);
+        for t in &mut self.global_uterms {
+            t.attached = false;
+        }
         for l in &mut self.sessions {
             l.attached = false;
+            for t in &mut l.uterms {
+                t.attached = false;
+            }
             l.detail.watched.clear();
             l.detail.stale = true;
         }
@@ -1151,9 +1313,20 @@ impl App {
         let side = if self.ui.detail_collapsed || self.selected.is_none() {
             0.0
         } else {
-            crate::detail::SIDE_W + 1.0
+            self.side_w() + DIVIDER_W
         };
         (self.window_size.width - self.left_w() - DIVIDER_W - side).max(1.0)
+    }
+
+    /// The side panel's width: the dragged one, kept within what the window leaves it.
+    pub fn side_w(&self) -> f32 {
+        let detail = if self.detail_in_app() {
+            DIVIDER_W + DETAIL_MIN
+        } else {
+            0.0
+        };
+        let max = self.window_size.width - self.left_w() - DIVIDER_W - CENTRE_MIN - detail;
+        self.ui.side_width.clamp(SIDE_MIN, max.max(SIDE_MIN))
     }
 
     /// The work page (sessions, terminal, detail) is shown.
@@ -1285,6 +1458,7 @@ impl App {
         self.providers = providers;
         self.accounts = accounts;
         self.configs = configs;
+        self.sync_profile_edit();
         let mut next = Vec::with_capacity(list.len());
         let mut old: Vec<Live> = std::mem::take(&mut self.sessions);
         for info in list {
@@ -1342,7 +1516,7 @@ impl App {
                 .find(|l| self.in_filter(&l.info))
                 .map(|l| l.info.id.clone());
         }
-        self.after_select()
+        Task::batch([self.after_select(), self.refresh_badges(true)])
     }
 
     /// Attach the terminal of every shown or running session, and of sessions with output
@@ -1398,8 +1572,10 @@ impl App {
                 {
                     for l in &mut self.sessions {
                         l.term.reset();
+                        l.uterms.clear();
                         l.attached = false;
                     }
+                    self.global_uterms.clear();
                 }
                 self.conn = Conn::Connected(Box::new(w));
                 // Watches and listings start over on the new connection (the gap is not
@@ -1431,6 +1607,9 @@ impl App {
             }
             ClientEvent::Notify(n) => self.on_notify(n),
             ClientEvent::Term(chunk) => {
+                if self.uterm_chunk(&chunk) {
+                    return Task::none();
+                }
                 if let Some(l) = self.live_mut(&chunk.session) {
                     if chunk.reset {
                         l.term.reset();
@@ -1454,6 +1633,9 @@ impl App {
     fn on_notify(&mut self, n: Notify) -> Task<Message> {
         match n {
             Notify::State { session, state } => {
+                if self.uterm_notify(&session, Some(state), None) {
+                    return Task::none();
+                }
                 crate::script::log(&format!("session {session} state {state:?}"));
                 if let Some(l) = self.live_mut(&session) {
                     l.state = state.into();
@@ -1464,6 +1646,9 @@ impl App {
                 self.ensure_attached()
             }
             Notify::Title { session, title } => {
+                if self.uterm_notify(&session, None, Some(title.clone())) {
+                    return Task::none();
+                }
                 if let Some(l) = self.live_mut(&session) {
                     l.info.term_title = title;
                 }
@@ -1474,6 +1659,7 @@ impl App {
                 self.refresh()
             }
             Notify::ReposChanged => self.load_repos(),
+            Notify::UTermsChanged { session } => self.load_uterms(&session),
             Notify::FsChanged {
                 session,
                 repo,
@@ -1524,12 +1710,24 @@ impl App {
                 web.set_hidden(show.as_deref() != Some(live.id()));
             }
         }
+        let shown = self.detail_visible().then(|| self.shown_browser()).flatten();
+        self.sync_browsers(shown);
+    }
+
+    /// [`Self::after_select`] for other modules.
+    pub(crate) fn select_shown(&mut self) -> Task<Message> {
+        self.after_select()
     }
 
     fn after_select(&mut self) -> Task<Message> {
         self.sync_web();
         self.open_items = false;
-        let attach = Task::batch([self.ensure_attached(), self.sync_detail()]);
+        let uterms = match self.selected.clone() {
+            Some(s) => self.load_uterms(&s),
+            None => Task::none(),
+        };
+        let uterms = Task::batch([uterms, self.load_uterms("")]);
+        let attach = Task::batch([self.ensure_attached(), self.sync_detail(), uterms]);
         if self.selected_live().is_some()
             && self.modal.is_none()
             && self.rename.is_none()
@@ -2096,6 +2294,11 @@ impl App {
             }
             Message::Page(page) => {
                 if page == self.ui.page {
+                    // The profiles page's button shows / hides its profile list (Desk).
+                    if page == Page::Configurations {
+                        self.ui.sessions_open = !self.ui.sessions_open;
+                        self.save_ui();
+                    }
                     // Like Hermes Desk: the active work button shows / hides the session list.
                     if page == Page::Work {
                         self.ui.sessions_open = !self.ui.sessions_open;
@@ -2114,6 +2317,9 @@ impl App {
                 self.rail_hover = false;
                 self.settings.error = None;
                 self.save_ui();
+                if page == Page::Configurations {
+                    self.sync_profile_edit();
+                }
                 match page {
                     Page::Work => self.after_select(),
                     // The work page stays in the widget tree under the page (terminal and
@@ -2486,13 +2692,21 @@ impl App {
                 }
             }
             Message::PickConfirm => {
-                let target = match &self.modal {
-                    Some(Modal::PickRoot(f)) => f.target().map(str::to_owned),
-                    _ => None,
+                let (target, purpose) = match &self.modal {
+                    Some(Modal::PickRoot(f)) => (f.target().map(str::to_owned), f.purpose.clone()),
+                    _ => (None, PickPurpose::Repo),
                 };
                 let Some(path) = target else {
                     return Task::none();
                 };
+                if purpose == PickPurpose::Terminal {
+                    self.modal = None;
+                    return self.on_uterm(crate::uterm::UTermMsg::PickedDir(path));
+                }
+                if let PickPurpose::Skill(_) = purpose {
+                    self.modal = None;
+                    return self.on_skill(crate::skills_ui::SkillMsg::Picked(path));
+                }
                 crate::script::log(&format!("pick: register {path:?}"));
                 self.modal = None;
                 self.settings.repo_input = path;
@@ -2642,32 +2856,63 @@ impl App {
                 let name = f.cfg_name.trim().to_owned();
                 f.busy = true;
                 Task::perform(
-                    async move { c.create_configuration(&name).await.map(drop) },
-                    |r| Message::SettingsDone(SettingsOp::ConfigCreated, r),
+                    async move { c.create_configuration(&name).await },
+                    Message::ProfileCreated,
                 )
             }
+            Message::ProfileCreated(r) => {
+                crate::script::log(&format!("profile created: {:?}", r.as_ref().map(|c| &c.slug)));
+                self.settings.busy = false;
+                match r {
+                    Ok(c) => {
+                        if matches!(self.modal, Some(Modal::AddProfile)) {
+                            self.modal = None;
+                        }
+                        let f = &mut self.settings;
+                        f.cfg_name.clear();
+                        f.error = None;
+                        f.profile_delete_armed = false;
+                        // Like Desk: the new profile is shown right away.
+                        f.profile_sel = Some(c.slug.clone());
+                        f.cfg_edit = None;
+                        if !self.configs.iter().any(|x| x.slug == c.slug) {
+                            self.configs.push(c);
+                        }
+                        self.sync_profile_edit();
+                    }
+                    Err(e) => self.settings.error = Some(i18n::proto_error(&e)),
+                }
+                self.refresh()
+            }
+            Message::ProfileAdding(open) => {
+                self.modal = open.then_some(Modal::AddProfile);
+                let f = &mut self.settings;
+                f.cfg_name.clear();
+                f.error = None;
+                if open {
+                    operation::focus(CONFIG_NAME_ID)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ProfileDeleteArm(on) => self.with_settings(|f| f.profile_delete_armed = on),
             Message::CfgEdit(slug) => {
-                let Some(cfg) = self.configs.iter().find(|c| c.slug == slug).cloned() else {
-                    return Task::none();
-                };
-                self.with_settings(|f| {
-                    f.cfg_edit = Some(Box::new(ConfigEdit::new(&cfg)));
+                // Picks the profile shown on the profiles page (its editor follows).
+                let f = &mut self.settings;
+                if f.profile_sel.as_deref() != Some(slug.as_str()) {
+                    f.profile_delete_armed = false;
                     f.error = None;
-                })
+                }
+                f.profile_sel = Some(slug);
+                if f.cfg_edit.as_ref().is_some_and(|e| Some(&e.base.slug) != f.profile_sel.as_ref()) {
+                    f.cfg_edit = None;
+                }
+                self.sync_profile_edit();
+                Task::none()
             }
             Message::CfgEditName(v) => self.with_cfg(|e| e.name = v),
             Message::CfgInstructions(a) => self.with_cfg(|e| e.instructions.perform(a)),
-            Message::CfgSkill(i, v) => self.with_cfg(|e| {
-                if let Some(s) = e.skills.get_mut(i) {
-                    *s = v;
-                }
-            }),
-            Message::CfgSkillAdd => self.with_cfg(|e| e.skills.push(String::new())),
-            Message::CfgSkillRemove(i) => self.with_cfg(|e| {
-                if i < e.skills.len() {
-                    e.skills.remove(i);
-                }
-            }),
+            Message::Skill(m) => self.on_skill(m),
             Message::CfgMcp(i, field, v) => self.with_cfg(|e| {
                 if let Some(m) = e.mcp.get_mut(i) {
                     match field {
@@ -2697,7 +2942,12 @@ impl App {
                     e.default_repos = Some(list);
                 })
             }
-            Message::CfgCancel => self.with_settings(|f| f.cfg_edit = None),
+            Message::CfgCancel => {
+                // 되돌리기: the editor starts again from the saved profile.
+                self.settings.cfg_edit = None;
+                self.sync_profile_edit();
+                Task::none()
+            }
             Message::CfgSave => {
                 let Some(c) = self.online() else {
                     return Task::none();
@@ -2732,13 +2982,20 @@ impl App {
                     Ok(()) => {
                         f.error = None;
                         match &op {
-                            SettingsOp::ConfigCreated => f.cfg_name.clear(),
                             SettingsOp::ConfigSaved => f.cfg_edit = None,
                             SettingsOp::AccountRenamed => f.acct_renaming = None,
                             _ => {}
                         }
                     }
                     Err(e) => f.error = Some(i18n::proto_error(&e)),
+                }
+                if ok && let SettingsOp::ConfigDeleted(slug) = &op {
+                    let f = &mut self.settings;
+                    f.profile_delete_armed = false;
+                    if f.profile_sel.as_deref() == Some(slug.as_str()) {
+                        f.profile_sel = None;
+                        f.cfg_edit = None;
+                    }
                 }
                 if ok
                     && let SettingsOp::ConfigDeleted(slug) = &op
@@ -2810,7 +3067,11 @@ impl App {
             }
 
             Message::UrlInput(v) => {
-                if let Some(id) = self.selected.clone()
+                if let Some(b) = self.shown_browser() {
+                    if let Some(b) = self.browser_mut(b) {
+                        b.url_input = v;
+                    }
+                } else if let Some(id) = self.selected.clone()
                     && let Some(live) = self.live_mut(&id)
                 {
                     live.url_input = v;
@@ -2819,8 +3080,16 @@ impl App {
             }
             Message::UrlSubmit => {
                 self.sync_web();
-                if let Some(live) = self.selected_live() {
-                    let url = normalize_url(&live.url_input);
+                if let Some(b) = self.shown_browser() {
+                    if let Some(b) = self.browser_mut(b)
+                        && let Some(url) = crate::browser::address_to_url(&b.url_input)
+                        && let Some(v) = &b.view
+                    {
+                        v.navigate(&url);
+                    }
+                } else if let Some(live) = self.selected_live() {
+                    let url = crate::browser::address_to_url(&live.url_input)
+                        .unwrap_or_else(|| normalize_url(""));
                     if let Some(w) = &live.web {
                         w.navigate(&url);
                     }
@@ -2976,17 +3245,34 @@ impl App {
                 let Some(Modal::CloseDirty(f)) = self.modal.take() else {
                     return Task::none();
                 };
+                let sid = f.session.as_str();
                 if matches!(message, Message::CloseDirtySave) {
-                    return self.save_file(&f.session, &f.path, None, true);
+                    // The unsaved files close once saved; the others now.
+                    let mut tasks: Vec<Task<Message>> = f
+                        .dirty
+                        .iter()
+                        .map(|p| self.save_file(sid, p, None, true))
+                        .collect();
+                    let rest: Vec<ItemKey> = f
+                        .keys
+                        .iter()
+                        .filter(|k| !matches!(k, ItemKey::File(p) if f.dirty.contains(p)))
+                        .cloned()
+                        .collect();
+                    tasks.push(self.close_items(sid, &rest));
+                    self.persist_detail(sid);
+                    return Task::batch(tasks);
                 }
-                if let Some(file) = self
-                    .detail_mut(&f.session)
-                    .and_then(|d| d.file_mut(&f.path))
-                    && let Some(v) = &mut file.view
-                {
-                    let _ = v.update(ide_views::CodeMessage::Revert);
+                for p in &f.dirty {
+                    if let Some(file) = self.detail_mut(sid).and_then(|d| d.file_mut(p))
+                        && let Some(v) = &mut file.view
+                    {
+                        let _ = v.update(ide_views::CodeMessage::Revert);
+                    }
                 }
-                self.on_detail(f.session, DetailMsg::Close(ItemKey::File(f.path)))
+                let t = self.close_items(sid, &f.keys);
+                self.persist_detail(sid);
+                t
             }
             Message::Expire => {
                 let now = std::time::Instant::now();
@@ -3005,11 +3291,19 @@ impl App {
                 self.dragging = true;
                 Task::none()
             }
+            Message::SideResizePressed => {
+                self.side_dragging = true;
+                Task::none()
+            }
             Message::DragMoved(p) => {
                 if self.dragging {
                     let avail = self.split_avail();
                     self.ui.split_ratio =
                         ((p.x - self.left_w()) / avail).clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
+                } else if self.side_dragging {
+                    // The panel reaches the window's right edge; the pointer is on its handle.
+                    self.ui.side_width = self.window_size.width - p.x - DIVIDER_W / 2.0;
+                    self.ui.side_width = self.side_w();
                 }
                 Task::none()
             }
@@ -3020,8 +3314,9 @@ impl App {
                 Task::none()
             }
             Message::DragEnd => {
-                if self.dragging {
+                if self.dragging || self.side_dragging {
                     self.dragging = false;
+                    self.side_dragging = false;
                     self.save_ui();
                 }
                 Task::none()
@@ -3030,15 +3325,22 @@ impl App {
             Message::WindowOpened(id) => {
                 self.window = id;
                 match id {
-                    Some(id) => window::size(id).map(move |s| Message::WindowResized(id, s)),
+                    Some(id) => Task::batch([
+                        window::size(id).map(move |s| Message::WindowResized(id, s)),
+                        crate::frame::enable_snap_layout(id),
+                    ]),
                     None => Task::none(),
                 }
             }
             Message::WindowResized(id, size) => {
                 if Some(id) == self.detail_window {
-                    self.on_detail_window_resized(size);
+                    return self.on_detail_window_resized(id, size);
                 } else if Some(id) == self.window {
                     self.window_size = size;
+                    return Task::batch([
+                        crate::frame::query_maximized(id),
+                        App::query_minimized(id),
+                    ]);
                 }
                 Task::none()
             }
@@ -3059,6 +3361,39 @@ impl App {
             }
             Message::WindowClosed(id) => self.on_window_closed(id),
             Message::DetailWindow(m) => self.on_detail_window(m),
+            Message::Rail(m) => self.on_rail(m),
+            Message::ItemMenu(m) => self.on_item_menu(m),
+            Message::ItemAct(a) => self.on_item_act(a),
+            Message::ItemDrag(m) => self.on_item_drag(m),
+            Message::UTerm(m) => self.on_uterm(m),
+            Message::Browser(m) => self.on_browser(m),
+            Message::Modifiers(m) => {
+                self.modifiers = m;
+                Task::none()
+            }
+            Message::PickTermFolder => {
+                if self.online().is_none() {
+                    return Task::none();
+                }
+                self.rename = None;
+                self.modal = Some(Modal::PickRoot(PickRootForm {
+                    purpose: PickPurpose::Terminal,
+                    ..PickRootForm::default()
+                }));
+                self.pick_go(self.new_dir_global.clone())
+            }
+            Message::ExploreSettings(open) => {
+                self.explore_settings = open;
+                Task::none()
+            }
+            Message::ExploreHideIgnored(hide) => self.set_explore_hide_ignored(hide),
+            Message::BadgeTick => self.refresh_badges(false),
+            Message::Badge(sid, r) => self.on_badge(sid, r),
+            Message::SideMenuAt(p) => {
+                self.side_menu_at = Some(p);
+                Task::none()
+            }
+            Message::Frame(id, m) => self.on_frame(id, m),
             Message::CloseRequested => self.on_close_requested(),
             Message::CloseRemember(v) => {
                 if let Some(Modal::Close(f)) = &mut self.modal {
@@ -3146,6 +3481,30 @@ impl App {
         }
     }
 
+    /// The profile shown on the profiles page: the picked one, else the first.
+    pub(crate) fn profile_shown(&self) -> Option<&ConfigurationInfo> {
+        let sel = self.settings.profile_sel.as_deref();
+        sel.and_then(|s| self.configs.iter().find(|c| c.slug == s))
+            .or_else(|| self.configs.first())
+    }
+
+    /// Keep the editor on the shown profile: (re)created from the saved profile when there is
+    /// none or it edits another one; kept (with its unsaved edits) otherwise.
+    pub(crate) fn sync_profile_edit(&mut self) {
+        let Some(shown) = self.profile_shown().cloned() else {
+            self.settings.cfg_edit = None;
+            return;
+        };
+        let f = &mut self.settings;
+        match &mut f.cfg_edit {
+            Some(e) if e.base.slug == shown.slug => {
+                // Skills change outside the editor (applied at once): follow the list.
+                e.base.skills = shown.skills;
+            }
+            _ => f.cfg_edit = Some(Box::new(ConfigEdit::new(&shown))),
+        }
+    }
+
     fn with_cfg(&mut self, f: impl FnOnce(&mut ConfigEdit)) -> Task<Message> {
         if let Some(e) = &mut self.settings.cfg_edit {
             f(e);
@@ -3217,7 +3576,7 @@ impl App {
     }
 
     /// List `dir` in the repos page's folder picker (`None` = the start list).
-    fn pick_go(&mut self, dir: Option<String>) -> Task<Message> {
+    pub(crate) fn pick_go(&mut self, dir: Option<String>) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
@@ -3305,8 +3664,14 @@ impl App {
         Task::none()
     }
 
+    /// Run `f` on the page shown in the selected session's pane (a browser tab or its web page).
     fn with_web(&mut self, f: impl FnOnce(&WebView)) -> Task<Message> {
-        if let Some(w) = self.selected_live().and_then(|l| l.web.as_ref()) {
+        let view = match (self.shown_browser(), self.selected_live()) {
+            (Some(id), Some(l)) => self.browser(l, id).and_then(|b| b.view.as_ref()),
+            (None, Some(l)) => l.web.as_ref(),
+            _ => None,
+        };
+        if let Some(w) = view {
             f(w);
         }
         Task::none()
@@ -3448,6 +3813,9 @@ impl App {
     }
 
     fn on_web(&mut self, ev: WebViewEvent) {
+        if self.browser_web_event(&ev) {
+            return;
+        }
         let show = self
             .detail_visible()
             .then(|| self.selected.clone())
@@ -3488,9 +3856,9 @@ impl App {
                 tracing::warn!("web load error {url}: {error}");
             }
             WebEvent::NewWindowRequested(url) => {
-                if let Some(w) = &live.web {
-                    w.navigate(&url);
-                }
+                // Desk: a page's new window is a new browser tab of the session.
+                let sid = live.info.id.clone();
+                let _ = self.open_browser(Some(sid), false, url);
             }
             _ => {}
         }
@@ -3518,8 +3886,8 @@ impl App {
                     .map(|(generation, e)| Message::Client(generation, e)),
             );
         }
-        if self.dragging {
-            // The divider is in the app window: the detail window's pointer does not drive it.
+        if self.dragging || self.side_dragging {
+            // The dividers are in the app window: the detail window's pointer does not drive them.
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     Some(Message::WindowDrag(id, position))
@@ -3536,6 +3904,14 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::CloseModal),
+                _ => None,
+            }));
+        } else if self.item_menu.is_some() {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::ItemMenu(None)),
                 _ => None,
             }));
         }
@@ -3602,6 +3978,19 @@ impl App {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Expire));
         }
         subs.push(self.footer_subscription());
+        subs.push(event::listen_with(|e, _, _| match e {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
+            _ => None,
+        }));
+        if self.new_menu {
+            subs.push(
+                iced::time::every(Duration::from_secs(3))
+                    .map(|_| Message::UTerm(crate::uterm::UTermMsg::PortsTick)),
+            );
+        }
+        if self.connected() {
+            subs.push(iced::time::every(crate::branch_badge::EVERY).map(|_| Message::BadgeTick));
+        }
         if self.script.as_ref().is_some_and(|s| !s.done()) {
             subs.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));
         }

@@ -92,6 +92,8 @@ pub struct ChangesList {
     selected: Option<(ChangeGroup, String)>,
     rows: Vec<Row>,
     list: VList,
+    /// Shown rows: paths containing this (case-insensitive); empty = all.
+    filter: String,
 }
 
 impl Default for ChangesList {
@@ -108,7 +110,30 @@ impl ChangesList {
             selected: None,
             rows: Vec::new(),
             list: VList::default(),
+            filter: String::new(),
         }
+    }
+
+    /// Shows only the rows whose path contains `filter` (case-insensitive; Desk's Changes
+    /// `Filter`). Groups without such rows are hidden.
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.rebuild();
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Indexes of `group`'s entries that pass the filter.
+    fn shown(&self, g: ChangeGroup) -> Vec<usize> {
+        let q = self.filter.trim().to_lowercase();
+        self.groups[g.index()]
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| q.is_empty() || e.path.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Replaces the entries of `group` (kept in the given order).
@@ -144,13 +169,13 @@ impl ChangesList {
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
         for g in ChangeGroup::ALL {
-            let n = self.groups[g.index()].len();
-            if n == 0 {
+            let shown = self.shown(g);
+            if shown.is_empty() {
                 continue;
             }
             rows.push(Row::Header(g));
             if !self.collapsed[g.index()] {
-                rows.extend((0..n).map(|i| Row::Entry(g, i)));
+                rows.extend(shown.into_iter().map(|i| Row::Entry(g, i)));
             }
         }
         self.rows = rows;
@@ -251,7 +276,7 @@ impl ChangesList {
         match self.rows[i] {
             Row::Header(g) => {
                 let open = !self.collapsed[g.index()];
-                let n = self.groups[g.index()].len();
+                let n = self.shown(g).len();
                 button(
                     row![
                         text(if open { "▾" } else { "▸" }).size(12).color(theme::DIM).width(10),

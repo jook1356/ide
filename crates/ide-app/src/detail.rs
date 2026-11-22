@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use iced::Task;
 use ide_client::{
-    ChangeKind, Client, CommitInfo, DefResult, DiffAgainst, EntryKind, FileContent, FileMatch,
+    ChangeKind, Client, CommitInfo, DefResult, DiffAgainst, EntryKind, FileContent, PathMatch, PathMatches,
     FsEntry, GitChange, GitLog, ProtoError, SearchEvent, SearchMatch, SearchStream, SearchSummary, TextEncoding, TextSearch,
 };
 use ide_views::{
@@ -38,7 +38,8 @@ pub const QUICK_ID: &str = "ide-quick-open";
 /// Most quick-open results.
 const QUICK_MAX: u32 = 60;
 /// Most file-name matches shown in Explore.
-const FIND_FILES_MAX: u32 = 200;
+/// Explore's 파일 찾기 rows (Desk's `FILTER_LIMIT`; the rest is counted in "N개 더 있음").
+const FIND_FILES_MAX: u32 = 500;
 /// Typing pause before Explore's text search starts (file names are matched at once).
 const SEARCH_DELAY: Duration = Duration::from_millis(250);
 /// Largest file the editor opens (bytes; bigger files show the first part read-only).
@@ -85,6 +86,10 @@ pub enum ItemKey {
     Diff { staged: bool, path: String },
     /// A file on disk compared with the unsaved buffer (save conflict; [`qualify`]d path).
     Compare(String),
+    /// A browser tab beyond the session's web page (`browser.rs`; not in `items`).
+    Browser(u32),
+    /// A user terminal of the session (`uterm.rs`; kept by the server, not in `items`).
+    Terminal(String),
     /// A commit of `repo` (History) compared with its first parent: the whole commit, or one
     /// root-relative `path` of it.
     Commit {
@@ -105,7 +110,7 @@ impl ItemKey {
                 staged: false,
                 path,
             } => format!("diff:w:{path}"),
-            ItemKey::Compare(_) => return None,
+            ItemKey::Compare(_) | ItemKey::Terminal(_) | ItemKey::Browser(_) => return None,
             ItemKey::Commit { repo, sha, path } => {
                 format!("commit:{repo}:{sha}:{}", path.as_deref().unwrap_or_default())
             }
@@ -153,6 +158,7 @@ impl ItemKey {
         };
         Some(match self {
             ItemKey::Web => ItemKey::Web,
+            k @ (ItemKey::Terminal(_) | ItemKey::Browser(_)) => k,
             ItemKey::File(p) => ItemKey::File(q(p)?),
             ItemKey::Diff { staged, path } => ItemKey::Diff {
                 staged,
@@ -166,7 +172,7 @@ impl ItemKey {
     /// The repo of a file / diff key.
     pub fn repo(&self) -> Option<&str> {
         match self {
-            ItemKey::Web => None,
+            ItemKey::Web | ItemKey::Terminal(_) | ItemKey::Browser(_) => None,
             ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
                 Some(split_q(p).0)
             }
@@ -267,8 +273,9 @@ pub enum Item {
 #[derive(Default)]
 pub struct SearchState {
     pub query: String,
-    /// File-name matches in the shown repo (`search.files`), best first.
-    pub files: Vec<FileMatch>,
+    /// Path matches in the shown repo (`search.paths`), in path order, and how many in all.
+    pub files: Vec<PathMatch>,
+    pub files_total: u32,
     pub files_error: Option<String>,
     /// Incremented per file-name query; older answers are dropped.
     files_seq: u64,
@@ -370,6 +377,8 @@ pub struct Detail {
     pub footer: crate::footer::Footer,
     /// Checkboxes, stash, discard, commit menu and branch picker (`changes_actions.rs`).
     pub acts: crate::changes_actions::ChangesActs,
+    /// The Changes panel's 스크립트 section (`scripts_view.rs`).
+    pub scripts: crate::scripts_view::ScriptsUi,
 }
 
 impl Detail {
@@ -386,7 +395,9 @@ impl Detail {
                     continue;
                 }
                 let item = match &k {
-                    ItemKey::Web | ItemKey::Compare(_) => continue,
+                    ItemKey::Web | ItemKey::Compare(_) | ItemKey::Terminal(_) | ItemKey::Browser(_) => {
+                        continue;
+                    }
                     ItemKey::File(p) => Item::File(FileItem::new(p)),
                     ItemKey::Diff { .. } | ItemKey::Commit { .. } => Item::Diff(DiffItem::empty()),
                 };
@@ -419,6 +430,7 @@ impl Detail {
             toast: None,
             footer: Default::default(),
             acts: Default::default(),
+            scripts: Default::default(),
         }
     }
 
@@ -428,6 +440,22 @@ impl Detail {
             active: self.active.encode(),
             side: self.side.code().into(),
         }
+    }
+
+    /// The items `set` covers (the web page never).
+    pub fn close_set(&self, set: &CloseSet) -> Vec<ItemKey> {
+        self.items
+            .iter()
+            .filter(|(k, item)| {
+                *k != ItemKey::Web
+                    && match set {
+                        CloseSet::All => true,
+                        CloseSet::Idle => !matches!(item, Item::File(f) if f.dirty()),
+                        CloseSet::Others(keep) => k != keep,
+                    }
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     pub fn item(&self, key: &ItemKey) -> Option<&Item> {
@@ -512,12 +540,25 @@ pub enum SearchItem {
     Lost,
 }
 
+/// Which items "close several" closes (Desk's 탭 모두 닫기, 작업 중 아닌 항목 닫기, 다른 항목
+/// 닫기). The web page always stays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseSet {
+    All,
+    /// Everything but files with unsaved edits.
+    Idle,
+    /// Everything but this item.
+    Others(ItemKey),
+}
+
 /// Messages of the detail area of session `.0` of [`Message::Detail`].
 #[derive(Debug, Clone)]
 pub enum DetailMsg {
     Activate(ItemKey),
     /// Close an item (asks first when a file has unsaved edits).
     Close(ItemKey),
+    /// Close several items at once (one question for all unsaved files).
+    CloseSome(CloseSet),
     Side(SideTab),
     Tree(TreeMessage),
     /// The Changes / Explore repo picked (Hermes Desk's repo dropdown).
@@ -545,7 +586,7 @@ pub enum DetailMsg {
     /// The typing pause of query `.0` ended.
     SearchTyped(u64),
     /// File-name matches of query `.0`.
-    Files(u64, Result<Vec<FileMatch>, ProtoError>),
+    Files(u64, Result<PathMatches, ProtoError>),
     SearchCase,
     SearchWord,
     SearchRegex,
@@ -573,6 +614,8 @@ pub enum DetailMsg {
     OpenCommit(String, Option<String>),
     /// Changes / History actions (`changes_actions.rs`).
     Acts(crate::changes_actions::ActMsg),
+    /// The 스크립트 section.
+    Scripts(crate::scripts_view::ScriptsMsg),
 }
 
 // ---------------------------------------------------------------------------------- helpers
@@ -1103,9 +1146,16 @@ impl App {
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
+        // A terminal is shown from the session's terminal list (not an item).
+        if let ItemKey::Terminal(_) | ItemKey::Browser(_) = &key {
+            d.active = key;
+            self.sync_web();
+            return Task::none();
+        }
         if d.item(&key).is_none() {
             let item = match &key {
                 ItemKey::Web => Item::Web,
+                ItemKey::Terminal(_) | ItemKey::Browser(_) => return Task::none(),
                 ItemKey::File(p) => Item::File(FileItem::new(p)),
                 ItemKey::Diff { .. } | ItemKey::Compare(_) | ItemKey::Commit { .. } => {
                     Item::Diff(DiffItem::empty())
@@ -1164,6 +1214,79 @@ impl App {
             _ => Task::none(),
         };
         Task::batch([act, jump])
+    }
+
+    /// Close `keys` (never the web page): asks once first when some are files with unsaved
+    /// edits (Desk's `closeMany` / `confirmDiscard`).
+    fn close_keys(&mut self, sid: &str, keys: Vec<ItemKey>) -> Task<Message> {
+        // Browser tabs close here; terminals are stopped and removed by the server.
+        let (tabs, keys): (Vec<ItemKey>, Vec<ItemKey>) = keys
+            .into_iter()
+            .filter(|k| *k != ItemKey::Web)
+            .partition(|k| matches!(k, ItemKey::Browser(_)));
+        for k in tabs {
+            if let ItemKey::Browser(id) = k {
+                self.close_browser(id);
+            }
+        }
+        let (terms, keys): (Vec<ItemKey>, Vec<ItemKey>) = keys
+            .into_iter()
+            .partition(|k| matches!(k, ItemKey::Terminal(_)));
+        let removed = Task::batch(terms.into_iter().filter_map(|k| match k {
+            ItemKey::Terminal(id) => Some(Task::done(Message::UTerm(
+                crate::uterm::UTermMsg::Remove(id),
+            ))),
+            _ => None,
+        }));
+        if keys.is_empty() {
+            return removed;
+        }
+        Task::batch([removed, self.close_files(sid, keys)])
+    }
+
+    /// [`Self::close_keys`] for the items (files, diffs, commits).
+    fn close_files(&mut self, sid: &str, keys: Vec<ItemKey>) -> Task<Message> {
+        let dirty: Vec<String> = match self.detail(sid) {
+            Some(d) => keys
+                .iter()
+                .filter_map(|k| match (k, d.item(k)) {
+                    (ItemKey::File(p), Some(Item::File(f))) if f.dirty() => Some(p.clone()),
+                    _ => None,
+                })
+                .collect(),
+            None => return Task::none(),
+        };
+        self.open_items = false;
+        self.rail_menu = false;
+        if !dirty.is_empty() {
+            self.modal = Some(Modal::CloseDirty(crate::app::CloseDirtyForm {
+                session: sid.to_owned(),
+                dirty,
+                keys,
+            }));
+            return Task::none();
+        }
+        let t = self.close_items(sid, &keys);
+        self.persist_detail(sid);
+        t
+    }
+
+    /// Remove `keys` and show the item that took the shown one's place.
+    pub(crate) fn close_items(&mut self, sid: &str, keys: &[ItemKey]) -> Task<Message> {
+        let Some(d) = self.detail_mut(sid) else {
+            return Task::none();
+        };
+        let at = d.items.iter().position(|(k, _)| keys.contains(k) && *k == d.active);
+        d.items.retain(|(k, _)| *k == ItemKey::Web || !keys.contains(k));
+        if let Some(i) = at {
+            d.active = d
+                .items
+                .get(i.min(d.items.len().saturating_sub(1)))
+                .map(|(k, _)| k.clone())
+                .unwrap_or(ItemKey::Web);
+        }
+        let next = d.active.clone();
+        self.activate(sid, next)
     }
 
     fn close_item(&mut self, sid: &str, key: &ItemKey) -> Task<Message> {
@@ -1309,24 +1432,47 @@ impl App {
         match m {
             DetailMsg::Activate(k) => {
                 self.open_items = false;
+                // An item of another session (a 공통 tab): that session is shown first.
+                if self.selected.as_deref() != Some(sid) {
+                    self.selected = Some(sid.to_owned());
+                    self.save_ui();
+                    let shown = self.activate(sid, k);
+                    return Task::batch([shown, self.select_shown()]);
+                }
                 self.activate(sid, k)
             }
-            DetailMsg::Close(k) => {
-                let dirty = match self.detail(sid).and_then(|d| d.item(&k)) {
-                    Some(Item::File(f)) => f.dirty(),
-                    _ => false,
-                };
-                if dirty && let ItemKey::File(p) = &k {
-                    self.open_items = false;
-                    self.modal = Some(Modal::CloseDirty(crate::app::CloseDirtyForm {
-                        session: sid.to_owned(),
-                        path: p.clone(),
-                    }));
-                    return Task::none();
+            DetailMsg::Close(k) => self.close_keys(sid, vec![k]),
+            DetailMsg::CloseSome(set) => {
+                let mut keys = self
+                    .detail(sid)
+                    .map(|d| d.close_set(&set))
+                    .unwrap_or_default();
+                // Desk: exited terminals go too, except with 탭 모두 닫기 (terminals stay).
+                if set != CloseSet::All
+                    && let Some(l) = self.live(sid)
+                {
+                    let keep = match &set {
+                        CloseSet::Others(k) => Some(k),
+                        _ => None,
+                    };
+                    keys.extend(
+                        l.uterms
+                            .iter()
+                            .filter(|t| t.info.state != ide_client::SessionState::Running)
+                            .map(|t| ItemKey::Terminal(t.info.id.clone()))
+                            .filter(|k| Some(k) != keep),
+                    );
+                    // 다른 항목 닫기 also closes the session's browser tabs.
+                    if keep.is_some() {
+                        keys.extend(
+                            l.browsers
+                                .iter()
+                                .map(|b| ItemKey::Browser(b.id))
+                                .filter(|k| Some(k) != keep),
+                        );
+                    }
                 }
-                let t = self.close_item(sid, &k);
-                self.persist_detail(sid);
-                t
+                self.close_keys(sid, keys)
             }
             DetailMsg::Side(tab) => {
                 let d = self.detail_mut(sid).expect("session");
@@ -1355,7 +1501,7 @@ impl App {
                 d.set_repo(repo.clone());
                 crate::script::log(&format!("detail {sid}: repo {repo}"));
                 // File names are matched in the shown repo.
-                Task::batch([self.sync_detail(), self.find_files(sid)])
+                Task::batch([self.sync_detail(), self.find_files(sid), self.scripts_follow_repo(sid)])
             }
             DetailMsg::Listed(repo, dir, r) => {
                 let d = self.detail_mut(sid).expect("session");
@@ -1414,6 +1560,7 @@ impl App {
                 }
             }
             DetailMsg::Acts(m) => self.on_changes_act(sid, m),
+            DetailMsg::Scripts(m) => self.on_scripts(sid, m),
             DetailMsg::Status(repo, r) => {
                 let d = self.detail_mut(sid).expect("session");
                 if d.repo != repo {
@@ -1556,8 +1703,9 @@ impl App {
                 }
                 match r {
                     Ok(files) => {
-                        crate::script::log(&format!("file-name matches: {}", files.len()));
-                        s.files = files;
+                        crate::script::log(&format!("path matches: {} of {}", files.matches.len(), files.total));
+                        s.files_total = files.total;
+                        s.files = files.matches;
                         s.files_error = None;
                     }
                     Err(e) => {
@@ -2243,10 +2391,21 @@ impl App {
         task
     }
 
+    /// Desk's 파일 찾기 설정: gitignored entries in or out; the shown search runs again.
+    pub(crate) fn set_explore_hide_ignored(&mut self, hide: bool) -> Task<Message> {
+        self.ui.explore_hide_ignored = hide;
+        self.save_ui();
+        match self.selected.clone() {
+            Some(sid) => self.find_files(&sid),
+            None => Task::none(),
+        }
+    }
+
     /// Explore's file-name matches for the current query in the shown repo (Hermes Desk's
-    /// 파일 찾기; the server matches fuzzily).
+    /// 파일 찾기: path substring, folders too; gitignored entries per the setting).
     fn find_files(&mut self, sid: &str) -> Task<Message> {
         let c = self.online();
+        let include_ignored = !self.ui.explore_hide_ignored;
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
@@ -2264,7 +2423,7 @@ impl App {
         let (seq, q, repo, sid2) = (s.files_seq, s.query.clone(), d.repo.clone(), sid.to_owned());
         Task::perform(
             async move {
-                c.search_files(&sid2, Some(&repo), &q, FIND_FILES_MAX)
+                c.search_paths(&sid2, Some(&repo), &q, FIND_FILES_MAX, include_ignored)
                     .await
             },
             {
@@ -2491,11 +2650,10 @@ mod tests {
             query: "greet".into(),
             ..SearchState::default()
         };
-        s.files.push(FileMatch {
+        s.files.push(PathMatch {
             repo: "0123abcd".into(),
             path: "src/greet.ts".into(),
-            score: 1,
-            indices: Vec::new(),
+            dir: false,
         });
         assert!(s.active());
         let (g, f, t) = (s.generation, s.files_seq, s.typed);

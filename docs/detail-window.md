@@ -14,10 +14,12 @@ script steps in `script_detail_window.rs`.
 | `openRegion('detail', '상세 · <label>')` | `WinMsg::Popout`: `ui.detail_detached = true`, shown; `sync_detail_window` opens the window (or `gain_focus` if open). |
 | Region window = `window.open` drawn by the app renderer, always the selected session's region | Second iced window (`iced::daemon`, `window::open`); `App::view_window(id)` draws `pane(selected, in_window = true)` from the same `App` state, so it follows session switches. |
 | Window title `상세 · <session> — Hermes Desk` (`상세 보기` when idle) | `상세 · <session> — ide` / `상세 보기 — ide` (`App::title(id)`, i18n `detail-window-title*`). |
-| `RegionPortal` title bar: `PinButton` (`IconPin` / `IconPinFilled`, tooltips `앱 창 위에 항상 같이 띄우기` / `고정 해제 (앱 위에 같이 뜨지 않음)`, violet "light" when on) + `앱으로 합치기` button (`IconArrowBarToLeft` 14, tooltip `앱 창으로 합치기`) | A 36 px bar at the top of the window: pin (28 px, 15 px Tabler pin / pin-filled, `style::icon_toggle` violet when on) and `앱으로 합치기` (14 px arrow-bar-to-left + label), same tooltips. |
+| `RegionPortal` title bar: `PinButton` (`IconPin` / `IconPinFilled`, tooltips `앱 창 위에 항상 같이 띄우기` / `고정 해제 (앱 위에 같이 뜨지 않음)`, violet "light" when on) + `앱으로 합치기` button (`IconArrowBarToLeft` 14, tooltip `앱 창으로 합치기`) | A 36 px bar at the top of the window: pin (28 px, 15 px Tabler pin / pin-filled, `style::icon_toggle` (selected ground, accent icon) when on) and `앱으로 합치기` (14 px arrow-bar-to-left + label), same tooltips. |
+| `DetailRail` (`lib/detailRail.ts` settings `{ mode: 'tabs', side: 'left', pinned: false }` in localStorage): in the detached window 열린 항목 is a vertical tab list under the pane's header (the header's 열린 항목 button hides). Pinned: 240 px list beside the content; unpinned: 44 px icon rail (group lines in the group colour, unsaved dot) that widens to 240 px over the content after 120 ms of hover and narrows when the pointer leaves. Top: 열린 항목 설정 menu (세로 탭 / 팝오버, 탭 위치 왼쪽 / 오른쪽, 작업 중 아닌 항목 닫기) and the list's pin. The popover in the window has "세로 탭으로 보기". The app window's pane always uses the popover. | `detail_rail.rs`, settings `ui.json` `detail_rail` (`RailPrefs`, same defaults). Same layout, widths, delay, groups (Browser orange, Changes yellow, History teal, Explore accent: `style` tokens), menu and pin; rows are the popover's (icon, name, unsaved dot, ✕). Popover footer button "세로 탭으로 보기" when in the window. |
+| Frameless region window (`frame: false`, title bar drawn by the page, OS caption buttons on the right) | `frame.rs`, shared with the app window (bar label `ide`, no actions; its × runs the close dialog; the bar stays above modals). `decorations: false` (DWM shadow and rounded corners kept via `undecorated_shadow` / `CornerPreference::Round`). The bar shows `상세 · <session>` on the left and drags the window (`window::drag`, Aero snap included; double click toggles maximise); Windows 11-style caption buttons (46 px, drawn 10 px glyphs, red close hover): minimise, maximise / restore (from `window::is_maximized` after each resize), close (= the old native ×: hides, stays detached). 5 px invisible grips along the edges resize it (`window::drag_resize`), absent while maximised. |
 | `closeRegion` (앱으로 합치기): detached cleared, window closes, the pane shows again in the app | `WinMsg::Merge`: `detail_detached = false`, `detail_collapsed = false`, window closed by `sync_detail_window`. |
 | `hideRegion` / window's own ×: closes the window, stays detached (`detailHidden`) | Detail toggle (`ToggleDetail`) and the window's close button (`WindowCloseRequest(detail)`) set `detail_collapsed = true`; the window closes, `detail_detached` stays. A window that disappears by itself (`WindowClosed`) counts as hidden. |
-| `toggleDetail` with a detached region: hides / shows the window | Same `ToggleDetail`; while detached the app window keeps the thin toggle strip: `»` "분리된 상세 창 숨기기" while shown, `«` "상세 영역을 분리된 창으로 보기" while hidden (Desk's `DetailToggle` tooltips). |
+| `toggleDetail` with a detached region: hides / shows the window | Same `ToggleDetail`; the toggle is Desk's `DetailToggle` at the right end of the session header ("상세 영역" + open item count, tooltips "분리된 상세 창 숨기기" / "상세 영역을 분리된 창으로 보기" while detached); the app window keeps no strip for the hidden area. |
 | Opening an item while detached and hidden re-opens the window | Existing paths that set `detail_collapsed = false` (open file, quick open, find in files) re-open it. |
 | Detached remembered across restarts (`localStorage region-detached:detail`) | `ui.json` `detail_detached` (kept while hidden); the window reopens on start once a session is selected. |
 | Pin remembered (`region-pinned:detail`), applied on open | `ui.json` `detail_pinned`, applied after `window::open` completes and on toggle. |
@@ -57,13 +59,30 @@ also hides the side panel; files opened from it show in the detail window.
 
 ## Deviations from Desk
 
-- Native OS title bar (with the title) plus a 36 px action bar, instead of Desk's custom title bar
-  with the OS buttons drawn over it (the ide app window also uses the native title bar).
-- Desk's detached window shows 열린 항목 as a tab list beside the content by default (`DetailRail`,
-  with its own settings); ide keeps the header's 열린 항목 popover in the window too.
-- Desk re-maximises pinned windows after the app window is restored (Windows restores owned
-  windows un-maximised); not ported.
+- The caption buttons are drawn by the app (Electron overlays the native ones). The snap layout
+  flyout comes from a window subclass (`ide_web::enable_snap_layout`) that answers `HTMAXBUTTON`
+  over the maximise button; Windows then handles that button's click, so it shows no hover tint.
+- 열린 항목 (tab list and popover): right-click menu at the pointer (`item_menu.rs`: copy paths,
+  Explore / file manager / VS Code (local server only), commit SHA / subject, web reload / copy /
+  external browser, terminal command / stop, 닫기 / 다른 항목 닫기 / 작업 중 아닌 항목 닫기 /
+  탭 모두 닫기), drag within a group (`ide_views::Reorder`; the order is the session's item order,
+  kept in `ui.json`), one 저장하지 않은 변경 question for all unsaved files, user terminals and
+  "+ 새로 열기" (`uterm.rs`: 이 세션 | 공용 (Alt+click / Alt+Enter: 공용), the server's shells with
+  the default ☆ (`ui.json` `default_shell`), the start folder (a repo / the session folder; 공용:
+  home, recent folders, 폴더 선택… with the server folder picker), 실행 중인 서버 (ports listening in
+  the scope's terminal process trees, asked every 3 s while the menu is open), a terminal per repo / the session folder / the home
+  folder, 즐겨찾기 with rename / delete, the address field), browser tabs (`browser.rs`: Desk's
+  `addressToUrl`, a page's new window opens a tab, ☆ in the header), 공용 items (no session; server
+  terminals `g:t<n>` in the home folder) and 공통 tabs (pinned from the item menu, grouped by
+  their session at the top; clicking one of another session switches to it). Not ported:
+  agent processes,
+  persisting browser tabs and 공통 tabs across restarts, the drag's dimming
+  of other groups.
+- Opening on hover uses iced's enter / exit events (Desk polls the OS cursor because its web pages
+  are native views; ide's are drawn by iced).
 - Desk's `Ctrl+J` detail toggle does not exist in ide (not added: Ctrl+J is a newline in agent
   CLIs).
-- Dialogs opened from the detail window's content (unsaved-file close, definition picker) open in
-  the app window (ide's modals are drawn by the app window).
+- The pinned detail window is maximised again after the app window comes back from minimised
+  (Desk's 50 ms re-maximise), detected from the app window's resize events.
+- The unsaved-file close and definition picker dialogs draw in the detail window while it is
+  detached (other dialogs belong to the app window's content and stay there).

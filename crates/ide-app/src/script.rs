@@ -2679,7 +2679,7 @@ fn detail_luma(app: &App, shot: &window::Screenshot) -> f32 {
     let scale = shot.size.width as f32 / app.window_size.width.max(1.0);
     let lw = app.window_size.width;
     let pane_l = app.left_w() + app.ui.split_ratio * app.split_avail() + crate::app::DIVIDER_W;
-    let pane_r = lw - crate::detail::SIDE_W - 1.0 - 8.0;
+    let pane_r = lw - app.side_w() - crate::app::DIVIDER_W - 8.0;
     let left = pane_l.max(lw / 2.0 + 270.0);
     let px = |x: f32| ((x * scale) as usize).min(w);
     let (mut x0, x1) = (px(left), px(pane_r));
@@ -3298,8 +3298,8 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 }
             }
             Step::CfgFill(slug) => {
+                use crate::skills_ui::SkillMsg;
                 use iced::widget::text_editor::{Action, Edit};
-                let skill = sc.repo.display().to_string();
                 tasks.push(app.update(Message::CfgEdit(slug.into())));
                 for c in "Be brief.\nUse the test repo.".chars() {
                     let edit = if c == '\n' {
@@ -3309,8 +3309,12 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     };
                     tasks.push(app.update(Message::CfgInstructions(Action::Edit(edit))));
                 }
-                tasks.push(app.update(Message::CfgSkillAdd));
-                tasks.push(app.update(Message::CfgSkill(0, skill)));
+                tasks.push(app.update(Message::Skill(SkillMsg::NewOpen(true))));
+                tasks.push(app.update(Message::Skill(SkillMsg::NewName("Lint rules".into()))));
+                tasks.push(app.update(Message::Skill(SkillMsg::NewDescription(
+                    "Lints the test repo.".into(),
+                ))));
+                tasks.push(app.update(Message::Skill(SkillMsg::NewCreate)));
                 tasks.push(app.update(Message::CfgMcpAdd));
                 for (field, v) in [
                     (McpField::Name, "docs"),

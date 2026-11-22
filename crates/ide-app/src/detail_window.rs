@@ -10,12 +10,14 @@
 //!   it comes back after a restart. Only "앱으로 합치기" puts the area back into the app window.
 //! - The pin keeps the window in front of the app window (owned window, like Electron's
 //!   `setParentWindow`): it comes up and minimises with the app.
+//! - Frameless like Desk's region window (`frame.rs`): the app draws the title bar, with the pin
+//!   and 앱으로 합치기 beside the caption buttons.
 
-use iced::widget::{button, column, container, row, space, text};
-use iced::window::raw_window_handle::RawWindowHandle;
+use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Element, Fill, Point, Size, Task, Widget as _, window};
 
 use crate::app::{App, Message};
+use crate::frame;
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::style;
@@ -27,8 +29,6 @@ type El<'a> = Element<'a, Message>;
 /// Desk's region window: 960 x 640 at first, at least 420 x 240.
 const DEFAULT_SIZE: Size = Size::new(960.0, 640.0);
 const MIN_SIZE: Size = Size::new(420.0, 240.0);
-/// Height of the window's bar (pin, 앱으로 합치기).
-const BAR_H: f32 = 36.0;
 
 #[derive(Debug, Clone)]
 pub enum WinMsg {
@@ -46,28 +46,23 @@ pub enum WinMsg {
     Owner(Option<isize>, Option<isize>),
 }
 
-/// The HWND of a window (`None` off Windows).
-fn hwnd_of(w: &dyn window::Window) -> Option<isize> {
-    match w.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-        _ => None,
-    }
-}
-
 impl App {
     /// The detail pane is drawn in the app window (shown and not detached).
     pub fn detail_in_app(&self) -> bool {
         !self.ui.detail_collapsed && !self.ui.detail_detached
     }
 
-    /// The window's title: Desk's `상세 · <session>` (`상세 보기` without a session) plus the
-    /// app's name.
-    pub fn detail_window_title(&self) -> String {
-        let t = match self.selected_live() {
+    /// Desk's `상세 · <session>` (`상세 보기` without a session), shown in the title bar.
+    fn detail_window_label(&self) -> String {
+        match self.selected_live() {
             Some(l) => tr::detail_window_title(&l.info.title),
             None => tr::detail_window_title_idle(),
-        };
-        format!("{t} — ide")
+        }
+    }
+
+    /// The window's OS title (taskbar, Alt+Tab): the label plus the app's name.
+    pub fn detail_window_title(&self) -> String {
+        format!("{} — ide", self.detail_window_label())
     }
 
     /// Open or close the detail window so it matches the state: open while detached and shown
@@ -98,16 +93,17 @@ impl App {
             Some(g) => window::Position::Specific(Point::new(g.x, g.y)),
             None => window::Position::Default,
         };
-        let (id, open) = window::open(window::Settings {
+        let (id, open) = window::open(frame::frameless(window::Settings {
             size,
             position,
             min_size: Some(MIN_SIZE),
             // Its close button hides the area (it stays detached): handled by the app.
             exit_on_close_request: false,
             ..window::Settings::default()
-        });
+        }));
         crate::script::log(&format!("detail window: open {size:?} at {position:?}"));
         self.detail_window = Some(id);
+        self.detail_window_maximized = false;
         self.detail_window_size = size;
         self.detail_window_pos = None;
         open.map(|id| Message::DetailWindow(WinMsg::Opened(id)))
@@ -152,6 +148,7 @@ impl App {
                 let size = Task::batch([
                     window::size(id).map(move |s| Message::WindowResized(id, s)),
                     window::position(id).map(move |p| Message::DetailWindow(WinMsg::Placed(id, p))),
+                    frame::enable_snap_layout(id),
                 ]);
                 if self.ui.detail_pinned {
                     Task::batch([size, self.apply_pin()])
@@ -177,15 +174,33 @@ impl App {
         }
     }
 
+    /// The detail window was resized: remember its size, then ask whether it is maximised
+    /// (the title bar's maximise / restore glyph and the resize grips follow it).
+    pub(crate) fn on_detail_window_resized(&mut self, id: window::Id, size: Size) -> Task<Message> {
+        self.detail_window_size = size;
+        self.remember_detail_geometry();
+        frame::query_maximized(id)
+    }
+
     /// Make the detail window owned by the app window (pinned) or a top-level window again.
     fn apply_pin(&self) -> Task<Message> {
         let (Some(main), Some(detail)) = (self.window, self.detail_window) else {
             return Task::none();
         };
         let pinned = self.ui.detail_pinned;
-        window::run(main, hwnd_of).then(move |app| {
+        // Owned windows are a Windows thing: elsewhere the pin keeps the window on top.
+        if !cfg!(windows) {
+            let _ = main;
+            let level = if pinned {
+                window::Level::AlwaysOnTop
+            } else {
+                window::Level::Normal
+            };
+            return window::set_level(detail, level);
+        }
+        window::run(main, frame::hwnd_of).then(move |app| {
             window::run(detail, move |w| {
-                let child = hwnd_of(w)?;
+                let child = frame::hwnd_of(w)?;
                 ide_web::set_window_owner(child, if pinned { app } else { None });
                 ide_web::window_owner(child)
             })
@@ -229,11 +244,6 @@ impl App {
         }
     }
 
-    pub(crate) fn on_detail_window_resized(&mut self, size: Size) {
-        self.detail_window_size = size;
-        self.remember_detail_geometry();
-    }
-
     pub(crate) fn on_detail_window_moved(&mut self, p: Point) {
         self.detail_window_pos = Some(p);
         self.remember_detail_geometry();
@@ -248,8 +258,9 @@ impl App {
         }
     }
 
-    /// The detail window: Desk's region title bar actions (pin, 앱으로 합치기) above the detail
-    /// pane of the selected session.
+    /// The detail window: a title bar drawn by the app (Desk's region title bar: title, pin,
+    /// 앱으로 합치기, then the caption buttons) above the detail pane of the selected session,
+    /// with resize grips along the edges while not maximised.
     fn detail_window_view(&self) -> El<'_> {
         let pinned = self.ui.detail_pinned;
         let pin = button(
@@ -257,7 +268,7 @@ impl App {
                 if pinned { Icon::PinFilled } else { Icon::Pin },
                 15.0,
                 if pinned {
-                    style::RAIL_ACTIVE_ICON
+                    style::ACCENT_TEXT
                 } else {
                     style::DIM
                 },
@@ -285,37 +296,37 @@ impl App {
         .padding([4, 8])
         .style(style::icon)
         .on_press(Message::DetailWindow(WinMsg::Merge));
-        let bar = container(
-            row![
-                space().width(Fill),
-                tip(pin.boxed(), pin_tip),
-                tip(merge.boxed(), tr::detail_window_merge_tip()),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        )
-        .height(BAR_H)
-        .padding([0, 8])
-        .width(Fill)
-        .align_y(Alignment::Center)
-        .style(style::bg(style::RAIL));
+        let Some(id) = self.detail_window else {
+            return text("").boxed();
+        };
+        let maximized = self.detail_window_maximized;
+        let actions = row![
+            tip(pin.boxed(), pin_tip),
+            tip(merge.boxed(), tr::detail_window_merge_tip()),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
         let body: El<'_> = match self.selected_live() {
             Some(live) => self.pane(live, true),
             None => container(text(tr::no_session()).size(13).color(style::DIM))
                 .center(Fill)
                 .boxed(),
         };
-        container(column![
-            bar,
-            container(space())
-                .height(1)
-                .width(Fill)
-                .style(style::bg(style::BORDER)),
+        let content = container(column![
+            frame::title_bar(id, self.detail_window_label(), actions.boxed(), maximized),
             body,
         ])
         .width(Fill)
         .height(Fill)
-        .style(style::bg(style::PANEL))
-        .boxed()
+        .style(style::bg(style::PANEL));
+        // The item menu is placed in window coordinates: a layer over the whole window.
+        let window = iced::widget::stack![
+            content,
+            self.item_menu_layer(true),
+            self.modal_layer(true)
+        ]
+            .width(Fill)
+            .height(Fill);
+        frame::with_grips(id, window.boxed(), maximized)
     }
 }

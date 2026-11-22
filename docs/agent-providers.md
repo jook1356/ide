@@ -15,7 +15,7 @@ instructions, hooks); each provider translates that into its own CLI flags, env 
 |---|---|---|
 | **Provider** | An agent CLI implementation (`claude`, `codex`, `shell`, declarative ones). Code (`impl AgentProvider`) or a TOML file. | server: `ide_agents::Providers` (built-ins + `<data>/providers/*.toml`) |
 | **Account** | One login for one provider (credentials only). E.g. "Claude - work", "Codex - personal". | server: `accounts.json`; dir `accounts/<provider>/<slug>/` (the CLI's own config home for that login) |
-| **Configuration** | Provider-agnostic bundle: skills (folders), MCP servers (stdio: name, command, args, env), instructions (text). Replaces the old "profile". | server: `configurations.json` |
+| **Configuration** (UI: 프로필 / profile) | Provider-agnostic bundle: skills it owns (folders `<data>/configurations/<slug>/skills/<name>/` with a `SKILL.md`; `disabled_skills` lists the ones switched off; `ide-core/src/skill.rs`), MCP servers (stdio: name, command, args, env), instructions (text). Replaces the old "profile"; the UI calls it 프로필 again. Older files listed skill folders anywhere: they are copied in once on open. | server: `configurations.json` + `configurations/<slug>/` |
 | **Session** | provider + account (optional) + configuration + repo/worktree; or a *login* session (provider + account, no repo) | server: `sessions.json` (`kind`, `provider`, `account`, `configuration`) |
 
 Generated per-session files live in `<data>/sessions/<id>/agent/` (regenerated on every start,
@@ -230,9 +230,17 @@ capabilities `providers`, `accounts`, `configurations` replace `profiles`.
 - Accounts page (navigation rail -> 계정): **Accounts**: all accounts (provider icon, name, provider), Status (asks the CLI),
   Log in (opens a login session), rename (display name), delete (with its dir). Add = provider +
   name -> creates the account and opens its login command in a terminal tab (settings close).
-- Configurations page (navigation rail -> 구성): **Configurations**: list with session counts, add, delete, edit: name, instructions
-  (multiline), skill folders (one per row), MCP servers (name, command, args split on spaces,
-  env as `KEY=value` items), plus a per-provider support line (✓ native, ~ fallback, ✕ not passed).
+- Profiles page (navigation rail -> 프로필; `profiles_view.rs`), like Hermes Desk's agents page:
+  the profile list sits beside the rail where the work page has its session list (rows: name,
+  "세션 N개 · 스킬 M개"; "프로필 추가" opens a name dialog and shows the new profile; the page's
+  rail button or the list's collapse button hides / shows it, sharing `sessions_open`). The page
+  shows the picked profile: title row (name, 저장 안 됨, delete with an inline confirm, 되돌리기,
+  저장), session counts, then one card per section: 기본 (name), 지침 (multiline), 스킬 (own skills,
+  applied at once: `skills_ui.rs`), MCP 서버 (name, command, args split on spaces, env as
+  `KEY=value` items), 기본 레포; a per-provider support line (✓ native, ~ fallback, ✕ not passed)
+  at the bottom. Deviations from Desk: sections are cards on one page instead of Desk's tabs
+  (기본 / MCP / 스킬 / 학습), so unsaved edits stay in sight; no 학습 tab; "프로필 추가" has no
+  "<agent> 설정 복제" choice.
 - New session: provider (only usable ones), account (of that provider, or "default login"; hidden
   for providers without accounts), configuration. Sidebar filter = configuration; login sessions
   are always listed. Session rows show the provider icon (not yet the account name).

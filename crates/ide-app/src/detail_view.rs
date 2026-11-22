@@ -3,16 +3,17 @@
 //! on top).
 
 use iced::widget::{
-    Column, button, column, container, hover, popover, row, scrollable, space, stack,
+    Column, button, checkbox, column, container, hover, mouse_area, popover, row, scrollable,
+    space, stack,
     text, text_input,
 };
-use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _};
+use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _, mouse};
 use ide_views::icons;
 use ide_web::WebViewWidget;
 
 use crate::app::{App, Live, Message, URL_ID};
 use crate::detail::{
-    DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SIDE_W, SideTab, file_name, parent,
+    CloseSet, DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SideTab, file_name, parent,
 };
 use crate::history::{self, CommitFiles};
 use crate::i18n::{self, tr};
@@ -26,8 +27,7 @@ const I_BACK: &str = "←";
 const I_FORWARD: &str = "→";
 const I_RELOAD: &str = "⟳";
 const I_COLLAPSE: &str = "»";
-const I_EXPAND: &str = "«";
-const I_CLOSE: &str = "✕";
+pub(crate) const I_CLOSE: &str = "✕";
 const I_CHEVRON: &str = "▾";
 const I_GLOBE: &str = "◍";
 const I_DIFF: &str = "±";
@@ -59,13 +59,6 @@ fn hline<'a>() -> El<'a> {
         .boxed()
 }
 
-fn vline<'a>() -> El<'a> {
-    container(space())
-        .width(1)
-        .height(Fill)
-        .style(style::bg(style::BORDER))
-        .boxed()
-}
 
 /// Desk's "새 창으로 분리" (`IconWindowMaximize` at the right end of the detail header).
 fn popout_button<'a>() -> El<'a> {
@@ -83,7 +76,7 @@ fn popout_button<'a>() -> El<'a> {
 }
 
 /// The commit of a commit item: remembered when it was opened, else from History.
-fn commit_info<'a>(key: &ItemKey, live: &'a Live) -> Option<&'a ide_client::CommitInfo> {
+pub(crate) fn commit_info<'a>(key: &ItemKey, live: &'a Live) -> Option<&'a ide_client::CommitInfo> {
     let ItemKey::Commit { sha, .. } = key else {
         return None;
     };
@@ -94,8 +87,16 @@ fn commit_info<'a>(key: &ItemKey, live: &'a Live) -> Option<&'a ide_client::Comm
 }
 
 /// Title and folder of an item (header, open items list).
-fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
+pub(crate) fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
     match key {
+        ItemKey::Browser(id) => match live.browsers.iter().find(|b| b.id == *id) {
+            Some(b) => (b.label(), b.url_input.clone()),
+            None => (tr::browser_new_tab(), String::new()),
+        },
+        ItemKey::Terminal(id) => match live.uterm(id) {
+            Some(t) => (t.info.title.clone(), t.info.cwd.clone()),
+            None => (id.clone(), String::new()),
+        },
         // Desk's `tabLabel` / `docSubtitle`: `file @short` under `short subject`, or
         // `short subject` under `author · date`.
         ItemKey::Commit { sha, path, .. } => {
@@ -157,12 +158,15 @@ fn item_kind(key: &ItemKey) -> String {
         ItemKey::Diff { staged: false, .. } => tr::kind_changed(),
         ItemKey::Compare(_) => tr::kind_compare(),
         ItemKey::Commit { .. } => tr::kind_commit(),
+        ItemKey::Terminal(_) => tr::group_terminal(),
+        ItemKey::Browser(_) => tr::group_browser(),
     }
 }
 
-fn item_icon<'a>(key: &ItemKey) -> El<'a> {
+pub(crate) fn item_icon<'a>(key: &ItemKey) -> El<'a> {
     match key {
-        ItemKey::Web => text(I_GLOBE).size(14).color(style::DIM).boxed(),
+        ItemKey::Web | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
+        ItemKey::Terminal(_) => text(">_").size(11).font(style::MONO).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
         ItemKey::Diff { path, .. } | ItemKey::Compare(path) => row![
             icons::file_icon(file_name(path)),
@@ -185,21 +189,9 @@ fn item_icon<'a>(key: &ItemKey) -> El<'a> {
 
 impl App {
     pub fn detail_area(&self) -> El<'_> {
+        // Hidden or in its own window: no room taken (the session header's toggle shows it).
         if !self.detail_in_app() {
-            // The detail toggle (Desk's `DetailToggle`): shows the hidden area; while the area
-            // is in its own window it hides / shows that window.
-            let (glyph, label) = match (self.ui.detail_detached, self.ui.detail_collapsed) {
-                (false, _) => (I_EXPAND, tr::show_detail()),
-                (true, true) => (I_EXPAND, tr::detail_window_show()),
-                (true, false) => (I_COLLAPSE, tr::detail_window_hide()),
-            };
-            return container(
-                column![icon_button(glyph, Some(Message::ToggleDetail), label)].padding([6, 2]),
-            )
-            .width(30)
-            .height(Fill)
-            .style(style::bg(style::HEADER))
-            .boxed();
+            return space().width(0).boxed();
         }
         let portion = 1000u16.saturating_sub((self.ui.split_ratio * 1000.0).round() as u16);
         let body: El<'_> = match self.selected_live() {
@@ -230,9 +222,34 @@ impl App {
     /// The side panel right of the detail pane (fixed width, outside the split).
     pub fn side_area(&self) -> El<'_> {
         match self.selected_live() {
-            Some(live) if !self.ui.detail_collapsed => row![vline(), self.side_panel(live)].boxed(),
+            Some(live) if !self.ui.detail_collapsed => {
+                row![self.side_handle(), self.side_panel(live)].boxed()
+            }
             _ => space().width(0).boxed(),
         }
+    }
+
+    /// The side panel's left edge: a 1 px border that resizes the panel when dragged (Desk's
+    /// `PanelResizer` beside the Changes panel).
+    fn side_handle(&self) -> El<'_> {
+        let color = if self.side_dragging {
+            style::ACCENT
+        } else {
+            style::BORDER
+        };
+        mouse_area(
+            container(
+                container(space())
+                    .width(1)
+                    .height(Fill)
+                    .style(style::bg(color)),
+            )
+            .center_x(crate::app::DIVIDER_W)
+            .height(Fill),
+        )
+        .on_press(Message::SideResizePressed)
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .boxed()
     }
 
     // ------------------------------------------------------------------ pane
@@ -244,6 +261,8 @@ impl App {
         let d = &live.detail;
         let sid = live.info.id.clone();
         let identity: El<'a> = match &d.active {
+            ItemKey::Terminal(id) => self.uterm_identity(live, id),
+            ItemKey::Browser(id) => self.browser_identity(live, *id),
             ItemKey::Web => row![
                 icon_button(
                     I_BACK,
@@ -264,6 +283,7 @@ impl App {
                     .padding([4, 8])
                     .style(style::input)
                     .width(Fill),
+                self.bookmark_star(&live.url_input, &live.web_title),
             ]
             .spacing(4)
             .align_y(Alignment::Center)
@@ -306,13 +326,16 @@ impl App {
                 .boxed()
             }
         };
-        let mut header_row = row![
-            container(identity).width(Fill),
-            vline_short(),
-            self.open_items_button(live),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
+        // In the detail window's tabs mode 열린 항목 is the tab list beside the body instead.
+        let rail = self.rail_shown(in_window);
+        let mut header_row = row![container(identity).width(Fill)]
+            .spacing(6)
+            .align_y(Alignment::Center);
+        if !rail {
+            header_row = header_row
+                .push(vline_short())
+                .push(self.open_items_button(live, in_window));
+        }
         if !in_window {
             header_row = header_row
                 .push(icon_button(
@@ -329,7 +352,12 @@ impl App {
         .width(Fill)
         .style(style::bg(style::HEADER));
 
-        let body: El<'a> = match d.active_item() {
+        let body: El<'a> = if let ItemKey::Browser(id) = &d.active {
+            self.browser_body(live, *id)
+        } else if let ItemKey::Terminal(id) = &d.active {
+            self.uterm_body(live, id)
+        } else {
+            match d.active_item() {
             Some(Item::Web) | None => match &live.web {
                 // Under a modal the page stays visible as a frozen, dimmed snapshot of its
                 // last frame (no input reaches it, CEF stops rendering); the backdrop and the
@@ -359,6 +387,7 @@ impl App {
                     (None, None) => message_body(tr::tree_loading(), false),
                 }
             }
+            }
         };
         let mut layers = vec![body];
         if let Some((t, _)) = &d.toast {
@@ -376,11 +405,13 @@ impl App {
                 .boxed(),
             );
         }
-        container(column![
-            header,
-            hline(),
-            stack(layers).width(Fill).height(Fill)
-        ])
+        let body = stack(layers).width(Fill).height(Fill).boxed();
+        let body = if rail {
+            self.with_rail(live, body)
+        } else {
+            body
+        };
+        container(column![header, hline(), body])
         .width(Fill)
         .height(Fill)
         .boxed()
@@ -417,8 +448,9 @@ impl App {
         col.push(editor).boxed()
     }
 
-    /// "Open items": every item of the session, grouped like Hermes Desk's list.
-    fn open_items_button<'a>(&'a self, live: &'a Live) -> El<'a> {
+    /// "Open items": every item of the session, grouped like Hermes Desk's list. In the detail
+    /// window the list ends with Desk's "세로 탭으로 보기" (back to the tab list).
+    fn open_items_button<'a>(&'a self, live: &'a Live, in_window: bool) -> El<'a> {
         let d = &live.detail;
         let total = d.items.len();
         let trigger = button(
@@ -446,6 +478,9 @@ impl App {
         let popup = self.open_items.then(|| {
             let sid = live.info.id.clone();
             let mut list = Column::new().spacing(2);
+            for e in self.shared_sections(live, true) {
+                list = list.push(e);
+            }
             type Group = (String, fn(&ItemKey) -> bool);
             let groups: [Group; 4] = [
                 (tr::group_browser(), |k| matches!(k, ItemKey::Web)),
@@ -456,7 +491,21 @@ impl App {
                 (tr::side_explore(), |k| matches!(k, ItemKey::File(_))),
             ];
             for (label, is) in groups {
-                let rows: Vec<&(ItemKey, Item)> = d.items.iter().filter(|(k, _)| is(k)).collect();
+                let mut rows: Vec<(ItemKey, bool)> = d
+                    .items
+                    .iter()
+                    .filter(|(k, _)| is(k) && !self.is_common(&live.info.id, k))
+                    .map(|(k, item)| (k.clone(), matches!(item, Item::File(f) if f.dirty())))
+                    .collect();
+                // The session's browser tabs follow its web page.
+                if is(&ItemKey::Web) {
+                    rows.extend(
+                        live.browsers
+                            .iter()
+                            .map(|b| (ItemKey::Browser(b.id), false))
+                            .filter(|(k, _)| !self.is_common(&live.info.id, k)),
+                    );
+                }
                 if rows.is_empty() {
                     continue;
                 }
@@ -469,9 +518,9 @@ impl App {
                     .padding([4, 8])
                     .boxed(),
                 );
-                for (k, item) in rows {
+                for (k, dirty) in &rows {
+                    let (k, dirty) = (k, *dirty);
                     let (title, folder) = item_names(k, live);
-                    let dirty = matches!(item, Item::File(f) if f.dirty());
                     let mut names = row![
                         text(title.clone())
                             .size(12)
@@ -511,18 +560,111 @@ impl App {
                             tr::close(),
                         )
                     };
-                    list = list.push(
+                    list = list.push(self.item_row(
+                        live,
                         row![main, close]
                             .spacing(2)
                             .align_y(Alignment::Center)
                             .boxed(),
-                    );
+                        k,
+                    ));
                 }
             }
-            container(scrollable(list).height(Length::Shrink))
-                .padding(6)
-                .width(360)
-                .style(style::modal_card)
+            // The session's terminals (`uterm.rs`).
+            let shown_terms: Vec<&crate::uterm::UTermView> = live
+                .uterms
+                .iter()
+                .filter(|t| !self.is_common(&live.info.id, &ItemKey::Terminal(t.info.id.clone())))
+                .collect();
+            if !shown_terms.is_empty() {
+                list = list.push(
+                    row![
+                        text(tr::group_terminal()).size(11).font(style::BOLD).color(style::DIM),
+                        text(shown_terms.len().to_string()).size(11).color(style::FAINT),
+                    ]
+                    .spacing(6)
+                    .padding([4, 8])
+                    .boxed(),
+                );
+                for t in shown_terms {
+                    let k = ItemKey::Terminal(t.info.id.clone());
+                    let running = t.info.state == ide_client::SessionState::Running;
+                    let main = button(
+                        row![
+                            crate::uterm::dot(t.info.state),
+                            text(t.info.title.clone())
+                                .size(12)
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::End),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([4, 8])
+                    .width(Fill)
+                    .style(style::row(k == d.active))
+                    .on_press(Message::Detail(sid.clone(), DetailMsg::Activate(k.clone())));
+                    let close = icon_button(
+                        I_CLOSE,
+                        Some(Message::Detail(sid.clone(), DetailMsg::Close(k.clone()))),
+                        if running {
+                            tr::uterm_stop_remove()
+                        } else {
+                            tr::uterm_remove()
+                        },
+                    );
+                    let r = row![main, close].spacing(2).align_y(Alignment::Center);
+                    list = list.push(self.item_row(live, r.boxed(), &k));
+                }
+            }
+            list = list.push(container(self.new_item_button(live, true)).padding([4, 0]).boxed());
+            if total <= 1 {
+                list = list.push(
+                    container(text(tr::open_items_none()).size(12).color(style::DIM))
+                        .padding([4, 8])
+                        .boxed(),
+                );
+            }
+            // Desk's foot: 탭 모두 닫기 · 작업 중 아닌 항목 닫기, and in the detail window the
+            // way back to the tab list.
+            let link = |label: String, tip_text: String, set: CloseSet, on: bool| {
+                let b = button(text(label).size(11))
+                    .padding([2, 4])
+                    .style(style::icon)
+                    .on_press_maybe(
+                        on.then(|| Message::Detail(sid.clone(), DetailMsg::CloseSome(set))),
+                    );
+                tip(b.boxed(), tip_text)
+            };
+            let mut foot = row![
+                link(tr::close_all(), tr::close_all_tip(), CloseSet::All, total > 1),
+                link(tr::close_idle(), tr::close_idle_tip(), CloseSet::Idle, total > 1),
+                space().width(Fill),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+            if in_window {
+                let to_tabs = button(
+                    container(crate::icons::icon(Icon::SidebarExpand, 14.0, style::DIM))
+                        .center(24),
+                )
+                .width(24)
+                .height(24)
+                .padding(0)
+                .style(style::icon)
+                .on_press(Message::Rail(crate::detail_rail::RailMsg::SetMode(
+                    crate::ui_state::RailMode::Tabs,
+                )));
+                foot = foot.push(tip(to_tabs.boxed(), tr::rail_to_tabs()));
+            }
+            container(column![
+                scrollable(list).height(Length::Shrink),
+                container(space()).height(1).width(Fill).style(style::bg(style::BORDER)),
+                container(foot).padding([4, 6]),
+            ])
+            .padding(6)
+            .width(360)
+            .style(style::modal_card)
         });
         popover(trigger, popup)
             .position(iced::widget::popover::Position::Bottom)
@@ -628,7 +770,7 @@ impl App {
         };
         // Commit / sync / PR footer under Changes and History (`footer_view.rs`).
         container(column![tabs, hline(), container(content).height(Fill), self.footer_section(live)])
-            .width(SIDE_W)
+            .width(self.side_w())
             .height(Fill)
             .style(style::bg(style::SIDEBAR))
             .boxed()
@@ -671,6 +813,41 @@ impl App {
 
     /// Hermes Desk's Explore 파일 찾기 input: a search icon on the left, the text search's
     /// case / word / regex toggles on the right (where Desk has its settings button).
+    /// Desk's 파일 찾기 설정 (gear in the search box): gitignore 파일 숨기기.
+    fn explore_settings_button(&self) -> El<'_> {
+        let open = self.explore_settings;
+        let trigger = tip(
+            button(
+                container(crate::icons::icon(Icon::Settings, 13.0, style::DIM)).center(18),
+            )
+            .width(22)
+            .height(20)
+            .padding(0)
+            .style(style::choice(open))
+            .on_press(Message::ExploreSettings(!open))
+            .boxed(),
+            tr::explore_settings(),
+        );
+        let popup = open.then(|| {
+            container(tip(
+                checkbox(self.ui.explore_hide_ignored)
+                    .label(tr::explore_hide_ignored())
+                    .on_toggle(Message::ExploreHideIgnored)
+                    .size(14)
+                    .text_size(12)
+                    .boxed(),
+                tr::explore_hide_ignored_tip(),
+            ))
+            .padding(10)
+            .style(style::modal_card)
+        });
+        popover(trigger, popup)
+            .position(iced::widget::popover::Position::Bottom)
+            .gap(4)
+            .on_close(Message::ExploreSettings(false))
+            .boxed()
+    }
+
     fn explore_search_input<'a>(&'a self, live: &'a Live) -> El<'a> {
         let s = &live.detail.search;
         let sid = live.info.id.clone();
@@ -701,7 +878,7 @@ impl App {
             .size(12)
             .padding(Padding {
                 top: 5.0,
-                right: 76.0,
+                right: 100.0,
                 bottom: 5.0,
                 left: 28.0,
             })
@@ -733,6 +910,7 @@ impl App {
                     tr::search_word()
                 ),
                 toggle(".*", s.regex, m(DetailMsg::SearchRegex), tr::search_regex()),
+                self.explore_settings_button(),
             ]
             .spacing(1)
             .align_y(Alignment::Center),
@@ -759,11 +937,28 @@ impl App {
         let mut list = Column::new().spacing(0).padding([0, 0]);
         for f in &s.files {
             let label = f.path.trim_end_matches('/').to_owned();
+            // A folder shows in the tree (Desk); a file opens.
+            let open = if f.dir {
+                Message::Detail(
+                    sid.clone(),
+                    DetailMsg::Acts(crate::changes_actions::ActMsg::Reveal(label.clone())),
+                )
+            } else {
+                Message::Detail(
+                    sid.clone(),
+                    DetailMsg::OpenAt(crate::detail::qualify(&f.repo, &f.path), 0, 0),
+                )
+            };
+            let glyph: El<'a> = if f.dir {
+                icons::folder_icon(false, style::DIM)
+            } else {
+                icons::file_icon(file_name(&label))
+            };
             list = list.push(
                 tip(
                     button(
                         row![
-                            icons::file_icon(file_name(&label)),
+                            glyph,
                             text(label.clone())
                                 .size(12)
                                 .wrapping(text::Wrapping::None)
@@ -781,13 +976,22 @@ impl App {
                     })
                     .width(Fill)
                     .style(style::row(false))
-                    .on_press(Message::Detail(
-                        sid.clone(),
-                        DetailMsg::OpenAt(crate::detail::qualify(&f.repo, &f.path), 0, 0),
-                    ))
+                    .on_press(open)
                     .boxed(),
                     label,
                 ),
+            );
+        }
+        let more = s.files_total as usize - s.files.len().min(s.files_total as usize);
+        if more > 0 {
+            list = list.push(
+                container(
+                    text(tr::explore_more(i18n::count(more)))
+                        .size(11)
+                        .color(style::DIM),
+                )
+                .padding([4, 24])
+                .boxed(),
             );
         }
         if let Some(e) = &s.files_error {
@@ -1062,13 +1266,9 @@ impl App {
 
 /// Desk's `.commit-files-list` band under an unfolded commit (`rgb(0 0 0 / 12%)`).
 const COMMIT_FILES_BG: Color = ide_views::theme::over(Color::BLACK, 0.12, style::PANEL);
-/// Desk's `.unpushed-mark`: violet-2 on `rgb(132 94 247 / 25%)`.
-const UNPUSHED_FG: Color = Color::from_rgb(0xd0 as f32 / 255.0, 0xbf as f32 / 255.0, 1.0);
-const UNPUSHED_BG: Color = ide_views::theme::over(
-    Color::from_rgb(132.0 / 255.0, 94.0 / 255.0, 247.0 / 255.0),
-    0.25,
-    style::PANEL,
-);
+/// Desk's `.unpushed-mark`: accent text on a 25 % accent circle.
+const UNPUSHED_FG: Color = style::ACCENT_TEXT;
+const UNPUSHED_BG: Color = ide_views::theme::over(style::ACCENT, 0.25, style::PANEL);
 
 /// A 16 px circle (avatar, unpushed mark).
 fn circle(c: Color) -> impl Fn(&iced::Theme) -> container::Style {

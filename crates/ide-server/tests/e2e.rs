@@ -77,7 +77,7 @@ where
     assert_eq!(e.id, "invalid-name");
     let mut edit = work.clone();
     edit.instructions = "Be brief.".into();
-    edit.skills = vec!["C:/skills/lint".into(), "  ".into()];
+    edit.skills = Vec::new();
     edit.mcp_servers = vec![ide_client::McpServerInfo {
         name: "bad name".into(),
         command: "node".into(),
@@ -90,7 +90,26 @@ where
     );
     edit.mcp_servers[0].name = "docs".into();
     let saved = c1.update_configuration(edit).await.unwrap();
-    assert_eq!(saved.skills, ["C:/skills/lint"], "blank skill rows dropped");
+    assert!(saved.skills.is_empty());
+    // Skills belong to the configuration: create, switch off, edit, delete.
+    let s = c1.skill_create(&saved.slug, "Lint rules", "Lints.").await.unwrap();
+    assert_eq!(s.skills.len(), 1);
+    assert_eq!((s.skills[0].name.as_str(), s.skills[0].enabled), ("lint-rules", true));
+    let s = c1.skill_enable(&saved.slug, "lint-rules", false).await.unwrap();
+    assert!(!s.skills[0].enabled);
+    let text = c1.skill_read(&saved.slug, "lint-rules").await.unwrap();
+    assert!(text.contains("description: Lints."));
+    let s = c1
+        .skill_write(&saved.slug, "lint-rules", &text.replace("Lints.", "Checks."))
+        .await
+        .unwrap();
+    assert_eq!(s.skills[0].description, "Checks.");
+    let e = c1.skill_read(&saved.slug, "../x").await.unwrap_err();
+    assert_eq!(e.id, "skill-not-found");
+    let e = c1.skill_import(&saved.slug, "C:/no/such").await.unwrap_err();
+    assert_eq!(e.id, "skill-invalid");
+    let s = c1.skill_delete(&saved.slug, "lint-rules").await.unwrap();
+    assert!(s.skills.is_empty());
     assert_eq!(saved.instructions, "Be brief.");
     let acct = c1.create_account("claude", "Work").await.unwrap();
     assert_eq!(

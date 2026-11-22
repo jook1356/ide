@@ -21,17 +21,17 @@
 mod client;
 pub mod transport;
 
-pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, SearchStream};
+pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, SearchStream, UTermOpen};
 pub use ide_proto::{
-    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps,
+    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
     ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
     SessionRepo, Support,
 };
 pub use ide_proto::{
     AheadBehind, Attached, BrowseEntry, BrowseListing, ByteRange, ChangeKind, CommitInfo,
     DefResult, DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent,
-    FileMatch, FsEntry, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, NewSession, Notify,
-    ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding,
+    FileMatch, FsEntry, PathMatch, PathMatches, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, NewSession, Notify,
+    ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding, ScriptGroup, ScriptItem, UserTerm, PortInfo, ShellInfo,
     TextSearch, UserInfo, Welcome,
 };
 // --- local git actions (Changes / History footer)

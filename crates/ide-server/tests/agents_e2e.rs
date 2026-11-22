@@ -69,7 +69,13 @@ async fn legacy_profiles_are_migrated_on_start() {
     .unwrap();
     std::fs::write(
         data.join("sessions.json"),
-        r#"{"sessions":[{"id":"abc","title":"old","profile":"work","repo_path":"R","worktree_path":"W","branch":"ide/abc","agent":"codex","created_at":1,"last_active":2}]}"#,
+        // Absolute paths in the temp dir: a relative worktree once made the launch write the
+        // session guidance (AGENTS.md) into the test's working directory (this crate).
+        format!(
+            r#"{{"sessions":[{{"id":"abc","title":"old","profile":"work","repo_path":{:?},"worktree_path":{:?},"branch":"ide/abc","agent":"codex","created_at":1,"last_active":2}}]}}"#,
+            dir.join("R").display().to_string(),
+            dir.join("W").display().to_string(),
+        ),
     )
     .unwrap();
     let server = server(&data);
@@ -139,7 +145,7 @@ async fn claude_and_codex_specs_from_a_configuration() {
     let cfg = c.create_configuration("Reviewer").await.unwrap();
     let cfg = c
         .update_configuration(ConfigurationInfo {
-            skills: vec![skill.display().to_string()],
+            skills: Vec::new(),
             mcp_servers: vec![McpServerInfo {
                 name: "docs".into(),
                 command: "node".into(),
@@ -149,6 +155,10 @@ async fn claude_and_codex_specs_from_a_configuration() {
             instructions: "Review only.".into(),
             ..cfg
         })
+        .await
+        .unwrap();
+    let cfg = c
+        .skill_import(&cfg.slug, &skill.display().to_string())
         .await
         .unwrap();
 

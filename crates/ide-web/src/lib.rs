@@ -14,9 +14,11 @@
 //! }
 //! ```
 //!
-//! Frames: CEF accelerated OSR (D3D11 shared texture) is imported with cef-rs's
+//! Frames: CEF accelerated OSR (a D3D11 shared texture on Windows, an IOSurface on macOS, a
+//! dmabuf on Linux) is imported with cef-rs's
 //! `SharedTextureHandle::import_texture` into iced's own wgpu device (captured from the shader
-//! pipeline). iced must run on DX12 for that ([`backend`] or `WGPU_BACKEND=dx12`); if the import
+//! pipeline). iced must run on the matching API for that ([`backend`]: DX12 / Metal / Vulkan); if
+//! the import
 //! fails three times in a row the view re-creates its browser with software frames (`on_paint`
 //! + `queue.write_texture`) and emits [`WebEvent::RenderModeChanged`].
 //!
@@ -26,6 +28,7 @@
 //! delivers the new one. [`WebViewWidget::dimmed`] freezes the view as a dimmed snapshot (for
 //! modal dialogs).
 
+mod caption;
 mod events;
 mod gpu;
 mod input;
@@ -35,6 +38,7 @@ pub mod testing;
 mod view;
 mod widget;
 
+pub use caption::enable_snap_layout;
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use owner::{set_window_owner, window_owner};
 pub use runtime::{RuntimeSettings, WebRuntime, initialize, maybe_run_subprocess};
@@ -44,7 +48,16 @@ pub use widget::{DEFAULT_DIM, WebViewWidget, web_view};
 /// CEF log severity, for [`RuntimeSettings::log_severity`].
 pub use cef::LogSeverity;
 
-/// The iced backend the GPU path needs (D3D11 shared textures are opened on a D3D12 device).
+/// The iced backend CEF's shared textures can be imported into on this OS: D3D11 textures on
+/// a D3D12 device (Windows), IOSurfaces on Metal (macOS), dmabufs on Vulkan (Linux). When the
+/// import fails anyway, a view falls back to software frames by itself.
 pub fn backend() -> iced::Backend {
-    iced::Backend::Hardware(iced::backend::Api::DirectX12)
+    use iced::backend::Api;
+    iced::Backend::Hardware(if cfg!(windows) {
+        Api::DirectX12
+    } else if cfg!(target_os = "macos") {
+        Api::Metal
+    } else {
+        Api::Vulkan
+    })
 }

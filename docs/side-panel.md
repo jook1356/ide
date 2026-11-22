@@ -35,10 +35,11 @@ tab (`ExploreTree.tsx`).
 
 ## Deviations from Desk
 
-- File names are matched by the server's fuzzy matcher (`search.files`, best first), not Desk's
-  case-insensitive substring filter, and only files are listed (Desk also lists matching folders).
-- At most 200 file-name matches; Desk shows 500 and a "N개 더 있음" line.
-- No gitignore setting: `search.files` and the text search skip ignored files.
+- 파일 찾기 is Desk's: `search.paths` (protocol 7) matches the path case-insensitively as a
+  substring, lists folders too (a folder row reveals it in the tree), sorts by path, shows 500 rows
+  and "N개 더 있어요"; the gear (파일 찾기 설정) has Desk's gitignore 파일 숨기기 (`ui.json`
+  `explore_hide_ignored`, on by default; ignored folders are listed once, not entered). The text
+  search still skips ignored files (Desk's setting does not touch it either).
 - Explore also holds the text search (the former Search tab) under a section label.
 - Matched characters are not highlighted in file-name rows (Desk does not either); text matches are
   highlighted as before.
@@ -83,16 +84,21 @@ Option<&GitStatus>`, `App::refresh_repo(sid) -> Task<Message>`.
 
 ### Deviations
 
-- Context menus open under the right-clicked row, not at the pointer (iced popovers anchor to a
-  widget).
+- Context menus open at the pointer: the row reports where it was right-clicked
+  (`ide_views::Interact::absolute`) and the menu is drawn over the app window.
 - The list keeps the ide's staged / changes / untracked groups (Desk: one flat list); a path in
   two groups has one checkbox state, and the tab badge / `N changed files` count paths.
 - The checkbox is drawn (iced's checkbox has no indeterminate state).
 - Desk's notifications are the detail pane's toast; a failed 새 브랜치 shows its error in the
   dialog (Desk: a notification, dialog kept open).
-- The 베이스 브랜치 picker is a plain list (local, then remote refs) without Desk's group labels
-  and type-to-search.
-- No `Filter` input above the Changes rows (not part of this port; the list is grouped).
+- The 베이스 브랜치 picker is Desk's searchable select: the chosen branch, opening a search box over
+  the 로컬 / 원격 lists (브랜치 없음 when nothing matches).
+- Desk's `Filter` input sits above the Changes rows (path substring, any case); groups without a
+  match hide, and counts / checkboxes / select-all keep counting every changed file.
+- The 스크립트 section (`scripts_view.rs`, server `scripts.list` = port of Desk's `scripts.ts`)
+  sits under the Changes list: files grouped and foldable, search, 다시 찾기; ▶ runs a script in a
+  user terminal in its file's folder, a running one shows 실행 중 · 터미널 보기. No resize handle,
+  no automatic re-scan on file changes (다시 찾기 / reopening the section re-reads it).
 - Popover heights are capped from an estimate (`capped`), as iced has no max-height container.
 
 ### Omissions

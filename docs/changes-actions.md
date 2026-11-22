@@ -336,8 +336,10 @@ Deviations / omissions:
 - **PR pages open in the in-app web tab**, not the OS browser.
 - **Job notice texts** are formatted when the event happens (they do not re-translate on a
   language switch).
-- **Not in the footer**: Desk's PR card 'Update branch' (`pr_update_branch`) and the 커밋 보유
-  badge (`pr_unmerged`) belong to the session list / PR card, which the ide does not have yet.
+- **브랜치 업데이트** (`pr_update_branch`) is a "…" menu entry while the open PR is behind its
+  base (Desk: a button on the Merge page). The 커밋 보유 / branch state badge is on the session
+  list (`branch_badge.rs`: `git.status`, `git.sync_status`, `pr.status`, `pr.unmerged` per repo,
+  aggregated like Desk's `aggregateBranches`, every 30 s).
 - **Closing the old PR on 새 브랜치로 이어가기** uses `pr_close` without Desk's comment.
 
 Script (`script_footer.rs`, spliced after the base-branch pass; run with `IDE_GH` = the fake `gh`

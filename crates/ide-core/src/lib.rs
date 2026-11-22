@@ -46,6 +46,7 @@ pub mod prompts;
 pub mod registry;
 pub mod repo;
 pub mod session;
+pub mod skill;
 pub mod slug;
 pub mod workspace;
 pub mod worktree;
@@ -75,6 +76,7 @@ pub use session::{
     Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore, SessionTarget,
     SessionWorktree,
 };
+pub use skill::{SKILL_FILE, SkillEntry};
 pub use slug::{slugify, validate_slug};
 // --- pull requests and agent prompts
 pub use prompts::{commit_prompt, pr_file_path, pr_prompt};

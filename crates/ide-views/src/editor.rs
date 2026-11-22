@@ -1,6 +1,7 @@
 //! The code editor widget behind [`crate::CodeView`]: iced's text editor core (cosmic-text
 //! buffer, `text::editor::State` for keys / mouse / IME / clipboard) drawn with a line-number
-//! gutter, a current-line highlight and find-match highlights, plus Ctrl/Cmd+click reporting.
+//! gutter, a current-line highlight and find-match highlights, plus Ctrl/Cmd+click reporting,
+//! a vertical scrollbar and auto-scroll while a selection is dragged past the top or bottom.
 //!
 //! It is a fork of `iced::widget::text_editor` (same `Action`s and `Binding`s) specialised to
 //! `iced::Renderer`, because the stock widget exposes neither the scroll position (needed for
@@ -18,6 +19,7 @@ use iced::advanced::text::{self, Editor as _, LineHeight, Position, Renderer as 
 use iced::advanced::widget::{self, Operation, Tree, Widget, tree};
 use iced::advanced::{Layout, Shell, clipboard};
 use iced::keyboard::{self, Modifiers};
+use iced::time::{Duration, Instant};
 use iced::{Code, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, alignment, window};
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -26,6 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const PAD_LEFT: f32 = 8.0;
 const PAD_TOP: f32 = 4.0;
 const GUTTER_PAD: f32 = 12.0;
+/// The scrollbar along the right edge (drawn over the text, like VS Code's).
+const SCROLLBAR_W: f32 = 10.0;
+const THUMB_MIN: f32 = 24.0;
+/// While a selection is dragged past the text area: one scroll step this often, of up to
+/// [`AUTOSCROLL_MAX`] lines (more the farther the pointer is).
+const AUTOSCROLL_EVERY: Duration = Duration::from_millis(40);
+const AUTOSCROLL_MAX: i32 = 8;
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -312,6 +321,33 @@ struct State {
     settings: Option<String>,
     generation: u64,
     modifiers: Modifiers,
+    /// The left button went down in the text: a selection may be dragged.
+    selecting: bool,
+    /// Last pointer position (window coordinates), also outside the widget.
+    pointer: Option<Point>,
+    /// Next auto-scroll step while selecting past the edge.
+    next_autoscroll: Option<Instant>,
+    /// The scrollbar thumb is dragged, grabbed this far below its top.
+    thumb_grab: Option<f32>,
+    /// A scroll the scrollbar asked for that may not be applied yet: (top line when asked,
+    /// requested top line). Pointer moves in one batch then do not add up.
+    scroll_ask: Option<(usize, usize)>,
+}
+
+/// The scrollbar's geometry for the current scroll position.
+struct Scrollbar {
+    track: Rectangle,
+    thumb: Rectangle,
+    max_top: usize,
+}
+
+impl Scrollbar {
+    /// The top line that puts the thumb's top at `y`.
+    fn top_at(&self, y: f32) -> usize {
+        let room = (self.track.height - self.thumb.height).max(1.0);
+        let f = ((y - self.track.y) / room).clamp(0.0, 1.0);
+        (f * self.max_top as f32).round() as usize
+    }
 }
 
 impl<'a, M: Clone> CodeEditor<'a, M> {
@@ -384,6 +420,55 @@ impl<'a, M: Clone> CodeEditor<'a, M> {
             height: (bounds.height - PAD_TOP).max(0.0),
         }
     }
+
+    /// The scrollbar, when the text does not fit (buffer lines; with wrapping an estimate).
+    fn scrollbar(&self, bounds: Rectangle) -> Option<Scrollbar> {
+        let total = self.content.line_count();
+        let visible = self.content.visible_lines().max(1);
+        if total <= visible || bounds.height <= 0.0 {
+            return None;
+        }
+        let max_top = total - visible;
+        let track = Rectangle {
+            x: bounds.x + bounds.width - SCROLLBAR_W,
+            y: bounds.y,
+            width: SCROLLBAR_W,
+            height: bounds.height,
+        };
+        let h = (track.height * visible as f32 / total as f32)
+            .max(THUMB_MIN)
+            .min(track.height);
+        let top = self.content.top_line().min(max_top);
+        let y = track.y + (track.height - h) * top as f32 / max_top as f32;
+        Some(Scrollbar {
+            track,
+            thumb: Rectangle {
+                y,
+                height: h,
+                ..track
+            },
+            max_top,
+        })
+    }
+
+    /// Scrolls so that `target` is the top line (relative to what is already asked for).
+    fn scroll_to(&self, state: &mut State, target: usize, shell: &mut Shell<'_, M>) {
+        let Some(on_action) = self.on_action.as_ref() else {
+            return;
+        };
+        let actual = self.content.top_line();
+        let base = match state.scroll_ask {
+            Some((seen, asked)) if seen == actual => asked,
+            _ => actual,
+        };
+        let delta = target as i64 - base as i64;
+        if delta != 0 {
+            shell.publish(on_action(Action::Scroll {
+                lines: delta as i32,
+            }));
+            state.scroll_ask = Some((actual, target));
+        }
+    }
 }
 
 impl<M> widget::Meta for CodeEditor<'_, M> {}
@@ -400,6 +485,11 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
             settings: self.language.clone(),
             generation: self.content.generation,
             modifiers: Modifiers::empty(),
+            selecting: false,
+            pointer: None,
+            next_autoscroll: None,
+            thumb_grab: None,
+            scroll_ask: None,
         })
     }
 
@@ -457,6 +547,106 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         }
         let bounds = layout.bounds();
         let text_bounds = self.text_bounds(bounds);
+        if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
+            state.pointer = Some(*position);
+        }
+
+        // Scrollbar: drag the thumb, or press the track to jump there (then drag on).
+        let bar = self.scrollbar(bounds);
+        if state.thumb_grab.is_some() {
+            match event {
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    if let (Some(b), Some(grab)) = (&bar, state.thumb_grab) {
+                        self.scroll_to(state, b.top_at(position.y - grab), shell);
+                    }
+                    shell.capture_event();
+                    return;
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    state.thumb_grab = None;
+                    state.scroll_ask = None;
+                    shell.request_redraw();
+                    shell.capture_event();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && let Some(b) = &bar
+            && let Some(p) = cursor.position_over(b.track)
+        {
+            let grab = if b.thumb.contains(p) {
+                p.y - b.thumb.y
+            } else {
+                let grab = b.thumb.height / 2.0;
+                self.scroll_to(state, b.top_at(p.y - grab), shell);
+                grab
+            };
+            state.thumb_grab = Some(grab);
+            shell.request_redraw();
+            shell.capture_event();
+            return;
+        }
+
+        // Selecting: past the top / bottom of the text the view scrolls, and the selection
+        // follows to the edge line, while the button is held.
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.selecting = cursor.is_over(text_bounds);
+                state.next_autoscroll = None;
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.selecting = false;
+                state.next_autoscroll = None;
+            }
+            _ => {}
+        }
+        if state.selecting
+            && let Some(p) = state.pointer
+        {
+            let bottom = text_bounds.y + text_bounds.height;
+            let past = if p.y < text_bounds.y {
+                p.y - text_bounds.y
+            } else if p.y > bottom {
+                p.y - bottom
+            } else {
+                0.0
+            };
+            if past != 0.0 {
+                match event {
+                    Event::Window(window::Event::RedrawRequested(now)) => {
+                        if state.next_autoscroll.is_none_or(|t| *now >= t) {
+                            let step = (1 + (past.abs() / self.line_height) as i32)
+                                .min(AUTOSCROLL_MAX);
+                            let edge = if past < 0.0 {
+                                0.0
+                            } else {
+                                (text_bounds.height - 1.0).max(0.0)
+                            };
+                            let x = (p.x - text_bounds.x).clamp(0.0, text_bounds.width);
+                            shell.publish(on_action(Action::Scroll {
+                                lines: if past < 0.0 { -step } else { step },
+                            }));
+                            shell.publish(on_action(Action::Drag(Point::new(x, edge))));
+                            state.next_autoscroll = Some(*now + AUTOSCROLL_EVERY);
+                        }
+                        if let Some(t) = state.next_autoscroll {
+                            shell.request_redraw_at(t);
+                        }
+                    }
+                    Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                        shell.request_redraw();
+                        shell.capture_event();
+                        return;
+                    }
+                    _ => {}
+                }
+            } else {
+                state.next_autoscroll = None;
+            }
+        }
+
         // The wheel scrolls over the gutter too.
         let cursor = match (event, cursor.position()) {
             (Event::Mouse(mouse::Event::WheelScrolled { .. }), Some(p))
@@ -506,11 +696,13 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         _theme: &Theme,
         _style: &renderer::Style,
         layout: Layout,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
         let state = tree.state.downcast_ref::<State>();
+        // Read before the buffer is borrowed for drawing.
+        let bar = self.scrollbar(bounds);
         let text_bounds = self.text_bounds(bounds);
         let gutter_w = self.gutter_width();
 
@@ -655,6 +847,34 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
                 },
             );
         });
+
+        if let Some(b) = bar {
+            let color = if state.thumb_grab.is_some() {
+                theme::SCROLL_THUMB_DRAG
+            } else if cursor.is_over(b.track) {
+                theme::SCROLL_THUMB_HOVER
+            } else {
+                theme::SCROLL_THUMB
+            };
+            renderer.with_layer(clip, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: b.thumb.shrink(iced::Padding {
+                            left: 2.0,
+                            right: 2.0,
+                            top: 1.0,
+                            bottom: 1.0,
+                        }),
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    color,
+                );
+            });
+        }
     }
 
     fn mouse_interaction(
@@ -666,7 +886,12 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State>();
-        if cursor.is_over(self.text_bounds(layout.bounds())) {
+        let on_bar = self
+            .scrollbar(layout.bounds())
+            .is_some_and(|b| cursor.is_over(b.track));
+        if on_bar || state.thumb_grab.is_some() {
+            mouse::Interaction::default()
+        } else if cursor.is_over(self.text_bounds(layout.bounds())) {
             if state.modifiers.command() && self.on_ctrl_click.is_some() {
                 mouse::Interaction::Pointer
             } else {
