@@ -434,7 +434,9 @@ pub fn assemble(
     provider.begin(&mut plan, account.as_ref());
     let cfg = input.configuration;
     let skills = skills::load(&cfg.skills, &mut plan.notes);
-    let prepared = if ctx.mode == SessionMode::Workspace {
+    // Files go into the session folder only when it is known: a legacy session migrated
+    // without one has an empty root, which would mean the server's working directory.
+    let prepared = if ctx.mode == SessionMode::Workspace && ctx.root.is_absolute() {
         provider.prepare_root(&mut plan, ctx, cfg, &skills)?
     } else {
         RootPrepared::default()
