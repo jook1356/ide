@@ -32,6 +32,7 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   pause-name prefixes such as `ko_rail` to hold only those);
   results in `<evidence>/script.log` (`IDE_APP_SCRIPT_PAUSE_MS` lengthens the pauses;
   `IDE_APP_SCRIPT_ONLY=p2` runs only startup + the phase 2 file/changes/search checks + server
+  stop; `IDE_APP_SCRIPT_ONLY=pop` runs only startup + the detail window (pop-out) checks + server
   stop). The phase 2 part creates its fixtures in the test repo on first use (TS import, Korean
   file name, binary file) and registers the repo on the repos page; a multi-repo pass (in Korean)
   registers the second repo, makes both a configuration's default repos, creates a two-worktree
