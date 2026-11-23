@@ -51,7 +51,7 @@ const MAX_H: f32 = 10.0 * LINE_H + 2.0 * PAD_Y;
 const RADIUS: f32 = 14.0;
 /// Widest the box gets (as in Hermes Desk's chat input); wider panes keep side margins so
 /// lines stay readable.
-const MAX_W: f32 = 820.0;
+pub(crate) const MAX_W: f32 = 820.0;
 /// Sent prompts remembered per session.
 const HISTORY: usize = 100;
 /// Between the paste and its Enter: long enough for the program to finish the paste.

@@ -1039,12 +1039,27 @@ impl App {
                         .boxed(),
                 );
             }
+            // Like Hermes Desk's chat column: the terminal is at most as wide as the composer
+            // box and centred, so wide panes keep side margins (in the terminal's own ground)
+            // and lines stay readable.
+            let term_bg = self.term_config.palette.background;
+            let view = container(view)
+                .width(Fill.max(crate::composer::MAX_W))
+                .height(Fill);
             // A file dragged in the app may drop on the terminal too (`composer.rs`).
             col = col.push(
-                mouse_area(view)
-                    .on_enter(Message::DropHover(crate::composer::Dest::Terminal, true))
-                    .on_exit(Message::DropHover(crate::composer::Dest::Terminal, false))
-                    .boxed(),
+                mouse_area(
+                    container(view)
+                        .center_x(Fill)
+                        .height(Fill)
+                        .style(move |_| container::Style {
+                            background: Some(term_bg.into()),
+                            ..container::Style::default()
+                        }),
+                )
+                .on_enter(Message::DropHover(crate::composer::Dest::Terminal, true))
+                .on_exit(Message::DropHover(crate::composer::Dest::Terminal, false))
+                .boxed(),
             );
             if self.composer_shown(live) && live.state.is_alive() {
                 col = col.push(self.composer_view(live));
