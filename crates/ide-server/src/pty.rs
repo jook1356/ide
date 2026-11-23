@@ -108,7 +108,7 @@ fn palette(index: usize) -> (u8, u8, u8) {
             (v, v, v)
         }
         256 => (0xd4, 0xd4, 0xd4),
-        257 => (0x1e, 0x1e, 0x1e),
+        257 => (0x26, 0x28, 0x2d),
         _ => (0xd0, 0xd0, 0xd0),
     }
 }

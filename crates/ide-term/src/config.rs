@@ -16,7 +16,7 @@ pub struct Palette {
 }
 
 impl Default for Palette {
-    /// A dark theme (VS Code "Dark+"-like).
+    /// A dark theme (VS Code "Dark+"-like colours on the app's header ground).
     fn default() -> Self {
         const BASE16: [(u8, u8, u8); 16] = [
             (0x00, 0x00, 0x00),
@@ -38,7 +38,10 @@ impl Default for Palette {
         ];
         Palette {
             foreground: Color::from_rgb8(0xd4, 0xd4, 0xd4),
-            background: Color::from_rgb8(0x1e, 0x1e, 0x1e),
+            // The app's header / composer strip (`ide-app` `style::HEADER`), so the terminal and
+            // the input area under it read as one surface. Keep `ide-server`'s `pty::palette`
+            // (OSC 11 replies) in sync.
+            background: Color::from_rgb8(0x26, 0x28, 0x2d),
             cursor: Color::from_rgba8(0xd0, 0xd0, 0xd0, 0.55),
             selection: Color::from_rgb8(0x26, 0x4f, 0x78),
             preedit_background: Color::from_rgb8(0x3a, 0x3d, 0x41),
