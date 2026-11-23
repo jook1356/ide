@@ -799,6 +799,11 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
         let mut cur_row = usize::MAX;
         let mut run: Option<Run> = None;
         let mut bg_run: Option<(usize, usize, Color)> = None;
+        // Background runs are filled when they end, i.e. after their cells were visited. Quads are
+        // painted in submission order, so foreground quads (block elements, box lines, underline,
+        // strike) are collected and drawn after every background: otherwise a background run (e.g.
+        // a progress bar's track) covers the `█` cells drawn inside it.
+        let mut fg_quads: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
         for cell in content.display_iter {
             let row = (cell.point.line.0 + offset) as usize;
             if row != cur_row {
@@ -852,10 +857,10 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
             let x0 = ox + col as f32 * m.cw;
             let y0 = oy + row as f32 * m.ch;
             if flags.intersects(Flags::ALL_UNDERLINES) {
-                fill(renderer, x0, y0 + m.ch - 2.0, w as f32 * m.cw, 1.0, fg);
+                fg_quads.push((x0, y0 + m.ch - 2.0, w as f32 * m.cw, 1.0, fg));
             }
             if flags.contains(Flags::STRIKEOUT) {
-                fill(renderer, x0, y0 + 0.5 * m.ch, w as f32 * m.cw, 1.0, fg);
+                fg_quads.push((x0, y0 + 0.5 * m.ch, w as f32 * m.cw, 1.0, fg));
             }
             let c = cell.c;
             let hidden = flags.contains(Flags::HIDDEN);
@@ -872,7 +877,7 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
                     let y = snap(y0 + fy * m.ch);
                     let ww = (snap(x0 + (fx + fw) * cwid) - x).max(1.0 / scale);
                     let hh = (snap(y0 + (fy + fh) * m.ch) - y).max(1.0 / scale);
-                    fill(renderer, x, y, ww, hh, Color { a: fg.a * a, ..fg });
+                    fg_quads.push((x, y, ww, hh, Color { a: fg.a * a, ..fg }));
                 }
                 continue;
             }
@@ -911,6 +916,9 @@ impl<Message> Widget<Message, Theme, Renderer> for TerminalView<'_, Message> {
         flush(renderer, &mut run, cur_row);
         if let Some((a, b, c)) = bg_run.take() {
             fill_cells(renderer, a, cur_row, b - a, c);
+        }
+        for (x, y, w, h, c) in fg_quads {
+            fill(renderer, x, y, w, h, c);
         }
         if let Some(p) = &probe
             && row_text.contains(p.as_str())
