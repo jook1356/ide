@@ -35,6 +35,10 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
   (`DejaVu Sans Mono` / `monospace`).
 - [ ] **Session menu "작업 폴더 열기".** `session_menu::open_folder` runs `xdg-open <folder>`.
   Check: right-click a session, open its folder in the desktop's file manager.
+- [ ] **Widget scheme (`ide-widget://`, `ide-web/src/scheme.rs`).** Not OS-specific code, but
+  custom schemes must be registered in every CEF process: `register_custom_schemes` runs before
+  `maybe_run_subprocess`, which assumes the helper processes run the app's own executable (as on
+  Windows). Check: `IDE_APP_SCRIPT_ONLY=widget` passes (`docs/widgets.md`).
 - [ ] **Self-update (빌드 후 재시작).** Windows only (`self_update::available` is false elsewhere;
   `scripts/ide-update.ps1`). Assumption: a shell script doing the same steps works on Linux / macOS
   (a running binary can be replaced there directly). Check: port the script, show the footer button.
@@ -88,6 +92,9 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
   bounce (`NSInformationalRequest`). Check: switch to another app, let an agent finish, and watch
   the Dock icon.
 
+- [ ] **Widget scheme (`ide-widget://`).** As on Linux; on macOS CEF's helper processes are
+  separate app bundles (`bundle-cef-app`): they must call `ide_web::register_custom_schemes` with
+  the same list too, or widget pages do not get their own origin. Check: `IDE_APP_SCRIPT_ONLY=widget`.
 - [ ] **Login-shell `PATH`.** An app started from Finder / Dock gets
   `/usr/bin:/bin:/usr/sbin:/sbin`, so `claude`, `codex`, `gh`, Homebrew `git` and `node` are not
   found. The server should read the login shell's environment once (`$SHELL -lc env` or similar)
@@ -169,6 +176,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: widgets: CEF custom scheme `ide-widget://` (`scheme.rs`), registered in every
+  process; checked on Windows only.
 - 2026-11-23: notification centre flashes the taskbar / Dock while unfocused
   (`notice_view.rs` `attention`, iced `request_user_attention`); unchecked on macOS / Linux.
 - 2026-11-23: footer self-update (`self_update.rs`) is Windows-only; off on Linux / macOS.

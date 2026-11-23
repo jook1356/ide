@@ -340,7 +340,11 @@ impl App {
                 self.new_menu = open;
                 self.bookmark_edit = None;
                 if open {
-                    Task::batch([self.load_shells(), self.load_ports()])
+                    let widgets = match self.selected.clone() {
+                        Some(s) => self.load_widgets(&s),
+                        None => Task::none(),
+                    };
+                    Task::batch([self.load_shells(), self.load_ports(), widgets])
                 } else {
                     Task::none()
                 }
@@ -432,7 +436,7 @@ impl App {
                 row![
                     text(t.info.title.clone())
                         .size(13)
-                        .font(style::BOLD)
+                        .font(style::bold())
                         .wrapping(text::Wrapping::None)
                         .ellipsis(text::Ellipsis::End),
                     text(status).size(11).color(style::DIM),
@@ -550,7 +554,7 @@ impl App {
                         let is_default = default.as_deref() == Some(s.id.as_str());
                         let open = row_btn(
                             row![
-                                text(">_").size(11).font(style::MONO).color(style::DIM),
+                                text(">_").size(11).font(style::mono()).color(style::DIM),
                                 text(s.name.clone()).size(13),
                             ]
                             .spacing(8)
@@ -749,6 +753,12 @@ impl App {
                 .padding([4, 6])
                 .boxed(),
             );
+            // The session's widgets (`widgets_ui.rs`).
+            if !global {
+                for r in self.widget_menu_rows(sid) {
+                    col = col.push(r);
+                }
+            }
             container(col)
                 .padding(6)
                 .width(290)

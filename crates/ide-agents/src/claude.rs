@@ -223,8 +223,13 @@ impl AgentProvider for Claude {
                 // Waiting for the user: a tool permission or an MCP question (not idle_prompt:
                 // the turn already ended with Stop).
                 "Notification": group("Notification", Some("permission_prompt|elicitation_dialog")),
-                // File edits only (every hook run is a process start; shells are not guarded).
-                "PreToolUse": group("PreToolUse", Some(&EDIT_TOOLS.join("|"))),
+                // Every tool: edits are guarded, and any call marks the session working (a
+                // turn the CLI resumes on its own, e.g. with a background agent's result,
+                // sends no UserPromptSubmit). Every hook run is a process start.
+                "PreToolUse": group("PreToolUse", None),
+                // Subagents, also background ones that outlive the turn (Stop).
+                "SubagentStart": group("SubagentStart", None),
+                "SubagentStop": group("SubagentStop", None),
             }
         });
         let json = serde_json::to_string_pretty(&settings).expect("json");
@@ -240,6 +245,13 @@ impl AgentProvider for Claude {
             "SessionStart" => Some(HookEvent::SessionStart),
             "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
             "Stop" => Some(HookEvent::Stopped),
+            // Without an id the start and its end cannot be paired: ignored.
+            "SubagentStart" => Some(HookEvent::BackgroundStarted {
+                id: Some(s("agent_id")).filter(|i| !i.is_empty())?.to_owned(),
+            }),
+            "SubagentStop" => Some(HookEvent::BackgroundEnded {
+                id: Some(s("agent_id")).filter(|i| !i.is_empty())?.to_owned(),
+            }),
             "Notification" => match s("notification_type") {
                 "permission_prompt" => Some(HookEvent::NeedsInput { permission: true }),
                 "elicitation_dialog" => Some(HookEvent::NeedsInput { permission: false }),

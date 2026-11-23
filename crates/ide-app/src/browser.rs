@@ -30,6 +30,9 @@ pub struct Browser {
     pub can_back: bool,
     pub can_forward: bool,
     pub error: Option<String>,
+    /// The tab shows a widget (`widgets_ui.rs`): its page is served by ide, the header shows
+    /// its name instead of the address.
+    pub widget: Option<crate::widgets_ui::WidgetTab>,
 }
 
 impl Browser {
@@ -43,12 +46,15 @@ impl Browser {
             can_back: false,
             can_forward: false,
             error: None,
+            widget: None,
         }
     }
 
-    /// Name in 열린 항목 (Desk: title, else the address, else 새 탭).
+    /// Name in 열린 항목 (Desk: title, else the address, else 새 탭; a widget's name).
     pub fn label(&self) -> String {
-        if !self.title.trim().is_empty() {
+        if let Some(w) = &self.widget {
+            w.name.clone()
+        } else if !self.title.trim().is_empty() {
             self.title.clone()
         } else if !self.url_input.trim().is_empty() {
             self.url_input.clone()
@@ -170,7 +176,11 @@ impl App {
             && let Some(b) = self.browser_mut(id)
             && b.view.is_none()
         {
-            let url = address_to_url(&b.url_input).unwrap_or_else(|| crate::app::DEFAULT_URL.into());
+            let url = if b.widget.is_some() {
+                b.url_input.clone()
+            } else {
+                address_to_url(&b.url_input).unwrap_or_else(|| crate::app::DEFAULT_URL.into())
+            };
             match WebView::new(&runtime, &url, Size::new(640.0, 600.0), 1.0) {
                 Ok(v) => b.view = Some(v),
                 Err(e) => b.error = Some(tr::err_web_view(&format!("{e:#}"))),
@@ -190,9 +200,21 @@ impl App {
 
     /// Open a new browser tab and show it in the selected session's pane.
     pub(crate) fn open_browser(&mut self, sid: Option<String>, global: bool, url: String) -> Task<Message> {
+        self.open_browser_tab(sid, global, url, None)
+    }
+
+    /// Open a new browser tab (a widget's when `widget` is set).
+    pub(crate) fn open_browser_tab(
+        &mut self,
+        sid: Option<String>,
+        global: bool,
+        url: String,
+        widget: Option<crate::widgets_ui::WidgetTab>,
+    ) -> Task<Message> {
         self.next_browser += 1;
         let id = self.next_browser;
-        let b = Browser::new(id, url);
+        let mut b = Browser::new(id, url);
+        b.widget = widget;
         let Some(sid) = sid.or_else(|| self.selected.clone()) else {
             return Task::none();
         };
@@ -254,7 +276,8 @@ impl App {
                 }
             }
             WebEvent::UrlChanged(u) => b.url_input = u.clone(),
-            WebEvent::TitleChanged(t) => b.title = t.clone(),
+            // A widget's tab keeps its name.
+            WebEvent::TitleChanged(t) if b.widget.is_none() => b.title = t.clone(),
             WebEvent::LoadingStateChanged {
                 is_loading,
                 can_go_back,
@@ -270,6 +293,9 @@ impl App {
                 if let Some(n) = crate::notice_view::load_error_notice(url, error) {
                     self.notices.push(n);
                 }
+            }
+            WebEvent::Console { message, .. } if b.widget.is_some() => {
+                crate::widgets_ui::console(&b.widget.as_ref().map(|w| w.id.clone()).unwrap_or_default(), message);
             }
             _ => {}
         }
@@ -385,6 +411,9 @@ impl App {
         let Some(b) = self.browser(live, id) else {
             return container(text("")).boxed();
         };
+        if let Some(w) = &b.widget {
+            return self.widget_identity(b, w);
+        }
         row![
             icon_button("←", b.can_back.then_some(Message::WebBack), tr::web_back()),
             icon_button("→", b.can_forward.then_some(Message::WebForward), tr::web_forward()),

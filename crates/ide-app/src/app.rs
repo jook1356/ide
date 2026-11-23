@@ -28,7 +28,7 @@ use crate::detail::{Detail, DetailMsg, ItemKey};
 use crate::i18n::{self, tr};
 use crate::script::Script;
 use crate::session_sort::{SortCriterion, SortDir, SortKey};
-use crate::ui_state::{CloseAction, DetailUi, Page, SPLIT_RANGE, ServerPref, UiState};
+use crate::ui_state::{CloseAction, DetailUi, FontSlot, Page, SPLIT_RANGE, ServerPref, UiState};
 
 /// Width of the navigation rail in logical pixels, its right border included.
 pub const RAIL_W: f32 = 64.0;
@@ -555,6 +555,8 @@ pub enum Modal {
     BulkDelete(crate::session_edit::BulkDeleteForm),
     /// ide 빌드 후 재시작: confirm (`self_update.rs`).
     SelfUpdate,
+    /// Allow a widget's ide tools (`widgets_ui.rs`).
+    WidgetGrant(crate::widgets_ui::GrantForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -798,6 +800,8 @@ pub enum Message {
     SettingsApplyServer,
     SwitchServerConfirm,
     SetOnClose(CloseAction),
+    /// Settings page: a font picked (blank = the default).
+    SetFont(FontSlot, String),
     CloseRemember(bool),
     /// Close dialog: exit, sessions keep running in the daemon.
     CloseKeep,
@@ -948,6 +952,7 @@ pub enum Message {
     UTerm(crate::uterm::UTermMsg),
     /// Browser tabs and 즐겨찾기 (`browser.rs`).
     Browser(crate::browser::BrowserMsg),
+    Widget(crate::widgets_ui::WidgetMsg),
     /// The input box under an agent terminal.
     Composer(crate::composer::ComposerMsg),
     /// An in-app file drag: the pointer entered (`Some`) or left a drop target, and moved.
@@ -1124,6 +1129,10 @@ pub struct App {
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
     pub settings: SettingsForm,
+    /// Settings page: the font pickers (UI, code, terminal), listing the installed families.
+    pub font_pickers: [iced::widget::combo_box::State<String>; 3],
+    /// The UI font in effect (read at start; a change applies after a restart).
+    pub boot_ui_font: String,
     /// The pointer is over the rail's work button (shows the session-list toggle icon).
     pub rail_hover: bool,
     /// The session row under the pointer (shows its pin / delete buttons).
@@ -1167,6 +1176,8 @@ pub struct App {
     pub item_drag: Option<crate::item_menu::ItemDrag>,
     /// The "+ 새로 열기" menu is open.
     pub new_menu: bool,
+    /// Widgets per session, as last listed ("+ 새로 열기", `widgets_ui.rs`).
+    pub widgets: std::collections::HashMap<String, Vec<ide_client::WidgetInfo>>,
     /// "+ 새로 열기" opens 공용 items (no session) instead of the session's.
     pub new_global: bool,
     /// Its address field, and the bookmark being renamed (url, name).
@@ -1214,6 +1225,7 @@ impl App {
         remote_override: Option<String>,
     ) -> (Self, Task<Message>) {
         let mut app = Self::load(data_dir, runtime, remote_override);
+        crate::widgets_ui::install();
         app.script = Script::from_env(&app.data_dir);
         // Self-update: a run that started this app learns it came up.
         app.update_available = crate::self_update::available();
@@ -1236,6 +1248,14 @@ impl App {
     pub fn load(data_dir: PathBuf, runtime: WebRuntime, remote_override: Option<String>) -> Self {
         let ui = UiState::load(&data_dir);
         ide_i18n::apply(ui.language);
+        ide_views::theme::set_code_font(&ui.fonts.code);
+        let mut term_config = TermConfig::default();
+        if !ui.fonts.terminal.is_empty() {
+            term_config.font_family = ui.fonts.terminal.clone();
+        }
+        let fonts = installed_font_families();
+        let font_pickers = [(); 3].map(|_| iced::widget::combo_box::State::new(fonts.clone()));
+        let boot_ui_font = ui.fonts.ui.clone();
         let target = build_target(&ui.server, remote_override.as_deref());
         let settings = SettingsForm::new(&ui.server);
         let conn = match &target.transport {
@@ -1259,7 +1279,7 @@ impl App {
             sessions: Vec::new(),
             selected: None,
             ui,
-            term_config: TermConfig::default(),
+            term_config,
             window: None,
             window_size: Size::new(1400.0, 860.0),
             window_maximized: false,
@@ -1277,6 +1297,8 @@ impl App {
             scripts_drag: None,
             modal: None,
             settings,
+            font_pickers,
+            boot_ui_font,
             rail_hover: false,
             session_hover: None,
             new_answers: Default::default(),
@@ -1299,6 +1321,7 @@ impl App {
             session_menu: None,
             item_drag: None,
             new_menu: false,
+            widgets: Default::default(),
             new_global: false,
             new_address: String::new(),
             bookmark_edit: None,
@@ -3740,6 +3763,7 @@ impl App {
             Message::ItemDrag(m) => self.on_item_drag(m),
             Message::UTerm(m) => self.on_uterm(m),
             Message::Browser(m) => self.on_browser(m),
+            Message::Widget(m) => self.on_widget(m),
             Message::Composer(m) => self.on_composer(m),
             Message::FileDropped(p) => self.on_file_dropped(p),
             Message::DropHover(t, entered) => {
@@ -3830,6 +3854,24 @@ impl App {
             },
             Message::SetOnClose(a) => {
                 self.ui.on_close = a;
+                self.save_ui();
+                Task::none()
+            }
+            Message::SetFont(slot, name) => {
+                self.ui.fonts.set(slot, &name);
+                let name = self.ui.fonts.get(slot).to_owned();
+                match slot {
+                    // iced's default font is fixed at start: applied by the next start.
+                    FontSlot::Ui => {}
+                    FontSlot::Code => ide_views::theme::set_code_font(&name),
+                    FontSlot::Terminal => {
+                        self.term_config.font_family = if name.is_empty() {
+                            TermConfig::default().font_family
+                        } else {
+                            name
+                        };
+                    }
+                }
                 self.save_ui();
                 Task::none()
             }
@@ -4266,6 +4308,7 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             ide_web::events().map(Message::Web),
+            crate::widgets_ui::subscription(),
             window::resize_events().map(|(id, s)| Message::WindowResized(id, s)),
             window::close_requests().map(Message::WindowCloseRequest),
             window::close_events().map(Message::WindowClosed),
@@ -4485,6 +4528,24 @@ pub fn same_path(a: &str, b: &str) -> bool {
         }
     }
     norm(a) == norm(b)
+}
+
+/// Font families installed on this machine (first, usually English, name of each face),
+/// sorted and deduplicated: the Settings font pickers' choices.
+fn installed_font_families() -> Vec<String> {
+    let mut fs = iced::advanced::graphics::text::font_system()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut names: Vec<String> = fs
+        .raw()
+        .db()
+        .faces()
+        .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        .filter(|n| !n.is_empty() && !n.starts_with('.') && n != "Iced-Icons")
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
 }
 
 #[cfg(test)]

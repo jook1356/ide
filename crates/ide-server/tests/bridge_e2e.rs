@@ -275,6 +275,7 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_merge_child",
             "ide_request_write_access",
             "ide_release_write_access",
+            "ide_widget",
             "ide_sync_from_parent",
         ]
     );

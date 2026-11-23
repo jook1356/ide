@@ -3,7 +3,7 @@
 Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
 tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
 hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
-workspace's write lease, task queue, terminals, browser, previews, mods) come next.
+workspace's write lease, task queue, terminals, browser, previews) come next; widgets (Desk's mods) are in `docs/widgets.md`.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why
@@ -62,7 +62,7 @@ provider's file:
 | Step | Trait method | Claude Code (`claude.rs`) |
 |---|---|---|
 | register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<ide-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
-| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (`Edit|Write|MultiEdit|NotebookEdit`) -> PreTool(Edit {paths}) |
+| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (every tool) -> PreTool (Edit {paths} for `Edit|Write|MultiEdit|NotebookEdit`), `SubagentStart` / `SubagentStop` (`agent_id`) -> BackgroundStarted / BackgroundEnded {id} |
 | answer | `hook_reply(event, decision) -> HookReply` | deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":...}}`, exit 0; no opinion: nothing, exit 0 (never "allow": that would skip Claude's permission prompts) (d) |
 | caps | `hook_caps()` | status, edit guard: native; shell guard: unsupported |
 
@@ -74,7 +74,15 @@ provider's file:
 - Activity (`SessionInfo.activity`, `Notify::Activity`; also set by screen detection): Unknown until the process reports
   (reset on every start, Unknown while not running); SessionStart / Stop -> Idle; prompt / tool
   use -> Working (Desk's 답변 중); permission prompt / question -> NeedsInput (Desk's 응답 필요);
-  the user typing in the terminal while NeedsInput -> Working (the answer). The app shows the
+  the user typing in the terminal while NeedsInput -> Working (the answer).
+- Background work (`HookEvent::BackgroundStarted / BackgroundEnded {id}`, provider-agnostic;
+  `BridgeState::hook_activity`): work that can outlive the turn (Claude Code: background
+  agents). A Stop while some id runs keeps Working; the last end after the Stop -> Idle; an
+  end inside a running turn (a foreground subagent) or of an unknown id changes nothing; tool
+  calls (also a background agent's) -> Working without reopening the turn (a CLI resuming on
+  its own with a result sends no prompt event); an idle screen while work runs is Working.
+  Contract: a provider that reports a start reports its end for the same id. SessionStart and
+  a new process forget running ids (a lost end cannot hold a session for good). The app shows the
   phase on the session row and Desk's 새 답변 for a turn that ended while another session was
   shown (cleared when selected).
 - Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call: the shared folder's write
@@ -112,7 +120,9 @@ For CLIs whose hooks can only live in their config home (Codex). Only on the use
 - (a) Not yet checked against the real Claude Code: that `--settings` hooks load next to the
   user's settings, that the exec form (`args`) runs on the supported versions, and that the
   events fire as documented. Opening a session in the app shows it (SessionStart -> the row's
-  activity; a prompt -> 답변 중).
+  activity; a prompt -> 답변 중). Also not checked: that `SubagentStart` / `SubagentStop` fire
+  for background agents with the same `agent_id` (a session that waits for one stays 답변 중
+  and turns idle when it ends).
 
 ## Screen detection
 
@@ -172,6 +182,7 @@ start go to stderr.
 | `ide_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
 | `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon | session families: `docs/session-family.md` |
+| `ide_widget` | daemon (`guide`, `list`), app (`open`, `close`) | widgets: `docs/widgets.md` |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.
@@ -192,4 +203,4 @@ Plan for the features on top of the bridge: `docs/agent-features-roadmap.md`.
 1. Codex hooks (see Hooks); the write lease of shared workspaces on `agent.hook`.
 2. Pushing to the agent: queued prompts / steering through the PTY (`session.send_prompt`).
 3. Feature tools on this transport: related sessions (create child, send, read), run_task,
-   terminals, browser (CEF), previews, mods.
+   terminals, browser (CEF), previews (widgets: done, `docs/widgets.md`).

@@ -834,13 +834,21 @@ fn claude_hooks() {
     assert_eq!(out.spec.args[i + 1], s(&settings));
     assert_eq!(env_of(&out.spec, "IDE_SESSION_ID"), Some("s1"));
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
-    for event in ["SessionStart", "UserPromptSubmit", "Stop", "Notification", "PreToolUse"] {
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "Notification",
+        "PreToolUse",
+        "SubagentStart",
+        "SubagentStop",
+    ] {
         let h = &v["hooks"][event][0]["hooks"][0];
         assert_eq!(h["type"], "command", "{event}");
         assert_eq!(h["command"], s(&program), "{event}");
         assert_eq!(h["args"], serde_json::json!(["hook", "--provider", "claude", event]));
     }
-    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+    assert_eq!(v["hooks"]["PreToolUse"][0].get("matcher"), None, "every tool");
     assert_eq!(
         v["hooks"]["Notification"][0]["matcher"],
         "permission_prompt|elicitation_dialog"
@@ -868,6 +876,20 @@ fn claude_hooks() {
             command: "ls".into()
         }))
     );
+    assert_eq!(
+        p("PreToolUse", serde_json::json!({"tool_name": "Agent", "tool_input": {"run_in_background": true}})),
+        Some(HookEvent::PreTool(ToolUse::Other { tool: "Agent".into() }))
+    );
+    assert_eq!(
+        p("SubagentStart", serde_json::json!({"agent_id": "a1", "agent_type": "Explore"})),
+        Some(HookEvent::BackgroundStarted { id: "a1".into() })
+    );
+    assert_eq!(
+        p("SubagentStop", serde_json::json!({"agent_id": "a1"})),
+        Some(HookEvent::BackgroundEnded { id: "a1".into() })
+    );
+    assert_eq!(p("SubagentStart", serde_json::json!({})), None, "no id: cannot pair");
+    assert_eq!(p("SubagentStop", serde_json::json!({"agent_id": ""})), None);
     assert_eq!(Claude.parse_hook("Stop", b"not json"), Some(HookEvent::Stopped));
     assert_eq!(Claude.parse_hook("Nope", b"{}"), None);
 

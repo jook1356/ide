@@ -797,7 +797,7 @@ impl DiffView {
             _ => f.new_path.clone(),
         };
         let stat = |s: String, c: Color| {
-            container(text(s).size(11).font(theme::MONO_BOLD))
+            container(text(s).size(11).font(theme::mono_bold()))
                 .padding([1, 6])
                 .style(theme::badge(c))
                 .boxed()
@@ -817,7 +817,7 @@ impl DiffView {
                 icons::file_icon(&f.new_path),
                 text(path)
                     .size(13)
-                    .font(theme::MONO_BOLD)
+                    .font(theme::mono_bold())
                     .wrapping(text::Wrapping::None)
                     .color(theme::TEXT),
                 stat(format!("+{}", f.added()), theme::STAT_ADD),
@@ -862,7 +862,7 @@ impl DiffView {
                 container(
                     text(h.as_str())
                         .size(theme::CODE_SIZE)
-                        .font(theme::MONO)
+                        .font(theme::mono())
                         .color(theme::HUNK_TEXT)
                         .wrapping(text::Wrapping::None),
                 )
@@ -919,7 +919,7 @@ impl DiffView {
         let body: Element<'a, DiffViewMessage> = match hunk {
             Some(h) => text(h)
                 .size(theme::CODE_SIZE)
-                .font(theme::MONO)
+                .font(theme::mono())
                 .wrapping(text::Wrapping::None)
                 .boxed(),
             None => text(label.clone()).size(12).boxed(),
@@ -964,7 +964,7 @@ impl DiffView {
         container(
             text(n.map(|n| n.to_string()).unwrap_or_default())
                 .size(theme::CODE_SIZE)
-                .font(theme::MONO)
+                .font(theme::mono())
                 .color(theme::LINE_NO),
         )
         .width(self.no_width)
@@ -986,7 +986,7 @@ impl DiffView {
             self.number(l.new_no, no_bg),
             text(sign)
                 .size(theme::CODE_SIZE)
-                .font(theme::MONO)
+                .font(theme::mono())
                 .color(theme::LINE_NO)
                 .width(16)
                 .align_x(Alignment::Center),
@@ -1012,7 +1012,7 @@ impl DiffView {
                 self.number(n, no_bg),
                 text(sign)
                     .size(theme::CODE_SIZE)
-                    .font(theme::MONO)
+                    .font(theme::mono())
                     .color(theme::LINE_NO)
                     .width(16)
                     .align_x(Alignment::Center),
@@ -1093,7 +1093,7 @@ fn code_text(l: &DLine) -> Element<'_, DiffViewMessage> {
     }
     rich_text(spans)
         .size(theme::CODE_SIZE)
-        .font(theme::MONO)
+        .font(theme::mono())
         .wrapping(text::Wrapping::None)
         .boxed()
 }

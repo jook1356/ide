@@ -4,7 +4,7 @@
 //! older app next to a newer server fails the call instead of leaving the agent waiting.
 
 use iced::Task;
-use ide_client::AGENT_TOOL_SHOW_MESSAGE;
+use ide_client::{AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET};
 
 use crate::app::{App, Message};
 
@@ -17,6 +17,10 @@ impl App {
         args: String,
     ) -> Task<Message> {
         let args: serde_json::Value = serde_json::from_str(&args).unwrap_or_default();
+        if tool == AGENT_TOOL_WIDGET {
+            // Answered when done (after fetching the widget's info).
+            return self.agent_widget(request, session, &args);
+        }
         let result: Result<String, String> = match tool.as_str() {
             AGENT_TOOL_SHOW_MESSAGE => {
                 let message = args

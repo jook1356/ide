@@ -280,8 +280,8 @@ impl ChangesList {
                 button(
                     row![
                         text(if open { "▾" } else { "▸" }).size(12).color(theme::DIM).width(10),
-                        text(g.label()).size(12).font(theme::BOLD).color(theme::DIM),
-                        container(text(n.to_string()).size(10).font(theme::BOLD))
+                        text(g.label()).size(12).font(theme::bold()).color(theme::DIM),
+                        container(text(n.to_string()).size(10).font(theme::bold()))
                             .padding([0, 5])
                             .style(|_| container::Style {
                                 background: Some(theme::HOVER.into()),
@@ -323,7 +323,7 @@ impl ChangesList {
                     container(
                         text(e.status.letter().to_string())
                             .size(10)
-                            .font(theme::MONO_BOLD)
+                            .font(theme::mono_bold())
                             .line_height(1.0),
                     )
                     .center(16)

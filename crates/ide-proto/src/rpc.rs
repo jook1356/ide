@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 15;
+pub const PROTO_VERSION: u32 = 16;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -61,6 +61,36 @@ pub const AGENT_TOOL_SESSION: &str = "ide_session";
 /// Agent bridge tool carried out by an app (`Notify::AgentRequest`): show `{"message"}` in the
 /// session's panel.
 pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
+/// Agent bridge tool for widgets (`docs/widgets.md`): `list` / `guide` are answered by the
+/// daemon, `open` / `close` are carried out by an app (`Notify::AgentRequest`).
+pub const AGENT_TOOL_WIDGET: &str = "ide_widget";
+
+/// A widget of a session folder (`widget.list`; `docs/widgets.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WidgetInfo {
+    /// Folder name under `.ide/widgets/` (a URL host label).
+    pub id: String,
+    /// `widget.json` `name` (the id when the manifest is not usable).
+    pub name: String,
+    pub description: String,
+    /// ide tools it calls; the user approves them before it first runs.
+    pub tools: Vec<String>,
+    /// `session` / `family` / `global`.
+    pub scope: String,
+    /// The user approved `tools` (always true without tools).
+    pub granted: bool,
+    /// Why it cannot be opened (manifest errors); `None` = usable.
+    pub error: Option<String>,
+}
+
+/// `widget.data`: a widget's key-value store (values are JSON text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidgetDataOp {
+    Get { key: String },
+    Set { key: String, value: String },
+    Delete { key: String },
+    Keys,
+}
 
 /// What a session's agent is doing, from its CLI's hooks (`Unknown`: no hooks, or not
 /// reported yet since the process started).
@@ -89,6 +119,9 @@ pub enum AgentHookEvent {
     PreShell { tool: String, command: String },
     /// About to use another tool.
     PreTool { tool: String },
+    /// Work that can outlive the turn started / ended (`id`: the CLI's, opaque).
+    BackgroundStarted { id: String },
+    BackgroundEnded { id: String },
 }
 
 /// A tool the agent bridge offers (MCP `tools/list`).
@@ -1041,6 +1074,36 @@ pub enum Request {
         session: String,
         text: String,
     },
+    /// The widgets of the session's folder (protocol 16, `docs/widgets.md`) -> `Widgets`.
+    WidgetList {
+        session: String,
+    },
+    /// A file of a widget (`path` empty = its entry page) -> `WidgetFile`.
+    WidgetFile {
+        session: String,
+        widget: String,
+        path: String,
+    },
+    /// The user approved `tools` (as shown to them) for the widget; refused when the manifest
+    /// now lists others (`widget-changed`) -> `Unit`.
+    WidgetGrant {
+        session: String,
+        widget: String,
+        tools: Vec<String>,
+    },
+    /// A widget calls an ide tool it declared and the user approved -> `AgentResult`.
+    WidgetCall {
+        session: String,
+        widget: String,
+        tool: String,
+        args: String,
+    },
+    /// A widget's data in its scope -> `WidgetData`.
+    WidgetData {
+        session: String,
+        widget: String,
+        op: WidgetDataOp,
+    },
 }
 
 impl Request {
@@ -1167,6 +1230,11 @@ impl Request {
             Request::PromptCommit { .. } => "prompt.commit",
             Request::PromptPr { .. } => "prompt.pr",
             Request::SessionSendPrompt { .. } => "session.send_prompt",
+            Request::WidgetList { .. } => "widget.list",
+            Request::WidgetFile { .. } => "widget.file",
+            Request::WidgetGrant { .. } => "widget.grant",
+            Request::WidgetCall { .. } => "widget.call",
+            Request::WidgetData { .. } => "widget.data",
         }
     }
 }
@@ -1296,6 +1364,14 @@ pub enum Response {
     Prompt(String),
     AgentTools(Vec<AgentTool>),
     AgentResult(AgentToolResult),
+    Widgets(Vec<WidgetInfo>),
+    WidgetFile {
+        mime: String,
+        #[serde(with = "crate::bin")]
+        data: Vec<u8>,
+    },
+    /// `Get`: the value as JSON text (`None`: not set); `Keys`: a JSON array; else `None`.
+    WidgetData(Option<String>),
     /// `None`: no opinion; `Some(reason)`: refuse the tool call.
     AgentHookDecision(Option<String>),
     Merges(Vec<RepoMerge>),

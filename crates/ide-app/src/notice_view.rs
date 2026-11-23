@@ -387,7 +387,7 @@ impl App {
             let label = if unread > 9 { "9+".to_owned() } else { unread.to_string() };
             layers.push(
                 container(
-                    container(text(label).size(10).color(Color::WHITE).font(style::BOLD))
+                    container(text(label).size(10).color(Color::WHITE).font(style::bold()))
                         .padding([0, 4])
                         .style(|_: &Theme| container::Style {
                             background: Some(style::RED.into()),
@@ -468,7 +468,7 @@ impl App {
             .position(tooltip::Position::Bottom)
             .boxed()
         };
-        let mut head = row![text(tr::notice_title()).size(14).font(style::BOLD)]
+        let mut head = row![text(tr::notice_title()).size(14).font(style::bold())]
             .spacing(6)
             .align_y(Alignment::Center);
         if running > 0 {
@@ -535,7 +535,7 @@ impl App {
         };
         let unread = !n.read || n.running();
         let mut top = row![
-            text(n.title.get()).size(12).font(style::BOLD).width(Fill),
+            text(n.title.get()).size(12).font(style::bold()).width(Fill),
             text(clock(n)).size(10).color(style::FAINT),
         ]
         .spacing(6)
@@ -644,7 +644,7 @@ impl App {
 
     fn toast_card<'a>(&'a self, n: &'a AppNotice) -> El<'a> {
         let c = tone_color(n.tone);
-        let mut col = column![text(n.title.get()).size(12).font(style::BOLD)].spacing(2);
+        let mut col = column![text(n.title.get()).size(12).font(style::bold())].spacing(2);
         if let Some(b) = &n.body {
             let b = b.get();
             if !b.is_empty() {

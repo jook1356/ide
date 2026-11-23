@@ -636,6 +636,23 @@ wrap_client! {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static REGISTRY: Mutex<Vec<Weak<ViewShared>>> = Mutex::new(Vec::new());
 
+/// The view showing the browser with CEF identifier `id`.
+pub(crate) fn view_of_browser(id: i32) -> Option<ViewId> {
+    REGISTRY
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.upgrade())
+        .find(|v| {
+            v.browser
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|b| b.0.identifier() == id)
+        })
+        .map(|v| v.id)
+}
+
 /// Closes every live browser (used by `WebRuntime::shutdown`).
 pub(crate) fn close_all() {
     let views: Vec<_> = REGISTRY

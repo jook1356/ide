@@ -379,7 +379,7 @@ impl App {
 
     pub(crate) fn update_card(&self) -> El<'_> {
         column![
-            text(tr::update_confirm_title()).size(18).font(style::BOLD),
+            text(tr::update_confirm_title()).size(18).font(style::bold()),
             text(tr::update_confirm_body()).size(13).color(style::DIM),
             row![
                 space().width(Fill),

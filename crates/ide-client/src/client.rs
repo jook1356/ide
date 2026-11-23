@@ -916,6 +916,77 @@ impl Client {
         expect_unit(self.call(Request::AgentReply { request, result }).await)
     }
 
+    /// `widget.list`: the widgets of the session's folder (`docs/widgets.md`).
+    pub async fn widget_list(&self, session: &str) -> Result<Vec<ide_proto::WidgetInfo>, ProtoError> {
+        match self.call(Request::WidgetList { session: session.into() }).await? {
+            Response::Widgets(w) => Ok(w),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected widgets")),
+        }
+    }
+
+    /// `widget.file`: a file of a widget (`path` empty = its entry page): media type, bytes.
+    pub async fn widget_file(&self, session: &str, widget: &str, path: &str) -> Result<(String, Vec<u8>), ProtoError> {
+        let req = Request::WidgetFile {
+            session: session.into(),
+            widget: widget.into(),
+            path: path.into(),
+        };
+        match self.call(req).await? {
+            Response::WidgetFile { mime, data } => Ok((mime, data)),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a widget file")),
+        }
+    }
+
+    /// `widget.grant`: the user approved `tools` (as shown) for the widget.
+    pub async fn widget_grant(&self, session: &str, widget: &str, tools: Vec<String>) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::WidgetGrant {
+                session: session.into(),
+                widget: widget.into(),
+                tools,
+            })
+            .await,
+        )
+    }
+
+    /// `widget.call`: a widget calls an ide tool (JSON `args`).
+    pub async fn widget_call(
+        &self,
+        session: &str,
+        widget: &str,
+        tool: &str,
+        args: &str,
+    ) -> Result<ide_proto::AgentToolResult, ProtoError> {
+        let req = Request::WidgetCall {
+            session: session.into(),
+            widget: widget.into(),
+            tool: tool.into(),
+            args: args.into(),
+        };
+        match self.call(req).await? {
+            Response::AgentResult(r) => Ok(r),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a tool result")),
+        }
+    }
+
+    /// `widget.data`: a widget's stored data (values as JSON text).
+    pub async fn widget_data(
+        &self,
+        session: &str,
+        widget: &str,
+        op: ide_proto::WidgetDataOp,
+    ) -> Result<Option<String>, ProtoError> {
+        let req = Request::WidgetData {
+            session: session.into(),
+            widget: widget.into(),
+            op,
+        };
+        match self.call(req).await? {
+            Response::WidgetData(v) => Ok(v),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected widget data")),
+        }
+    }
+
     /// `account.integration`: the account's integration state, install or uninstall.
     pub async fn account_integration(
         &self,
