@@ -318,6 +318,14 @@ where
                 conn.ctx.agent_reply(request, result);
                 conn.reply(id, Ok(Response::Unit));
             }
+            Request::WidgetCall { session, widget, tool, args } => {
+                // Async: an app-carried tool waits for an app's answer.
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    let r = conn.ctx.widget_call(&session, &widget, &tool, &args).await;
+                    conn.reply(id, r.map(Response::AgentResult));
+                });
+            }
             Request::TermDetach { session } => {
                 if let Some(h) = conn.attachments.lock().unwrap().remove(&session) {
                     h.abort();

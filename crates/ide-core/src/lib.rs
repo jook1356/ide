@@ -49,6 +49,7 @@ pub mod repo;
 pub mod session;
 pub mod skill;
 pub mod slug;
+pub mod widget;
 pub mod workspace;
 pub mod worktree;
 

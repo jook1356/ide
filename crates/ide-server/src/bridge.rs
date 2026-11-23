@@ -40,6 +40,9 @@ pub use ide_proto::AGENT_TOOL_SESSION as TOOL_SESSION;
 /// `ide_show_message`: show a short message in the session's panel (answered by an app).
 pub use ide_proto::AGENT_TOOL_SHOW_MESSAGE as TOOL_SHOW_MESSAGE;
 
+/// `ide_widget`: the session's widgets (`docs/widgets.md`).
+pub use ide_proto::AGENT_TOOL_WIDGET as TOOL_WIDGET;
+
 /// Session family tools (`docs/session-family.md`), answered by the daemon.
 pub const TOOL_LIST_RELATED: &str = "ide_list_related_sessions";
 pub const TOOL_CREATE_CHILD: &str = "ide_create_child_session";
@@ -75,7 +78,8 @@ IDE. Use its tools (names start with `ide_`) instead of guessing about this sess
 IDE: `ide_session` describes this session (folder, repositories, branches, base branches); \
 `ide_show_message` shows a short note to the user in the IDE. Child sessions \
 (`ide_create_child_session`) take parallel work; talk to related sessions with \
-`ide_send_to_session`.";
+`ide_send_to_session`. To show the user something richer than text (a board, a form, a \
+chart, a small tool), build a widget: call `ide_widget` with action `guide` first.";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -444,6 +448,13 @@ pub fn tools() -> Vec<AgentTool> {
             input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#.into(),
         },
         AgentTool {
+            name: TOOL_WIDGET.into(),
+            description: "Widgets: small web apps (HTML/JS, any framework) you write into this                           session's folder and the ide shows as a tab next to the terminal.                           `guide`: how to build one (folder, widget.json, the window.ide API:                           ide tools and stored data). `list`: this session's widgets and                           their problems. `open` / `close` {widget}: show or close one in the                           ide (open again to reload it after changes)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["guide","list","open","close"]},"widget":{"type":"string","description":"The widget id (its folder name), for open / close."}},"required":["action"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
             name: TOOL_SYNC_PARENT.into(),
             description: "Merge the parent session's newer commits into this child session's \
                           worktrees (same results as ide_merge_child)."
@@ -528,27 +539,40 @@ pub async fn call(
             else {
                 return err("`message` is required");
             };
-            if !apps {
-                return err("no ide window is open");
-            }
             let args = serde_json::json!({ "message": message }).to_string();
-            let (id, rx) = state.begin();
-            notify(Notify::AgentRequest {
-                request: id,
-                session: session.to_owned(),
-                tool: tool.to_owned(),
-                args,
-            });
-            let r = tokio::time::timeout(APP_TIMEOUT, rx).await;
-            state.end(id);
-            match r {
-                Ok(Ok(Ok(text))) => ok(text),
-                Ok(Ok(Err(e))) => err(e),
-                Ok(Err(_)) => err("the ide window went away"),
-                Err(_) => err("the ide window did not answer"),
-            }
+            ask_app(state, session, tool, args, apps, notify).await
         }
         _ => err(format!("unknown tool `{tool}`")),
+    }
+}
+
+/// Hand a tool call to the connected apps (`Notify::AgentRequest`) and wait for the first
+/// answer (`agent.reply`), at most [`APP_TIMEOUT`]. `apps`: an app is connected.
+pub async fn ask_app(
+    state: &BridgeState,
+    session: &str,
+    tool: &str,
+    args: String,
+    apps: bool,
+    notify: impl FnOnce(Notify),
+) -> AgentToolResult {
+    if !apps {
+        return err("no ide window is open");
+    }
+    let (id, rx) = state.begin();
+    notify(Notify::AgentRequest {
+        request: id,
+        session: session.to_owned(),
+        tool: tool.to_owned(),
+        args,
+    });
+    let r = tokio::time::timeout(APP_TIMEOUT, rx).await;
+    state.end(id);
+    match r {
+        Ok(Ok(Ok(text))) => ok(text),
+        Ok(Ok(Err(e))) => err(e),
+        Ok(Err(_)) => err("the ide window went away"),
+        Err(_) => err("the ide window did not answer"),
     }
 }
 

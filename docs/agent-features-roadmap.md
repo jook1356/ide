@@ -1,6 +1,6 @@
 # 에이전트 기능 로드맵 (브리지 위에 올릴 것)
 
-상태: **계획만**. 아래 다섯 기능은 아직 구현하지 않았어요. 기반(에이전트 브리지, 훅, 화면 판독,
+상태: 위젯(5)은 구현됨(`docs/widgets.md`), 나머지 넷은 **계획만**. 기반(에이전트 브리지, 훅, 화면 판독,
 세션 가족)은 끝났으니, 이 문서의 방향대로 하나씩 올리면 돼요. 먼저 `docs/agent-bridge.md`와
 `docs/session-family.md`를 읽으세요.
 
@@ -96,23 +96,11 @@ Desk: 채팅 답변 속 ` ```tsx preview ` 블록을 렌더러 샌드박스에�
 - **보안**: 미리보기는 별도 origin(커스텀 스킴, 예: `ide-preview://`)에서, 앱 내부 API 접근 없이.
 - **지침**: Desk처럼 긴 안내서를 세션 폴더 `.ide/preview-guide.md`에 두고 기본 지침에는 한 줄만.
 
-## 5. 모드 (Desk의 mods)
+## 5. 위젯 (Desk의 mods) — 구현됨
 
-Desk: 에이전트가 `.hermes-desk/mods/<id>/`에 작은 React 앱을 만들고 `desk_mod`(list, register,
-unregister, create/get/update/open/close/delete_instance, checkout)로 등록 → Desk가 창이나 탭에 띄워요.
-데이터 범위: `session`(기본) / `family`(루트 + 자식) / `global`. `deskAccess`면 Desk 기능 일부를 호출.
-(`src/shared/mods.ts`, `src/main/mods.ts`, `src/shared/modDeskAccess.ts`)
-
-- **저장 위치**: 세션 폴더 `.ide/mods/<id>/` + `mod.json`(이름, 진입 파일, 범위, 권한). 세션 가족의
-  `family` 범위는 이제 그대로 쓸 수 있어요(`ide_core::family`).
-- **실행**: 앱의 CEF에서 커스텀 스킴(`ide-mod://<session>/<id>/...`)으로 파일을 서빙 → 상세 영역 탭
-  또는 분리 창. 세션이 선택됐을 때만 보이기(`session` 범위).
-- **데이터·권한**: 모드 ↔ ide 통신은 CEF 메시지 라우터(JS 브리지)로, 허용된 기능만(키-값 저장소 —
-  서버에 범위별로, 읽기 전용 세션 정보, 알림). `deskAccess`에 해당하는 권한은 `mod.json`에 선언하고
-  처음 실행 때 사용자 승인.
-- **도구**: `ide_mod {action: list|register|unregister|open|close|...}`, 데몬이 등록 정보를 갖고
-  앱이 열고 닫기(앱이 답하는 부분).
-- **지침**: `.ide/mod-guide.md`(Desk `MOD_GUIDE` 대응).
+`docs/widgets.md`. "모드"는 CLI의 plan mode 등과, "mod"는 Claude Code 자체의 mod와 헷갈려서
+위젯이라고 불러요. React 강제 없이 HTML/JS(프레임워크 자유), `ide-widget://` 스킴으로 앱이 서빙,
+`window.ide.call`로 브리지의 `ide_*` 도구를 사용자 승인 후 호출, `ide.data`로 범위별 저장.
 
 ## 권장 순서
 
@@ -121,4 +109,4 @@ unregister, create/get/update/open/close/delete_instance, checkout)로 등록 �
 2. 터미널 조회·입력 — 서버에 재료가 다 있어요.
 3. 미리보기 — HTML부터.
 4. 브라우저 조작 — 이미지 결과, 사이트 승인, DevTools 연동이 필요해 커요.
-5. 모드 — 미리보기·브라우저의 스킴/JS 브리지를 재사용.
+5. ~~모드~~ 위젯 — 구현됨. 미리보기·브라우저가 이 스킴(`ide_web::set_scheme_handler`)을 재사용.
