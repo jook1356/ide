@@ -645,6 +645,7 @@ child-title-placeholder = Title (empty: derived)
 child-separate = Own worktrees
 child-separate-hint = Branched from the parent’s branches; merge it back later.
 child-shared = Shared folder
+session-own-worktrees = Works in its own worktrees (branches)
 child-shared-hint = Works in the parent’s folder and worktrees.
 child-repos-label = Repositories (the parent’s)
 child-create = Create

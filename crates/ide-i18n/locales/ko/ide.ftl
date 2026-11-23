@@ -560,6 +560,7 @@ child-title-placeholder = 제목 (비우면 자동)
 child-separate = 분리 워크트리
 child-separate-hint = 부모 브랜치에서 갈라진 자기 워크트리예요. 나중에 부모에 합쳐요.
 child-shared = 공유 폴더
+session-own-worktrees = 자기 워크트리(브랜치)에서 작업해요
 child-shared-hint = 부모의 폴더와 워크트리에서 같이 작업해요.
 child-repos-label = 레포 (부모의 레포)
 child-create = 만들기

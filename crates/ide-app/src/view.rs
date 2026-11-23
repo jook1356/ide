@@ -839,6 +839,25 @@ impl App {
             .wrapping(text::Wrapping::None)
             .ellipsis(text::Ellipsis::End)
             .width(Fill);
+        // A branch mark when the session has worktrees of its own: a workspace session with
+        // repositories that is not a shared child (those work in the parent's worktrees;
+        // original-repo sessions have none).
+        let own_worktrees =
+            s.mode == ide_client::SessionMode::Workspace && !s.shared && !s.repos.is_empty();
+        let title: El<'a> = if own_worktrees {
+            row![
+                title,
+                tip(
+                    icons::icon(Icon::GitBranch, 11.0, style::DIM),
+                    tr::session_own_worktrees()
+                ),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .boxed()
+        } else {
+            title.boxed()
+        };
         // Desk's phase (답변 중 / 응답 필요 / 새 답변) leads the second line.
         let phase = match s.activity {
             ide_client::AgentActivity::Working => Some((tr::activity_working(), style::ACCENT_TEXT)),
