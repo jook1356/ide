@@ -910,6 +910,12 @@ impl Client {
         )
     }
 
+    /// `agent.reply`: the app's answer to a `Notify::AgentRequest` of the agent bridge
+    /// (`Ok`: the tool's text for the agent, `Err`: why it failed).
+    pub async fn agent_reply(&self, request: u64, result: Result<String, String>) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::AgentReply { request, result }).await)
+    }
+
     /// `session.set_flags`: pin / unpin and archive / unarchive (`None` = unchanged).
     pub async fn set_session_flags(
         &self,
@@ -2459,6 +2465,7 @@ async fn connect_once(inner: &Arc<Inner>) -> Result<(Arc<Conn>, Welcome), ProtoE
         proto_version: PROTO_VERSION,
         client_version: opts.client_version.clone(),
         resume: inner.token.lock().unwrap().clone(),
+        agent: None,
     };
     let r = conn
         .call(inner.next_id(), Request::Hello(hello), opts.connect_timeout)

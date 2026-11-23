@@ -337,6 +337,20 @@ pub struct RootPrepared {
     pub guidance: bool,
 }
 
+/// The agent bridge of a session (`docs/agent-bridge.md`): the MCP server that connects the
+/// agent to the IDE, env vars for the agent process, and the base instructions that tell the
+/// agent about it. Added by the server to every session; not part of any configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bridge {
+    /// The bridge's MCP server (its name is reserved: a configuration server of the same name
+    /// is left out).
+    pub server: McpServer,
+    /// Env vars of the agent process (the bridge's session id, token and server socket).
+    pub env: Vec<(String, String)>,
+    /// Base instructions appended to the configuration's.
+    pub instructions: String,
+}
+
 /// Inputs of [`assemble`].
 #[derive(Debug, Clone)]
 pub struct SessionInput<'a> {
@@ -350,6 +364,8 @@ pub struct SessionInput<'a> {
     pub account: Option<&'a AccountDir>,
     /// The configuration.
     pub configuration: &'a Configuration,
+    /// The agent bridge (`None`: not connected, e.g. a server without a daemon socket).
+    pub bridge: Option<Bridge>,
 }
 
 impl<'a> SessionInput<'a> {
@@ -388,7 +404,14 @@ impl<'a> SessionInput<'a> {
             },
             account,
             configuration,
+            bridge: None,
         }
+    }
+
+    /// The same input with the agent bridge.
+    pub fn with_bridge(mut self, bridge: Option<Bridge>) -> Self {
+        self.bridge = bridge;
+        self
     }
 }
 
@@ -402,9 +425,9 @@ pub struct Assembled {
 }
 
 /// Build the launch spec of a session: account home -> begin -> (workspace sessions)
-/// prepare_root -> skills (unless the root covered them) -> MCP -> instructions (configuration
-/// text + guidance unless the root covered it + fallback text) -> outside dirs -> hooks ->
-/// finish. Regenerates the scratch dir. `TERM` and `COLORTERM` are always set.
+/// prepare_root -> skills (unless the root covered them) -> MCP (configuration servers + the
+/// bridge) -> instructions (configuration text + bridge text + guidance unless the root
+/// covered it + fallback text) -> outside dirs -> hooks -> finish. Regenerates the scratch dir. `TERM` and `COLORTERM` are always set.
 pub fn assemble(
     provider: &dyn AgentProvider,
     input: &SessionInput<'_>,
@@ -444,10 +467,35 @@ pub fn assemble(
     if !skills.is_empty() && !prepared.skills {
         provider.apply_skills(&mut plan, &skills)?;
     }
-    if !cfg.mcp_servers.is_empty() {
-        provider.apply_mcp(&mut plan, &cfg.mcp_servers)?;
+    let mut servers = cfg.mcp_servers.clone();
+    let mut bridge_text = None;
+    if let Some(b) = &input.bridge {
+        plan.env.extend(b.env.iter().cloned());
+        // Plain programs (shells) take no MCP servers: they only get the env vars.
+        if provider.capabilities().mode(ctx.mode).mcp != Support::Unsupported {
+            if servers.iter().any(|s| s.name == b.server.name) {
+                plan.notes.push(format!(
+                    "mcp: the configuration's server \"{}\" is left out (name reserved by the ide bridge)",
+                    b.server.name
+                ));
+                servers.retain(|s| s.name != b.server.name);
+            }
+            servers.push(b.server.clone());
+            bridge_text = Some(b.instructions.clone());
+        }
+    }
+    if !servers.is_empty() {
+        provider.apply_mcp(&mut plan, &servers)?;
     }
     let mut text = cfg.instructions.trim().to_owned();
+    if let Some(b) = bridge_text.filter(|t| !t.trim().is_empty()) {
+        if !text.is_empty() {
+            text.push_str("
+
+");
+        }
+        text.push_str(b.trim());
+    }
     let guidance = ctx.guidance.as_deref().filter(|_| !prepared.guidance);
     for extra in guidance
         .map(str::to_owned)

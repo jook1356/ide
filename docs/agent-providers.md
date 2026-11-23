@@ -18,6 +18,9 @@ instructions, hooks); each provider translates that into its own CLI flags, env 
 | **Configuration** (UI: 프로필 / profile) | Provider-agnostic bundle: skills it owns (folders `<data>/configurations/<slug>/skills/<name>/` with a `SKILL.md`; `disabled_skills` lists the ones switched off; `ide-core/src/skill.rs`), MCP servers (stdio: name, command, args, env), instructions (text). Replaces the old "profile"; the UI calls it 프로필 again. Older files listed skill folders anywhere: they are copied in once on open. | server: `configurations.json` + `configurations/<slug>/` |
 | **Session** | provider + account (optional) + configuration + repo/worktree; or a *login* session (provider + account, no repo) | server: `sessions.json` (`kind`, `provider`, `account`, `configuration`) |
 
+Every agent session also gets the **agent bridge** (`docs/agent-bridge.md`): the `ide` MCP server,
+its env vars and base instructions, added by the server through `SessionInput::bridge`.
+
 Generated per-session files live in `<data>/sessions/<id>/agent/` (regenerated on every start,
 removed with the session). Nothing is written into the worktree.
 

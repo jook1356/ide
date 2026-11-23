@@ -59,6 +59,9 @@ pub struct ServerConfig {
     /// Extra environment of `git credential fill` (tests isolate git's config with
     /// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_NOSYSTEM` so the user's credential store is never read).
     pub git_credential_env: Vec<(String, String)>,
+    /// The agent bridge's socket and program (`docs/agent-bridge.md`); set by the daemon,
+    /// `None` = sessions get no bridge.
+    pub bridge: Option<crate::bridge::BridgeConfig>,
 }
 
 impl ServerConfig {
@@ -86,6 +89,7 @@ impl ServerConfig {
                 .ok()
                 .filter(|v| !v.is_empty()),
             git_credential_env: Vec::new(),
+            bridge: None,
         }
     }
 }
@@ -154,6 +158,7 @@ impl Server {
                 )),
                 http: Arc::new(crate::pr::HttpApi::new(self.config.github_api.clone())),
             },
+            self.config.bridge.clone(),
         )?);
         users.insert(user.id.clone(), ctx.clone());
         Ok(ctx)
@@ -228,7 +233,7 @@ impl Server {
     }
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::new();
     for i in 0..2u64 {
@@ -267,6 +272,8 @@ pub struct UserCtx {
     watchers: Watchers,
     write_lock: Mutex<()>,
     github: GithubSetup,
+    /// The agent bridge: sessions' tokens, app calls in flight.
+    bridge: crate::bridge::BridgeState,
 }
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
@@ -284,6 +291,7 @@ impl UserCtx {
         audit: Arc<dyn Audit>,
         launch_env: LaunchEnv,
         github: GithubSetup,
+        bridge: Option<crate::bridge::BridgeConfig>,
     ) -> Result<Self, ProtoError> {
         let report = ide_core::migrate_profiles(&paths).map_err(|e| core_error(&e))?;
         if report != Default::default() {
@@ -340,6 +348,7 @@ impl UserCtx {
             watchers: Watchers::default(),
             write_lock: Mutex::new(()),
             github,
+            bridge: crate::bridge::BridgeState::new(bridge),
         })
     }
 
@@ -355,6 +364,31 @@ impl UserCtx {
 
     fn notify(&self, n: Notify) {
         let _ = self.events.send(n);
+    }
+
+    /// Connections subscribed to this user's notifications (the apps; agent bridge
+    /// connections do not subscribe).
+    pub fn subscriber_count(&self) -> usize {
+        self.events.receiver_count()
+    }
+
+    /// Agent bridge: does `token` belong to `session`?
+    pub fn agent_check(&self, session: &str, token: &str) -> bool {
+        self.bridge.check(session, token)
+    }
+
+    /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
+    /// asks the connected apps).
+    pub async fn agent_call(&self, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        // Apps subscribe to the notifications; agent connections do not.
+        let apps = self.subscriber_count() > 0;
+        let info = || self.resolve_session(session).map(|s| self.info(&s));
+        crate::bridge::call(&self.bridge, session, tool, args, info, apps, |n| self.notify(n)).await
+    }
+
+    /// Agent bridge: an app's answer to a `Notify::AgentRequest`.
+    pub fn agent_reply(&self, request: u64, result: Result<String, String>) {
+        self.bridge.reply(request, result);
     }
 
     fn audit(&self, action: &str, target: &str) {
@@ -1246,6 +1280,7 @@ impl UserCtx {
                 }
                 self.sessions.lock().unwrap().remove(&s.id).map_err(core)?;
                 self.hosts.lock().unwrap().remove(s.id.as_str());
+                self.bridge.forget(s.id.as_str());
                 self.notify(Notify::ReposChanged);
                 self.audit(
                     "session.delete",
@@ -1804,7 +1839,8 @@ impl UserCtx {
             &configuration,
             &repos,
             guidance,
-        );
+        )
+        .with_bridge(self.bridge.for_session(s.id.as_str()));
         drop(repos);
         let built = ide_agents::assemble(p, &input, &self.launch_env).map_err(core)?;
         for n in &built.notes {

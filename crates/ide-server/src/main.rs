@@ -1,4 +1,6 @@
-//! `ide-server --stdio` | `--stdio --no-daemon` | `--daemon [--idle-exit SECS]` | `--version`.
+//! `ide-server --stdio` | `--stdio --no-daemon` | `--daemon [--idle-exit SECS]` | `mcp` |
+//! `--version`. `mcp` is the agent bridge's MCP server (run by a session's agent CLI, see
+//! `docs/agent-bridge.md`).
 //! The daemon exits after `--idle-exit` / `IDE_SERVER_IDLE_EXIT_SECS` seconds (default 600,
 //! 0 = never) without clients and running sessions.
 
@@ -11,7 +13,7 @@ use ide_server::{Server, ServerConfig, daemon, socket_name};
 const DEFAULT_IDLE_EXIT_SECS: u64 = 600;
 
 const USAGE: &str =
-    "usage: ide-server --stdio [--no-daemon] | --daemon [--idle-exit SECS] | --version";
+    "usage: ide-server --stdio [--no-daemon] | --daemon [--idle-exit SECS] | mcp | --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -19,6 +21,21 @@ fn main() {
     if has("--version") {
         println!("ide-server {}", ide_proto::VERSION);
         return;
+    }
+    if args.first().map(String::as_str) == Some("mcp") {
+        // stdout carries MCP messages: no logging, errors to stderr (shown by the agent CLI).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let code = match rt.block_on(ide_server::bridge::run_mcp_stdio()) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("ide-server mcp: {e:#}");
+                1
+            }
+        };
+        std::process::exit(code);
     }
     // Daemon idle exit (no clients, no running sessions): default 10 minutes; 0 = never.
     let idle_exit = args
@@ -44,7 +61,7 @@ fn main() {
         std::process::exit(2);
     };
 
-    let config = match ServerConfig::from_env() {
+    let mut config = match ServerConfig::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("ide-server: {e}");
@@ -68,6 +85,13 @@ fn main() {
                 }
             },
             Mode::Daemon => {
+                // Sessions' agents reach this daemon through its socket (the agent bridge).
+                config.bridge = std::env::current_exe()
+                    .ok()
+                    .map(|exe| ide_server::bridge::BridgeConfig {
+                        exe,
+                        socket: name.clone(),
+                    });
                 let server = Server::new(config);
                 let r = daemon::run_daemon(server.clone(), &name, idle_exit).await;
                 server.kill_all();

@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use ide_proto::{
-    Attached, Mux, MuxConfig, Notify, PROTO_VERSION, ProtoError, Request, Response, Role,
-    RpcMessage, SearchSummary, Stream, TextSearch, UserInfo, VERSION, Welcome, encode_chunk,
+    AgentHello, Attached, Mux, MuxConfig, Notify, PROTO_VERSION, ProtoError, Request, Response,
+    Role, RpcMessage, RpcReceiver, SearchSummary, Stream, TextSearch, UserInfo, VERSION, Welcome,
+    encode_chunk,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -205,6 +206,10 @@ where
             return;
         }
     };
+    if let Some(agent) = hello.agent {
+        serve_agent(&server, ctx, mux.clone(), rx, id, agent).await;
+        return;
+    }
     let (token, resumed) = server.resume(hello.resume.as_ref().map(|t| t.0.as_str()));
     tracing::info!(
         "client connected: user={} client={} resumed={resumed}",
@@ -309,6 +314,10 @@ where
                 }
                 conn.reply(id, Ok(Response::Unit));
             }
+            Request::AgentReply { request, result } => {
+                conn.ctx.agent_reply(request, result);
+                conn.reply(id, Ok(Response::Unit));
+            }
             Request::TermDetach { session } => {
                 if let Some(h) = conn.attachments.lock().unwrap().remove(&session) {
                     h.abort();
@@ -343,6 +352,64 @@ where
     }
     mux.close();
     tracing::info!("client disconnected: user={}", user.id);
+}
+
+/// An agent bridge connection (`ide-server mcp` of one session's agent): checked against the
+/// session's bridge token, then only `agent.*` requests (and pings), no notifications.
+async fn serve_agent(
+    server: &Arc<Server>,
+    ctx: Arc<UserCtx>,
+    mux: Mux,
+    mut rx: RpcReceiver,
+    id: u64,
+    agent: AgentHello,
+) {
+    let send = |id, result| {
+        let _ = mux.send_rpc(&RpcMessage::Response { id, result }.encode());
+    };
+    if !ctx.agent_check(&agent.session, &agent.token) {
+        tracing::warn!("agent bridge: refused a connection for session {}", agent.session);
+        send(id, Err(ProtoError::new("unauthorized")));
+        mux.close();
+        return;
+    }
+    tracing::info!("agent bridge connected: session {}", agent.session);
+    send(
+        id,
+        Ok(Response::Welcome(Welcome {
+            proto_version: PROTO_VERSION,
+            server_version: VERSION.to_owned(),
+            user: ctx.user().clone(),
+            capabilities: vec!["agent".to_owned()],
+            resume_token: ide_proto::ResumeToken(String::new()),
+            resumed: false,
+            server_instance: server.instance().to_owned(),
+        })),
+    );
+    while let Some(msg) = rx.recv().await {
+        let Ok(RpcMessage::Request { id, req }) = RpcMessage::decode(&msg) else {
+            continue;
+        };
+        match req {
+            Request::Ping => send(id, Ok(Response::Pong)),
+            Request::AgentTools => send(id, Ok(Response::AgentTools(crate::bridge::tools()))),
+            Request::AgentCall { tool, args } => {
+                let (ctx, mux, session) = (ctx.clone(), mux.clone(), agent.session.clone());
+                tokio::spawn(async move {
+                    ctx.audit_action("agent.call", &format!("{session} {tool}"));
+                    let r = ctx.agent_call(&session, &tool, &args).await;
+                    let result = Ok(Response::AgentResult(r));
+                    let _ = mux.send_rpc(&RpcMessage::Response { id, result }.encode());
+                });
+            }
+            other => send(
+                id,
+                Err(ProtoError::new("bad-request").arg("method", other.method())),
+            ),
+        }
+    }
+    mux.close();
+    tracing::info!("agent bridge disconnected: session {}", agent.session);
 }
 
 async fn forward_notifications(mux: Mux, mut rx: broadcast::Receiver<Notify>) {

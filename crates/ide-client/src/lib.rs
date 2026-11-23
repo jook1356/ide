@@ -32,7 +32,7 @@ pub use ide_proto::{
     DefResult, DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent,
     FileMatch, FsEntry, PathMatch, PathMatches, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, NewSession, Notify,
     ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding, ScriptGroup, ScriptItem, UserTerm, PortInfo, ShellInfo,
-    TextSearch, UserInfo, Welcome,
+    TextSearch, UserInfo, Welcome, AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE,
 };
 // --- local git actions (Changes / History footer)
 pub use ide_proto::git_actions::{

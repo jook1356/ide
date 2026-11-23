@@ -9,6 +9,7 @@
 //!   client path to one repo worktree of one session (`fs.*`, `search.*`, `git.*`, `def.lookup`).
 
 pub mod audit;
+pub mod bridge;
 mod conn;
 pub mod daemon;
 pub mod def;

@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 11;
+pub const PROTO_VERSION: u32 = 12;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -42,6 +42,40 @@ pub struct Hello {
     pub client_version: String,
     /// Token from a previous `Welcome` when reconnecting.
     pub resume: Option<ResumeToken>,
+    /// Set by the agent bridge (`ide-server mcp`, run by a session's agent CLI): the
+    /// connection acts for that session only and may send only `agent.*` requests.
+    #[serde(default)]
+    pub agent: Option<AgentHello>,
+}
+
+/// The session an agent bridge connection acts for, and the session's bridge token (passed
+/// to the agent's MCP server by the server; see `docs/agent-bridge.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHello {
+    pub session: String,
+    pub token: String,
+}
+
+/// Agent bridge tool answered by the daemon: this session as JSON.
+pub const AGENT_TOOL_SESSION: &str = "ide_session";
+/// Agent bridge tool carried out by an app (`Notify::AgentRequest`): show `{"message"}` in the
+/// session's panel.
+pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
+
+/// A tool the agent bridge offers (MCP `tools/list`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTool {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema of the arguments (a JSON object, as text).
+    pub input_schema: String,
+}
+
+/// What an agent tool call returned (MCP `tools/call`): text, and whether it failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentToolResult {
+    pub text: String,
+    pub is_error: bool,
 }
 
 /// Server answer to [`Hello`] (as `Response::Welcome`).
@@ -441,6 +475,18 @@ pub enum Request {
         id: String,
         pinned: Option<bool>,
         archived: Option<bool>,
+    },
+    /// Agent bridge connections only: the tools of the bridge (`AgentTools`).
+    AgentTools,
+    /// Agent bridge connections only: call a tool with JSON arguments (`AgentResult`).
+    AgentCall {
+        tool: String,
+        args: String,
+    },
+    /// App connections: the answer to a `Notify::AgentRequest` (`Ok`: the tool's text).
+    AgentReply {
+        request: u64,
+        result: Result<String, String>,
     },
     /// Open (or replace) this connection's terminal stream for `session`.
     TermAttach {
@@ -955,6 +1001,9 @@ impl Request {
             Request::UTermRemove { .. } => "uterm.remove",
             Request::SessionRename { .. } => "session.rename",
             Request::SessionSetFlags { .. } => "session.set_flags",
+            Request::AgentTools => "agent.tools",
+            Request::AgentCall { .. } => "agent.call",
+            Request::AgentReply { .. } => "agent.reply",
             Request::TermAttach { .. } => "term.attach",
             Request::TermDetach { .. } => "term.detach",
             Request::TermWrite { .. } => "term.write",
@@ -1148,12 +1197,22 @@ pub enum Response {
     PrBranchUpdated { message: Option<String> },
     /// `prompt.commit` / `prompt.pr`: the text to send.
     Prompt(String),
+    AgentTools(Vec<AgentTool>),
+    AgentResult(AgentToolResult),
 }
 
 /// Server -> client event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub enum Notify {
+    /// A session's agent called a bridge tool the app carries out (e.g. showing something):
+    /// answer with `Request::AgentReply` (the first answer wins; unanswered calls time out).
+    AgentRequest {
+        request: u64,
+        session: String,
+        tool: String,
+        args: String,
+    },
     /// OSC 0/2 title (empty = reset).
     Title {
         session: String,
@@ -1245,6 +1304,7 @@ mod tests {
                     proto_version: PROTO_VERSION,
                     client_version: "0.1".into(),
                     resume: Some(ResumeToken("t".into())),
+                    agent: None,
                 }),
             },
             RpcMessage::Request {

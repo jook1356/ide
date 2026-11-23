@@ -30,6 +30,7 @@ mod frame;
 mod history;
 mod i18n;
 mod icons;
+mod agent_bridge;
 mod item_menu;
 mod uterm;
 mod script;

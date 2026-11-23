@@ -1,5 +1,5 @@
 //! Server + client end to end: in-memory transport and real `ide-server` child processes.
-//! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
+//! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
 
 mod common;
 
@@ -595,6 +595,7 @@ async fn handshake_errors() {
             proto_version: v,
             client_version: "test".into(),
             resume: None,
+            agent: None,
         })
     };
     let e = hello(&server, me.clone(), h(PROTO_VERSION + 1))

@@ -1706,6 +1706,12 @@ impl App {
                 }
                 self.ensure_attached()
             }
+            Notify::AgentRequest {
+                request,
+                session,
+                tool,
+                args,
+            } => self.on_agent_request(request, session, tool, args),
             Notify::Title { session, title } => {
                 if self.uterm_notify(&session, None, Some(title.clone())) {
                     return Task::none();

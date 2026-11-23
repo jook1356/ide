@@ -119,6 +119,7 @@ fn input<'a>(
         },
         account: acct,
         configuration: cfg,
+        bridge: None,
     }
 }
 
