@@ -7,8 +7,8 @@
 use std::sync::LazyLock;
 
 use iced::widget::{
-    Column, button, checkbox, column, container, pick_list, popover, row, scrollable, space, svg,
-    text, text_input,
+    Column, button, checkbox, column, container, pick_list, popover, row, scrollable, space, stack,
+    svg, text, text_input,
 };
 use iced::{
     Alignment, Background, Border, Color, Element, Fill, Length, Shadow, Theme, Widget as _, color,
@@ -310,6 +310,12 @@ const METHODS: [PrMergeMethod; 3] = [
 
 // ---------------------------------------------------------------------------- footer
 
+/// Width of the "…" button, the gap between the bar's buttons and the widths of its menus.
+const MORE_W: f32 = 30.0;
+const BAR_GAP: f32 = 6.0;
+const SYNC_MENU_W: f32 = 250.0;
+const MORE_MENU_W: f32 = 270.0;
+
 impl App {
     /// The footer under Changes / History (nothing under Explore or without repos).
     pub fn footer_section<'a>(&'a self, live: &'a Live) -> El<'a> {
@@ -350,10 +356,21 @@ impl App {
             FooterMenu::Sync => self.sync_menu(sid, f),
             FooterMenu::More => self.more_menu(sid),
         });
-        col = col.pb(popover(bar, popup)
+        // iced's popover centres its popup on the anchor, so the anchor is an invisible box as
+        // wide as the menu, laid over the bar and ending at the opening button's right edge:
+        // the menu opens right-aligned to "…" (or to the sync button's ▾).
+        let (menu_w, right) = match menu {
+            Some(FooterMenu::Sync) => (SYNC_MENU_W, MORE_W + BAR_GAP),
+            _ => (MORE_MENU_W, 0.0),
+        };
+        let anchor = popover(space().width(menu_w).height(Fill), popup)
             .position(iced::widget::popover::Position::Top)
             .gap(4)
-            .on_close(fm(sid, FooterMsg::CloseMenu)));
+            .on_close(fm(sid, FooterMsg::CloseMenu));
+        col = col.pb(stack![
+            bar,
+            row![space().width(Fill), anchor, space().width(right)].height(Fill)
+        ]);
         column![
             container(space().height(1).width(Fill)).style(style::bg(style::BORDER)),
             container(col).padding([6, 8]),
@@ -411,7 +428,7 @@ impl App {
                     .center_x(Fill)
                     .center_y(Fill),
             )
-            .width(30)
+            .width(MORE_W)
             .height(30)
             .padding(0)
             .style(default_btn(4.0))
@@ -419,7 +436,7 @@ impl App {
             tr::foot_more(),
         );
         row![commit, self.sync_button(sid, f), more]
-            .spacing(6)
+            .spacing(BAR_GAP)
             .align_y(Alignment::Center)
             .boxed()
     }
@@ -611,7 +628,7 @@ impl App {
         .spacing(2);
         container(col)
             .padding(6)
-            .width(250)
+            .width(SYNC_MENU_W)
             .style(style::modal_card)
             .boxed()
     }
@@ -670,7 +687,7 @@ impl App {
         }
         container(col)
             .padding(6)
-            .width(270)
+            .width(MORE_MENU_W)
             .style(style::modal_card)
             .boxed()
     }
