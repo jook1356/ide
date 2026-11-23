@@ -47,6 +47,13 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
     }
 }
 
+/// As wide as the content, but never more than the room a row leaves after its fixed-size
+/// siblings (iced's `Length::Fluid(Constraint::Max)`; `iced::length` is not re-exported, and
+/// stacking `Fit` onto a max-bounded `Fill` yields exactly that length).
+fn fit_up_to_room() -> Length {
+    Length::Fit.stack(Length::Fill.max(f32::INFINITY))
+}
+
 pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
     tooltip(
         content.into(),
@@ -845,8 +852,10 @@ impl App {
         let own_worktrees =
             s.mode == ide_client::SessionMode::Workspace && !s.shared && !s.repos.is_empty();
         let title: El<'a> = if own_worktrees {
+            // The title only as wide as its text (cut with … when the row is too narrow), so
+            // the mark sits right after it.
             row![
-                title,
+                title.width(fit_up_to_room()),
                 tip(
                     icons::icon(Icon::GitBranch, 11.0, style::DIM),
                     tr::session_own_worktrees()
@@ -3064,5 +3073,14 @@ impl App {
             .on_press(Message::CloseModal),
         )
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fit_up_to_room_is_fluid_max() {
+        // The session row's title relies on this exact length (see `fit_up_to_room`).
+        assert_eq!(format!("{:?}", super::fit_up_to_room()), "Fluid(Max)");
     }
 }
