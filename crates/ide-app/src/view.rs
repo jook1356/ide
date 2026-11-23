@@ -342,7 +342,7 @@ impl App {
         (icon, label)
     }
 
-    /// Tooltip of the rail's server indicator: target, state and (connected) server version.
+    /// Text of the footer's server indicator: target, state and (connected) server version.
     pub fn server_tooltip(&self) -> String {
         let target = self.server_label();
         match &self.conn {
@@ -356,7 +356,7 @@ impl App {
     }
 
     /// Colour of the connection: green connected, amber (re)connecting, red disconnected.
-    fn conn_color(&self) -> Color {
+    pub(crate) fn conn_color(&self) -> Color {
         match &self.conn {
             Conn::Connected(_) => style::GREEN,
             Conn::Connecting | Conn::Reconnecting => style::AMBER,
@@ -364,8 +364,8 @@ impl App {
         }
     }
 
-    /// Navigation rail (Hermes Desk's `NavRail`): 64 px, 44 px buttons 6 px apart, the server
-    /// indicator at the bottom.
+    /// Navigation rail (Hermes Desk's `NavRail`): 64 px, 44 px buttons 6 px apart (the server
+    /// indicator is in the app footer).
     fn rail(&self) -> El<'_> {
         let link = |icon: Icon, active: bool, msg: Message| {
             let color = if active {
@@ -430,36 +430,7 @@ impl App {
                     .boxed(),
             );
         }
-        // Server indicator: pulse icon with a status dot (Mantine `Indicator`: 9 px, 7 px in
-        // from the top right corner).
-        let server = stack![
-            link(
-                Icon::ActivityHeartbeat,
-                false,
-                Message::Page(Page::Settings)
-            ),
-            container(
-                container(space())
-                    .width(9)
-                    .height(9)
-                    .style(style::dot(self.conn_color())),
-            )
-            .padding(iced::Padding {
-                top: 2.5,
-                left: 32.5,
-                ..iced::Padding::ZERO
-            }),
-        ]
-        .width(44)
-        .height(44)
-        .boxed();
-        let col = column![
-            top.height(Fill),
-            container(tip(server, self.server_tooltip())).padding(iced::Padding {
-                bottom: 10.0,
-                ..iced::Padding::ZERO
-            }),
-        ]
+        let col = column![top.height(Fill)]
         .width(Fill)
         .align_x(Alignment::Center)
         .padding(iced::Padding {

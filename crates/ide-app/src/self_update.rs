@@ -258,7 +258,19 @@ impl App {
 
     /// The footer: Desk's thin status bar (only the self-update control here).
     pub(crate) fn app_footer(&self) -> El<'_> {
-        let mut r = row![space().width(Fill)].spacing(8).align_y(Alignment::Center);
+        // Left: the server indicator (Desk's process dot + dim label); opens the settings page.
+        let server = button(
+            row![
+                container(space().width(8).height(8)).style(style::dot(self.conn_color())),
+                text(self.server_tooltip()).size(11).color(style::DIM),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([0, 4])
+        .style(style::icon)
+        .on_press(Message::Page(crate::ui_state::Page::Settings));
+        let mut r = row![server, space().width(Fill)].spacing(8).align_y(Alignment::Center);
         let s = self.update_status.as_ref();
         // The last result, once (until dismissed).
         let result = s

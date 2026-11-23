@@ -156,7 +156,7 @@ enum Step {
     /// The rail's work button on the work page: (session list open, hovered) -> the
     /// collapse / expand icon while hovered and the hide / show tooltip.
     ExpectWorkToggle(bool, bool),
-    /// The rail's server tooltip contains the text.
+    /// The footer's server indicator contains the text.
     ExpectServerTooltip(&'static str),
     /// The registered repos arrived (repos page).
     WaitReposLoaded(u64),
@@ -3457,7 +3457,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::ExpectServerTooltip(needle) => {
                 let t = app.server_tooltip();
-                sc.check(t.contains(needle), &format!("rail server tooltip {t:?}"));
+                sc.check(t.contains(needle), &format!("footer server indicator {t:?}"));
             }
             Step::ExpectSettingsError(needle) => {
                 let err = app.settings.error.clone();

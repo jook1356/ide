@@ -15,7 +15,6 @@ pub enum Icon {
     Stack2,
     GitBranch,
     Settings,
-    ActivityHeartbeat,
     SidebarCollapse,
     SidebarExpand,
     FolderOpen,
@@ -53,13 +52,12 @@ pub enum Icon {
     Hammer,
 }
 
-const SOURCES: [&str; 35] = [
+const SOURCES: [&str; 34] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
     include_str!("../assets/icons/git-branch.svg"),
     include_str!("../assets/icons/settings.svg"),
-    include_str!("../assets/icons/activity-heartbeat.svg"),
     include_str!("../assets/icons/layout-sidebar-left-collapse.svg"),
     include_str!("../assets/icons/layout-sidebar-left-expand.svg"),
     include_str!("../assets/icons/folder-open.svg"),
