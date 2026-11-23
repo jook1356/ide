@@ -2878,6 +2878,7 @@ impl App {
             Modal::NewChild(f) => self.child_card(f),
             Modal::BulkDelete(f) => self.bulk_delete_card(f),
             Modal::SelfUpdate => self.update_card(),
+            Modal::WidgetGrant(f) => self.widget_grant_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

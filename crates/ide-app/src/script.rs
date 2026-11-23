@@ -49,6 +49,9 @@ mod footer_steps;
 /// Detail window steps (`script_detail_window.rs`).
 #[path = "script_detail_window.rs"]
 mod detail_window_steps;
+/// Widget steps (`script_widgets.rs`).
+#[path = "script_widgets.rs"]
+mod widget_steps;
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
@@ -361,6 +364,7 @@ enum Step {
     Foot(footer_steps::FStep),
     /// Detail window steps.
     Pop(detail_window_steps::PStep),
+    Widget(widget_steps::WStep),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -470,6 +474,8 @@ impl Script {
         let only_p2 = only == "p2";
         // `IDE_APP_SCRIPT_ONLY=pop`: startup, the detail window checks and the server stop.
         let only_pop = only == "pop";
+        // `IDE_APP_SCRIPT_ONLY=widget`: startup, the widget checks and the server stop.
+        let only_widget = only == "widget";
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -478,17 +484,20 @@ impl Script {
         ));
         Some(Script {
             steps: {
-                let mut s = if only_pop {
+                let mut s = if only_widget {
+                    widget_steps::steps_only()
+                } else if only_pop {
                     detail_window_steps::steps_only()
                 } else if only_p2 {
                     steps_p2_only()
                 } else {
                     steps(claude)
                 };
-                if !only_pop {
+                if !only_pop && !only_widget {
                     changes::splice(&mut s);
                     footer_steps::splice(&mut s);
                     detail_window_steps::splice(&mut s);
+                    widget_steps::splice(&mut s);
                 }
                 s
             },
@@ -3885,6 +3894,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::Pop(x) => {
                 let (n, t) = detail_window_steps::run(sc, app, x, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::Widget(x) => {
+                let (n, t) = widget_steps::run(sc, app, x, el);
                 next = n;
                 tasks.push(t);
             }

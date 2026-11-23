@@ -33,6 +33,7 @@ mod icons;
 mod agent_bridge;
 mod family_ui;
 mod self_update;
+mod widgets_ui;
 mod item_menu;
 mod uterm;
 mod script;
@@ -67,6 +68,8 @@ fn data_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Every process (CEF helpers too) must know the app's URL schemes.
+    ide_web::register_custom_schemes(&[widgets_ui::SCHEME]);
     // CEF helper processes re-run this executable: they must exit here.
     if let Some(code) = ide_web::maybe_run_subprocess() {
         std::process::exit(code);
