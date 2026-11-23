@@ -170,7 +170,7 @@ start go to stderr.
 | Tool | Answered by | What |
 |---|---|---|
 | `ide_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
-| `ide_show_message` | app | `{message}`: a toast in the session's detail panel |
+| `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon | session families: `docs/session-family.md` |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages

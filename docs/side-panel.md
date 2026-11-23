@@ -96,7 +96,8 @@ Option<&GitStatus>`, `App::refresh_repo(sid) -> Task<Message>`.
 - The list keeps the ide's staged / changes / untracked groups (Desk: one flat list); a path in
   two groups has one checkbox state, and the tab badge / `N changed files` count paths.
 - The checkbox is drawn (iced's checkbox has no indeterminate state).
-- Desk's notifications are the detail pane's toast; a failed 새 브랜치 shows its error in the
+- Desk's notifications are notices of the notification centre (`docs/notifications.md`), shown
+  as toasts; a failed 새 브랜치 shows its error in the
   dialog (Desk: a notification, dialog kept open).
 - The 베이스 브랜치 picker is Desk's searchable select: the chosen branch, opening a search box over
   the 로컬 / 원격 lists (브랜치 없음 when nothing matches).

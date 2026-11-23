@@ -8,10 +8,11 @@
 //! (`fs.*`, `git.*`, `search.*`, `def.lookup`); the visible session is watched (`fs.watch`) and
 //! refreshed from `FsChanged` / `GitChanged`.
 
+use crate::notices::Tone;
 use std::collections::{BTreeSet, HashSet};
 
 use crate::history::{CommitFiles, HistoryState};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::Task;
 use ide_client::{
@@ -31,7 +32,6 @@ use crate::ui_state::DetailUi;
 /// Width of the side panel (Changes / History / Explore).
 pub const SIDE_W: f32 = 290.0;
 /// How long a transient message stays.
-pub const TOAST_FOR: Duration = Duration::from_secs(5);
 /// Widget ids (`SEARCH_ID`: Explore's search input).
 pub const SEARCH_ID: &str = "ide-search";
 pub const QUICK_ID: &str = "ide-quick-open";
@@ -374,7 +374,8 @@ pub struct Detail {
     pub watched: BTreeSet<String>,
     /// Shown state may be outdated (not watched for a while, reconnect): refresh when shown.
     pub stale: bool,
-    pub toast: Option<(String, Instant)>,
+    /// Toasts for the notification centre, moved there after each update (`notice_view.rs`).
+    pub toasts: Vec<(crate::notices::Tone, crate::notices::Text)>,
     /// Commit / sync / PR footer under Changes and History (`footer.rs`).
     pub footer: crate::footer::Footer,
     /// Checkboxes, stash, discard, commit menu and branch picker (`changes_actions.rs`).
@@ -430,7 +431,7 @@ impl Detail {
             diff_mode: DiffMode::Unified,
             watched: BTreeSet::new(),
             stale: false,
-            toast: None,
+            toasts: Vec::new(),
             footer: Default::default(),
             acts: Default::default(),
             scripts: Default::default(),
@@ -504,9 +505,10 @@ impl Detail {
         self.acts = Default::default();
     }
 
-    /// Show a message for a few seconds.
-    pub fn toast(&mut self, msg: String) {
-        self.toast = Some((msg, Instant::now()));
+    /// Show a message for a few seconds (a toast of the notification centre, which also keeps
+    /// it in its list).
+    pub fn toast(&mut self, tone: Tone, msg: impl Into<crate::notices::Text>) {
+        self.toasts.push((tone, msg.into()));
     }
 }
 
@@ -1819,12 +1821,12 @@ impl App {
                 Ok(DefResult::None { reason }) => {
                     crate::script::log(&format!("definition: none ({reason})"));
                     let text = i18n::proto_error(&reason);
-                    self.detail_mut(sid).expect("session").toast(text);
+                    self.detail_mut(sid).expect("session").toast(Tone::Info, text);
                     Task::none()
                 }
                 Err(e) => {
                     let text = i18n::proto_error(&e);
-                    self.detail_mut(sid).expect("session").toast(text);
+                    self.detail_mut(sid).expect("session").toast(Tone::Error, text);
                     Task::none()
                 }
             },
@@ -1835,7 +1837,7 @@ impl App {
                         let text = i18n::proto_error(&e);
                         let d = self.detail_mut(sid).expect("session");
                         d.watched.remove(&repo);
-                        d.toast(text);
+                        d.toast(Tone::Warning, text);
                     }
                 }
                 Task::none()
@@ -1859,7 +1861,7 @@ impl App {
                     }
                     Err(e) => {
                         let text = tr::history_load_failed(&i18n::proto_error(&e));
-                        d.toast(text);
+                        d.toast(Tone::Error, text);
                     }
                 }
                 Task::none()
@@ -1894,7 +1896,7 @@ impl App {
                     Ok(log) => d.history.append(log.commits, log.has_more),
                     Err(e) => {
                         let text = tr::history_load_failed(&i18n::proto_error(&e));
-                        d.toast(text);
+                        d.toast(Tone::Error, text);
                     }
                 }
                 Task::none()
@@ -2080,7 +2082,7 @@ impl App {
                 f.busy = false;
                 f.error = Some(text);
             } else if let Some(d) = self.detail_mut(sid) {
-                d.toast(text);
+                d.toast(Tone::Error, text);
             }
             return Task::none();
         }
@@ -2277,7 +2279,7 @@ impl App {
                     f.bar = Some(FileBar::Conflict);
                 } else {
                     let text = i18n::proto_error(&e);
-                    d.toast(text);
+                    d.toast(Tone::Error, text);
                 }
                 Task::none()
             }
@@ -2317,7 +2319,7 @@ impl App {
                 }
                 Err(e) => {
                     let text = i18n::proto_error(&e);
-                    self.detail_mut(sid).expect("session").toast(text);
+                    self.detail_mut(sid).expect("session").toast(Tone::Error, text);
                     Task::none()
                 }
             };

@@ -6,6 +6,7 @@
 //! streams). Only UI state (`ui.json`: selection, split, language, web URLs, ...) and the CEF web
 //! views are local.
 
+use crate::notices::{Notice, NoticeKey, Text};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -848,6 +849,7 @@ pub enum Message {
     CloseDirtyDiscard,
     /// Drop expired transient messages.
     Expire,
+    Notice(crate::notice_view::NoticeMsg),
     ReposLoaded(Result<Vec<RepoInfo>, ProtoError>),
     RepoInput(String),
     /// Register the typed path.
@@ -914,6 +916,8 @@ pub enum Message {
     /// A window (the app window or the detail window) changed size.
     WindowResized(window::Id, Size),
     WindowMoved(window::Id, Point),
+    /// A window got (`true`) or lost the keyboard focus.
+    WindowFocus(window::Id, bool),
     /// A window's close button (routed: the app window asks / exits, the detail window hides).
     WindowCloseRequest(window::Id),
     WindowClosed(window::Id),
@@ -1133,8 +1137,15 @@ pub struct App {
     /// Sessions whose agent finished a turn while another session was shown (Desk's 새 답변);
     /// cleared when the session is selected.
     pub new_answers: std::collections::HashSet<String>,
-    /// Problems outside a modal (failed RPCs, ...), shown in the sidebar.
-    pub banner: Option<String>,
+    /// Notification centre (`notices.rs`, `notice_view.rs`).
+    pub notices: crate::notice_view::AppNotices,
+    /// The bell's list is open.
+    pub notice_open: bool,
+    /// What notices that mirror other state (PR jobs, self-update) last showed, by key: they
+    /// change only when this does (`notice_view.rs` `sync_state_notices`).
+    pub notice_sigs: std::collections::HashMap<NoticeKey, String>,
+    /// The app window has the keyboard focus (agent notices also flash the taskbar without).
+    pub focused: bool,
     pub script: Option<Script>,
     /// Test hook: keep drawing the web view under modals (reproduces the z-order bug).
     pub modal_web_unsafe: bool,
@@ -1273,7 +1284,10 @@ impl App {
             update_status: None,
             update_run: None,
             update_error: None,
-            banner: None,
+            notices: Default::default(),
+            notice_open: false,
+            notice_sigs: Default::default(),
+            focused: true,
             script: None,
             modal_web_unsafe: false,
             server_instance: None,
@@ -1446,6 +1460,8 @@ impl App {
     /// Drops a deleted session from the app: its row, web view, saved detail state and the
     /// selection (which moves to the first listed session). The caller saves the UI state.
     pub(crate) fn forget_session(&mut self, id: &str) {
+        self.notices.forget_session(id);
+        self.new_answers.remove(id);
         if let Some(idx) = self.sessions.iter().position(|l| l.id() == id) {
             let live = self.sessions.remove(idx);
             if let Some(w) = live.web {
@@ -1796,6 +1812,7 @@ impl App {
                     self.global_uterms.clear();
                 }
                 self.conn = Conn::Connected(Box::new(w));
+                self.conn_notice();
                 // Watches and listings start over on the new connection (the gap is not
                 // replayed): refresh the shown detail area.
                 for l in &mut self.sessions {
@@ -1821,6 +1838,7 @@ impl App {
                     None => Conn::Reconnecting,
                     Some(e) => Conn::Disconnected(i18n::proto_error(&e)),
                 };
+                self.conn_notice();
                 Task::none()
             }
             ClientEvent::Notify(n) => self.on_notify(n),
@@ -1843,6 +1861,15 @@ impl App {
                 if let Some(l) = self.live_mut(&session) {
                     l.attached = false;
                 }
+                if self.live(&session).is_some() {
+                    self.notify(
+                        Notice::warning(Text::tr(tr::notice_attach_failed))
+                            .body(error.to_string())
+                            .session(session.clone())
+                            .open(Message::Notice(crate::notice_view::NoticeMsg::GoSession(session)))
+                            .quiet(),
+                    );
+                }
                 Task::none()
             }
         }
@@ -1855,24 +1882,37 @@ impl App {
                     return Task::none();
                 }
                 crate::script::log(&format!("session {session} state {state:?}"));
+                let mut was = None;
                 if let Some(l) = self.live_mut(&session) {
+                    was = Some(l.state);
                     l.state = state.into();
                     if state == SessionState::Running {
                         l.error = None;
                     }
                 }
-                self.ensure_attached()
+                // The process ended by itself (not stopped from the ide).
+                let flash = match (was, state) {
+                    (Some(RunState::Running), SessionState::Exited(code)) => {
+                        self.exit_notice(&session, code)
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([flash, self.ensure_attached()])
             }
             Notify::Activity { session, activity } => {
                 let shown = self.selected.as_deref() == Some(session.as_str());
+                let mut was = None;
                 if let Some(l) = self.live_mut(&session) {
-                    let was = l.info.activity;
+                    was = Some(l.info.activity);
                     l.info.activity = activity;
-                    if was == AgentActivity::Working && activity == AgentActivity::Idle && !shown {
-                        self.new_answers.insert(session);
-                    }
                 }
-                Task::none()
+                if was == Some(AgentActivity::Working) && activity == AgentActivity::Idle && !shown {
+                    self.new_answers.insert(session.clone());
+                }
+                match was {
+                    Some(w) => self.activity_notice(&session, w, activity),
+                    None => Task::none(),
+                }
             }
             Notify::AgentRequest {
                 request,
@@ -1889,7 +1929,7 @@ impl App {
                 }
                 Task::none()
             }
-            Notify::Bell { .. } => Task::none(),
+            Notify::Bell { session } => self.bell_notice(&session),
             Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
                 self.refresh()
             }
@@ -1979,6 +2019,9 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        // Toasts the detail panes asked for go to the notification centre.
+        self.take_detail_toasts();
+        self.sync_state_notices();
         // The detail window follows the state (detached, shown, a session to show).
         Task::batch([task, self.sync_detail_window()])
     }
@@ -2002,7 +2045,12 @@ impl App {
                     }
                     Err(e) => {
                         if e.id != "disconnected" {
-                            self.banner = Some(i18n::proto_error(&e));
+                            self.notify(
+                                Notice::error(Text::tr(tr::err_lists_failed))
+                                    .body(i18n::proto_error(&e))
+                                    .key(NoticeKey::Other("lists".into()))
+                                    .toast(),
+                            );
                         }
                         Task::none()
                     }
@@ -2062,6 +2110,7 @@ impl App {
                     return Task::none();
                 }
                 self.new_answers.remove(&id);
+                self.notices_seen(&id);
                 self.selected = Some(id);
                 self.save_ui();
                 self.after_select()
@@ -2135,7 +2184,11 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        self.banner = Some(tr::err_session_flags_failed(&i18n::proto_error(&e)))
+                        self.notify(
+                            Notice::error(Text::tr(tr::err_session_flags_failed))
+                                .body(i18n::proto_error(&e))
+                                .toast(),
+                        );
                     }
                 }
                 Task::none()
@@ -3562,15 +3615,7 @@ impl App {
             }
             Message::Expire => {
                 let now = std::time::Instant::now();
-                for l in &mut self.sessions {
-                    if l.detail
-                        .toast
-                        .as_ref()
-                        .is_some_and(|(_, t)| now.duration_since(*t) > crate::detail::TOAST_FOR)
-                    {
-                        l.detail.toast = None;
-                    }
-                }
+                self.notices.expire(now);
                 Task::none()
             }
             Message::DividerPressed => {
@@ -3646,6 +3691,19 @@ impl App {
                 }
                 Task::none()
             }
+            Message::WindowFocus(id, on) => {
+                if Some(id) == self.window {
+                    self.focused = on;
+                    // Looking at the selected session again: its notices are read.
+                    if on
+                        && self.on_work_page()
+                        && let Some(sid) = self.selected.clone()
+                    {
+                        self.notices_seen(&sid);
+                    }
+                }
+                Task::none()
+            }
             Message::WindowMoved(id, p) => {
                 if Some(id) == self.detail_window {
                     self.on_detail_window_moved(p);
@@ -3674,6 +3732,7 @@ impl App {
             Message::Family(m) => self.on_family(m),
             Message::SessionEdit(m) => self.on_session_edit(m),
             Message::Update(m) => self.on_update(m),
+            Message::Notice(m) => self.on_notice(m),
             Message::SessionMenuThen(m) => {
                 self.session_menu = None;
                 self.update_inner(*m)
@@ -4104,17 +4163,23 @@ impl App {
                 .collect::<Vec<_>>()
                 .join("\n");
             crate::script::log(&format!("worktree failures: {detail}"));
-            self.banner = Some(tr::err_some_worktrees_failed(&detail));
+            self.notify(
+                Notice::error(Text::tr(tr::err_some_worktrees_failed))
+                    .body(detail)
+                    .session(info.id.clone())
+                    .toast(),
+            );
         }
         // Desk: "기준 브랜치가 규칙에 따라 바뀌었습니다" (one line per repo).
         if !base_changes.is_empty() {
             let detail = base_changes.join("\n");
             crate::script::log(&format!("base changes: {detail}"));
-            let note = tr::base_changed_by_rule(&detail);
-            self.banner = Some(match self.banner.take() {
-                Some(b) if !failures.is_empty() => format!("{b}\n{note}"),
-                _ => note,
-            });
+            self.notify(
+                Notice::info(Text::tr(tr::base_changed_by_rule))
+                    .body(detail)
+                    .session(info.id.clone())
+                    .toast(),
+            );
         }
         let id = info.id.clone();
         let configuration = (info.kind == SessionKind::Agent).then(|| info.configuration.clone());
@@ -4183,6 +4248,9 @@ impl App {
             }
             WebEvent::LoadError { url, error } => {
                 tracing::warn!("web load error {url}: {error}");
+                if let Some(n) = crate::notice_view::load_error_notice(&url, &error) {
+                    self.notices.push(n.session(live.info.id.clone()));
+                }
             }
             WebEvent::NewWindowRequested(url) => {
                 // Desk: a page's new window is a new browser tab of the session.
@@ -4202,6 +4270,11 @@ impl App {
             window::close_requests().map(Message::WindowCloseRequest),
             window::close_events().map(Message::WindowClosed),
         ];
+        subs.push(event::listen_with(|e, _, id| match e {
+            Event::Window(window::Event::Focused) => Some(Message::WindowFocus(id, true)),
+            Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
+            _ => None,
+        }));
         if self.detail_window.is_some() {
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(id, p)),
@@ -4313,7 +4386,7 @@ impl App {
             }
             _ => None,
         }));
-        if self.sessions.iter().any(|l| l.detail.toast.is_some()) {
+        if self.notices.has_toast() {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Expire));
         }
         subs.push(self.footer_subscription());

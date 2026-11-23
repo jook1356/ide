@@ -251,6 +251,37 @@ impl App {
         }
     }
 
+    /// The notification-centre copy of the footer's update state: (signature, notice).
+    pub(crate) fn update_notice(&self) -> Option<(String, crate::notice_view::AppNotice)> {
+        use crate::notices::{ActionStyle, Notice, Text};
+        let s = self.update_status.as_ref()?;
+        if s.phase == "ready" {
+            return Some((
+                format!("{}:ready", s.run_id),
+                Notice::info(Text::tr(tr::update_ready))
+                    .action(Text::tr(tr::notice_restart), Message::Update(UpdateMsg::Apply), ActionStyle::Primary)
+                    .toast(),
+            ));
+        }
+        if !s.finished() || self.ui.update_seen.as_deref() == Some(s.run_id.as_str()) {
+            return None;
+        }
+        let n = match s.phase.as_str() {
+            "done" if s.message == "closed-before-restart" => Notice::success(Text::tr(tr::update_done_later)),
+            "done" if !s.from.is_empty() && s.from != s.to => {
+                let (from, to) = (s.from.clone(), s.to.clone());
+                Notice::success(Text::tr(move || tr::update_done(&from, &to)))
+            }
+            "done" => Notice::success(Text::tr(tr::update_done_same)),
+            "rolledBack" => Notice::error(Text::tr(tr::update_rolled_back)),
+            _ => {
+                let m = last_line(&s.message).to_owned();
+                Notice::error(Text::tr(move || tr::update_failed(&m)))
+            }
+        };
+        Some((format!("{}:{}", s.run_id, s.phase), n.toast()))
+    }
+
     /// Poll the status file while a run is going.
     pub(crate) fn update_polling(&self) -> bool {
         self.update_available && self.update_status.as_ref().is_some_and(Status::running)

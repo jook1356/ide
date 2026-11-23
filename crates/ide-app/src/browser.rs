@@ -265,6 +265,12 @@ impl App {
                 b.can_forward = *can_go_forward;
             }
             WebEvent::NewWindowRequested(url) => new_tab = Some((b.id, url.clone())),
+            WebEvent::LoadError { url, error } => {
+                tracing::warn!("browser tab load error {url}: {error}");
+                if let Some(n) = crate::notice_view::load_error_notice(url, error) {
+                    self.notices.push(n);
+                }
+            }
             _ => {}
         }
         if let Some((from, url)) = new_tab {

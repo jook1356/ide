@@ -34,6 +34,8 @@ mod agent_bridge;
 mod family_ui;
 mod self_update;
 mod item_menu;
+mod notice_view;
+mod notices;
 mod uterm;
 mod script;
 mod scripts_view;

@@ -38,6 +38,11 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 - [ ] **Self-update (빌드 후 재시작).** Windows only (`self_update::available` is false elsewhere;
   `scripts/ide-update.ps1`). Assumption: a shell script doing the same steps works on Linux / macOS
   (a running binary can be replaced there directly). Check: port the script, show the footer button.
+- [ ] **Taskbar attention for agent notices** (`notice_view.rs` `attention`):
+  `window::request_user_attention(.., Informational)` while the window is not focused. Assumption:
+  winit maps it to the urgency hint on X11 and to `xdg_activation` on Wayland (some compositors
+  ignore it). Check: unfocus the app, let an agent finish, and see whether the taskbar entry is
+  marked.
 
 ## macOS: to do
 
@@ -77,6 +82,11 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
   else can be tested on a Mac before CEF works.
 
 ### 2. Needs checking on a Mac (code exists, untested)
+
+- [ ] **Dock attention for agent notices** (`ide-app/src/notice_view.rs` `attention`):
+  `window::request_user_attention(.., Informational)`. Assumption: winit makes it one Dock icon
+  bounce (`NSInformationalRequest`). Check: switch to another app, let an agent finish, and watch
+  the Dock icon.
 
 - [ ] **Login-shell `PATH`.** An app started from Finder / Dock gets
   `/usr/bin:/bin:/usr/sbin:/sbin`, so `claude`, `codex`, `gh`, Homebrew `git` and `node` are not
@@ -159,6 +169,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: notification centre flashes the taskbar / Dock while unfocused
+  (`notice_view.rs` `attention`, iced `request_user_attention`); unchecked on macOS / Linux.
 - 2026-11-23: footer self-update (`self_update.rs`) is Windows-only; off on Linux / macOS.
 - 2026-11-23: session right-click menu opens the working folder with `open` (macOS) /
   `xdg-open` (Linux) (`session_menu.rs`); unbuilt on macOS / Linux.

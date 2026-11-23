@@ -221,7 +221,7 @@ impl App {
                 return Task::none();
             };
             if let Some(d) = this.detail_mut(sid) {
-                d.toast(done);
+                d.toast(crate::notices::Tone::Success, done);
             }
             iced::clipboard::write(s).discard()
         };
@@ -265,7 +265,7 @@ impl App {
                         _ => tr::item_external_failed(&e),
                     };
                     if let Some(d) = self.detail_mut(sid) {
-                        d.toast(msg);
+                        d.toast(crate::notices::Tone::Error, msg);
                     }
                 }
                 Task::none()
