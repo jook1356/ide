@@ -221,14 +221,6 @@ fn group_divider<'a>(key: String, name: String, count: usize, folded: bool) -> E
     tip(b.boxed(), tooltip)
 }
 
-fn vline_full<'a>() -> El<'a> {
-    container(space())
-        .width(1)
-        .height(Length::Fixed(220.0))
-        .style(style::bg(style::BORDER))
-        .boxed()
-}
-
 pub(crate) fn error_box<'a>(e: &'a str) -> El<'a> {
     container(text(e).size(12))
         .padding(8)
@@ -311,8 +303,10 @@ impl App {
             Page::Repos => (Icon::GitBranch, tr::nav_repos()),
             Page::Settings => (Icon::Settings, tr::settings()),
         };
-        // On its own page the work / profiles button shows or hides the list beside the rail.
-        if page != self.ui.page || !matches!(page, Page::Work | Page::Configurations) {
+        // On its own page the work / profiles / repos button shows or hides the list beside the rail.
+        if page != self.ui.page
+            || !matches!(page, Page::Work | Page::Configurations | Page::Repos)
+        {
             return (icon, label);
         }
         let open = self.ui.sessions_open;
@@ -324,6 +318,8 @@ impl App {
         let label = match (page, open) {
             (Page::Work, true) => tr::sessions_hide(),
             (Page::Work, false) => tr::sessions_show(),
+            (Page::Repos, true) => tr::repos_hide(),
+            (Page::Repos, false) => tr::repos_show(),
             (_, true) => tr::profiles_hide(),
             (_, false) => tr::profiles_show(),
         };
@@ -389,7 +385,7 @@ impl App {
         ] {
             let (icon, label) = self.rail_entry(page);
             let mut b: El<'static> = link(icon, self.ui.page == page, Message::Page(page)).boxed();
-            if matches!(page, Page::Work | Page::Configurations) {
+            if matches!(page, Page::Work | Page::Configurations | Page::Repos) {
                 b = mouse_area(b)
                     .on_enter(Message::RailHover(true))
                     .on_exit(Message::RailHover(false))
@@ -1629,7 +1625,8 @@ impl App {
             ),
             // Its own layout (list beside the rail + sections): `profiles_view.rs`.
             Page::Configurations => return self.profiles_page(),
-            Page::Repos => (tr::repos_title(), vec![card(self.repos_section(f, online))]),
+            // Its own layout (list beside the rail + the picked repository), like profiles.
+            Page::Repos => return self.repos_page(),
             Page::Settings => (
                 tr::settings(),
                 vec![
@@ -1781,29 +1778,95 @@ impl App {
             .boxed()
     }
 
-    /// Repos page (Hermes Desk's `RepoList` + `ReposPage`): registered repositories on the
-    /// left with "add"; the selected one's name, path, base branch, the sessions using it and
-    /// "unregister (files kept)" with a confirm step on the right.
-    fn repos_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+    /// Repos page (Hermes Desk's `RepoList` + `ReposPage`): like the profiles page, the
+    /// repository list sits beside the rail (the page's rail button shows / hides it) and the
+    /// page shows the picked repository.
+    fn repos_page(&self) -> El<'_> {
+        let page = self.repo_view();
+        if !self.ui.sessions_open {
+            return page;
+        }
+        row![
+            self.repo_list(),
+            container(space())
+                .width(1)
+                .height(Fill)
+                .style(style::bg(style::BORDER)),
+            page,
+        ]
+        .height(Fill)
+        .boxed()
+    }
+
+    /// Desk's `RepoList`: title and hide button, "레포 추가" (folder picker), a path input,
+    /// one row per repository.
+    fn repo_list(&self) -> El<'_> {
+        let f = &self.settings;
+        let online = self.connected();
+        let head = row![
+            text(tr::nav_repos()).size(13).font(style::BOLD),
+            space().width(Fill),
+            tip(
+                button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
+                    .padding(4)
+                    .style(style::icon)
+                    .on_press(Message::Page(Page::Repos))
+                    .boxed(),
+                tr::repos_hide(),
+            ),
+        ]
+        .align_y(Alignment::Center);
+        let add = button(
+            row![
+                icons::icon(Icon::FolderOpen, 14.0, style::ON_ACCENT),
+                text(tr::repo_add()).size(13),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .width(Fill)
+        .padding([6, 10])
+        .style(style::primary)
+        .on_press_maybe((online && !f.repos_busy).then_some(Message::PickOpen));
+        let input = text_input(tr::repo_path_placeholder(), &f.repo_input)
+            .id(REPO_INPUT_ID)
+            .on_input(Message::RepoInput)
+            .on_submit(Message::RepoAdd)
+            .size(12)
+            .padding([5, 8])
+            .style(style::input)
+            .width(Fill);
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         for r in &self.repos {
             let sel = f.repo_selected.as_deref() == Some(r.id.as_str());
             list = list.push(
                 button(
                     row![
-                        icons::icon(Icon::GitBranch, 14.0, style::DIM),
-                        text(r.name.as_str())
-                            .size(13)
-                            .wrapping(text::Wrapping::None)
-                            .ellipsis(text::Ellipsis::End)
-                            .width(Fill),
+                        icons::icon(
+                            Icon::GitBranch,
+                            16.0,
+                            if sel { style::ACCENT_TEXT } else { style::DIM },
+                        ),
+                        column![
+                            text(r.name.as_str())
+                                .size(13)
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::End),
+                            text(r.path.as_str())
+                                .size(11)
+                                .color(style::DIM)
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::End),
+                        ]
+                        .spacing(1)
+                        .width(Fill),
                         text(r.sessions.to_string()).size(10).color(style::FAINT),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
                 )
-                .padding([5, 8])
                 .width(Fill)
+                .padding([6, 8])
                 .style(style::row(sel))
                 .on_press(Message::RepoSelect(r.id.clone()))
                 .boxed(),
@@ -1812,41 +1875,41 @@ impl App {
         if self.repos.is_empty() {
             list = list.push(text(tr::repos_none()).size(12).color(style::DIM).boxed());
         }
-        let left = column![
-            row![
-                label(tr::repos_list_label()),
-                space().width(Fill),
-                button(
-                    row![
-                        icons::icon(Icon::FolderOpen, 14.0, style::DIM),
-                        text(tr::repo_add()).size(12)
-                    ]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
-                )
-                .padding([3, 8])
-                .style(style::secondary)
-                .on_press_maybe((online && !f.repos_busy).then_some(Message::PickOpen)),
-            ]
-            .align_y(Alignment::Center),
-            list,
-            text_input(tr::repo_path_placeholder(), &f.repo_input)
-                .id(REPO_INPUT_ID)
-                .on_input(Message::RepoInput)
-                .on_submit(Message::RepoAdd)
-                .size(12)
-                .padding([5, 8])
-                .style(style::input)
-                .width(Fill),
-        ]
-        .spacing(8)
-        .width(240);
+        container(
+            column![head, add, input, scrollable(list).height(Fill)]
+                .spacing(10)
+                .padding(10),
+        )
+        .width(SIDEBAR_W)
+        .height(Fill)
+        .style(style::bg(style::SIDEBAR))
+        .boxed()
+    }
+
+    /// The picked repository: name, path and "unregister (files kept)" with a confirm step in
+    /// the title row, then the base branch and the sessions using it, one card each.
+    fn repo_view(&self) -> El<'_> {
+        let f = &self.settings;
+        let online = self.connected();
         let selected = f
             .repo_selected
             .as_deref()
             .and_then(|id| self.repos.iter().find(|r| r.id == id));
-        let right: El<'_> = match selected {
-            None => text(tr::repos_pick_note()).size(12).color(style::DIM).boxed(),
+        let mut c = Column::<El<'_>>::new().spacing(20);
+        match selected {
+            None => {
+                c = c.push(
+                    container(text(tr::repos_title()).size(22).font(style::BOLD))
+                        .height(40)
+                        .align_y(Alignment::Center)
+                        .boxed(),
+                );
+                c = c.push(text(tr::repos_note()).size(12).color(style::DIM).boxed());
+                if let Some(e) = &f.repos_error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(text(tr::repos_pick_note()).size(13).color(style::DIM).boxed());
+            }
             Some(r) => {
                 let users: Vec<&Live> = self
                     .sessions
@@ -1872,20 +1935,20 @@ impl App {
                     );
                 }
                 if users.is_empty() {
-                    sessions =
-                        sessions.push(text(tr::repo_no_sessions()).size(12).color(style::DIM).boxed());
+                    sessions = sessions
+                        .push(text(tr::repo_no_sessions()).size(12).color(style::DIM).boxed());
                 }
                 let actions: El<'_> = if f.repo_confirm {
                     row![
                         button(text(tr::repo_unregister()).size(12))
-                            .padding([4, 12])
+                            .padding([5, 12])
                             .style(style::danger)
                             .on_press_maybe(
                                 (online && !f.repos_busy)
                                     .then(|| Message::RepoUnregister(r.id.clone()))
                             ),
                         button(text(tr::cancel()).size(12))
-                            .padding([4, 12])
+                            .padding([5, 12])
                             .style(style::secondary)
                             .on_press(Message::RepoConfirm(false)),
                     ]
@@ -1893,15 +1956,19 @@ impl App {
                     .boxed()
                 } else {
                     button(text(tr::repo_unregister_keep_files()).size(12))
-                        .padding([4, 12])
+                        .padding([5, 12])
                         .style(style::secondary)
                         .on_press_maybe(online.then_some(Message::RepoConfirm(true)))
                         .boxed()
                 };
-                column![
+                c = c.push(
                     row![
                         column![
-                            text(r.name.as_str()).size(18).font(style::BOLD),
+                            text(r.name.as_str())
+                                .size(22)
+                                .font(style::BOLD)
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::End),
                             text(r.path.as_str())
                                 .size(12)
                                 .font(style::MONO)
@@ -1911,24 +1978,34 @@ impl App {
                         .width(Fill),
                         actions,
                     ]
-                    .align_y(Alignment::Center),
-                    self.base_card(r, f, online),
-                    label(tr::repo_sessions_label(i18n::count(users.len()))),
-                    sessions,
-                ]
-                .spacing(8)
-                .boxed()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .boxed(),
+                );
+                c = c.push(text(tr::repos_note()).size(12).color(style::DIM).boxed());
+                if let Some(e) = &f.repos_error {
+                    c = c.push(error_box(e));
+                }
+                c = c.push(card(self.base_card(r, f, online)));
+                c = c.push(card(
+                    column![
+                        label(tr::repo_sessions_label(i18n::count(users.len()))),
+                        sessions,
+                    ]
+                    .spacing(8)
+                    .boxed(),
+                ));
             }
-        };
-        let mut c = column![
-            text(tr::repos_note()).size(12).color(style::DIM),
-            row![left, vline_full(), container(right).width(Fill)].spacing(16),
-        ]
-        .spacing(12);
-        if let Some(e) = &f.repos_error {
-            c = c.push(error_box(e));
         }
-        c.boxed()
+        let avail = self.window_size.width - self.left_w();
+        let width = (avail - 64.0).clamp(320.0, 896.0);
+        container(scrollable(
+            container(c.width(width)).center_x(Fill).padding([32, 0]),
+        ))
+        .width(Fill)
+        .height(Fill)
+        .style(style::bg(style::BG))
+        .boxed()
     }
 
     /// Desk's 레포 page "기준 브랜치" card: 고정 브랜치 (`FixedBaseSettings`) or 규칙으로 자동

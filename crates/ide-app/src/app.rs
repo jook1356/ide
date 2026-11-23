@@ -2327,8 +2327,8 @@ impl App {
             }
             Message::Page(page) => {
                 if page == self.ui.page {
-                    // The profiles page's button shows / hides its profile list (Desk).
-                    if page == Page::Configurations {
+                    // The profiles / repos page's button shows / hides its list (Desk).
+                    if matches!(page, Page::Configurations | Page::Repos) {
                         self.ui.sessions_open = !self.ui.sessions_open;
                         self.save_ui();
                     }
