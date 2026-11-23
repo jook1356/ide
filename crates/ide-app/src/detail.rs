@@ -1591,10 +1591,11 @@ impl App {
                         );
                         d.status_error = None;
                         d.acts.on_status(&s);
+                        d.scripts.input_key = crate::scripts_view::input_key(&s);
                     }
                     Err(e) => d.status_error = Some(i18n::proto_error(&e)),
                 }
-                self.after_status(sid)
+                Task::batch([self.after_status(sid), self.scripts_follow_repo(sid)])
             }
             DetailMsg::Code(path, cm) => {
                 let Some(f) = self.detail_mut(sid).and_then(|d| d.file_mut(&path)) else {

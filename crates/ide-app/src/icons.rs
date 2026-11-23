@@ -44,9 +44,14 @@ pub enum Icon {
     /// Tabler's filled pin (no stroke).
     PinFilled,
     ArrowBarToLeft,
+    // Changes panel's 스크립트 section (scripts_view.rs).
+    ChevronsDown,
+    ChevronsUp,
+    /// Tabler's filled player-play (no stroke).
+    PlayerPlayFilled,
 }
 
-const SOURCES: [&str; 31] = [
+const SOURCES: [&str; 34] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -78,6 +83,9 @@ const SOURCES: [&str; 31] = [
     include_str!("../assets/icons/pin.svg"),
     include_str!("../assets/icons/pin-filled.svg"),
     include_str!("../assets/icons/arrow-bar-to-left.svg"),
+    include_str!("../assets/icons/chevrons-down.svg"),
+    include_str!("../assets/icons/chevrons-up.svg"),
+    include_str!("../assets/icons/player-play-filled.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -121,13 +129,13 @@ mod tests {
     fn icons_are_tabler_outlines_with_thin_strokes() {
         for (i, s) in SOURCES.iter().enumerate() {
             assert!(s.contains("viewBox=\"0 0 24 24\""));
-            if i == Icon::PinFilled as usize {
-                assert!(s.contains("fill=\"currentColor\"") && !s.contains("stroke="));
+            if [Icon::PinFilled, Icon::PlayerPlayFilled].map(|x| x as usize).contains(&i) {
+                assert!(s.contains("fill=\"currentColor\"") && !s.contains("stroke=\"currentColor\""));
                 continue;
             }
             assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::ArrowBarToLeft as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::PlayerPlayFilled as usize + 1);
     }
 }

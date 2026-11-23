@@ -149,6 +149,10 @@ pub struct UiState {
     /// Width of the session / profile list, set by dragging its right edge; clamped to the
     /// window when drawn.
     pub list_width: f32,
+    /// The Changes panel's 스크립트 section is folded, and its height (Desk's
+    /// `scripts-collapsed` / `scripts-height`).
+    pub scripts_collapsed: bool,
+    pub scripts_height: f32,
     /// Explore's 파일 찾기 leaves gitignored files and folders out (Desk's
     /// `explore-search-hide-ignored`, on by default).
     pub explore_hide_ignored: bool,
@@ -235,6 +239,8 @@ impl Default for UiState {
             detail_rail: RailPrefs::default(),
             side_width: crate::detail::SIDE_W,
             list_width: crate::app::SIDEBAR_W,
+            scripts_collapsed: false,
+            scripts_height: crate::scripts_view::DEFAULT_H,
             explore_hide_ignored: true,
             bookmarks: Vec::new(),
             default_shell: None,

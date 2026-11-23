@@ -1097,6 +1097,8 @@ pub struct App {
     pub side_dragging: bool,
     /// The session / profile list's right edge is dragged.
     pub list_dragging: bool,
+    /// The 스크립트 section's top edge is dragged: (pointer y at the first move, height then).
+    pub scripts_drag: Option<(Option<f32>, f32)>,
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
     pub settings: SettingsForm,
@@ -1228,6 +1230,7 @@ impl App {
             dragging: false,
             side_dragging: false,
             list_dragging: false,
+            scripts_drag: None,
             modal: None,
             settings,
             rail_hover: false,
@@ -3395,6 +3398,8 @@ impl App {
                     // The panel reaches the window's right edge; the pointer is on its handle.
                     self.ui.side_width = self.window_size.width - p.x - DIVIDER_W / 2.0;
                     self.ui.side_width = self.side_w();
+                } else if self.scripts_drag.is_some() {
+                    self.scripts_drag_to(p.y);
                 } else if self.list_dragging {
                     // The list starts at the rail's right edge; the pointer is on its handle.
                     self.ui.list_width = p.x - RAIL_W - DIVIDER_W / 2.0;
@@ -3409,10 +3414,15 @@ impl App {
                 Task::none()
             }
             Message::DragEnd => {
-                if self.dragging || self.side_dragging || self.list_dragging {
+                if self.dragging
+                    || self.side_dragging
+                    || self.list_dragging
+                    || self.scripts_drag.is_some()
+                {
                     self.dragging = false;
                     self.side_dragging = false;
                     self.list_dragging = false;
+                    self.scripts_drag = None;
                     self.save_ui();
                 }
                 Task::none()
@@ -4004,7 +4014,7 @@ impl App {
                     .map(|(generation, e)| Message::Client(generation, e)),
             );
         }
-        if self.dragging || self.side_dragging || self.list_dragging {
+        if self.dragging || self.side_dragging || self.list_dragging || self.scripts_drag.is_some() {
             // The dividers are in the app window: the detail window's pointer does not drive them.
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {

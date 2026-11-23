@@ -768,8 +768,20 @@ impl App {
             ]
             .boxed(),
         };
-        // Commit / sync / PR footer under Changes and History (`footer_view.rs`).
-        container(column![tabs, hline(), container(content).height(Fill), self.footer_section(live)])
+        // Commit / sync / PR footer under Changes and History (`footer_view.rs`), then (Desk) the
+        // 스크립트 section at the very bottom under every tab.
+        let scripts: El<'a> = if live.info.repos.is_empty() {
+            space().height(0).boxed()
+        } else {
+            self.scripts_section(live)
+        };
+        container(column![
+            tabs,
+            hline(),
+            container(content).height(Fill),
+            self.footer_section(live),
+            scripts,
+        ])
             .width(self.side_w())
             .height(Fill)
             .style(style::bg(style::SIDEBAR))

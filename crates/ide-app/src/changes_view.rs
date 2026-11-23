@@ -259,7 +259,6 @@ impl App {
             self.changes_head(live),
             list,
             self.stash_section(live),
-            self.scripts_section(live)
         ]
         .boxed()
     }

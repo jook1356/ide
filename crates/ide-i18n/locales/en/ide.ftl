@@ -206,7 +206,15 @@ scripts-refresh = Find again
 scripts-search = Scripts · file name
 scripts-run = Run
 scripts-running = Running · show the terminal
-scripts-loading = Finding scripts…
+scripts-search-toggle = Search
+scripts-expand-all = Expand all
+scripts-collapse-all = Collapse all
+scripts-stack-expand = Expand all of { $label }
+scripts-stack-collapse = Collapse all of { $label }
+scripts-stack-files = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+}
 scripts-none = No scripts to run were found
 scripts-no-match = No matching scripts
 rail-pin = Pin the tab list
