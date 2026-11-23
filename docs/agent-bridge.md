@@ -187,6 +187,8 @@ this session; use the `ide_*` tools instead of guessing.
 
 ## Next
 
+Plan for the features on top of the bridge: `docs/agent-features-roadmap.md`.
+
 1. Codex hooks (see Hooks); the write lease of shared workspaces on `agent.hook`.
 2. Pushing to the agent: queued prompts / steering through the PTY (`session.send_prompt`).
 3. Feature tools on this transport: related sessions (create child, send, read), run_task,
