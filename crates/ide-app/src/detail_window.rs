@@ -322,6 +322,7 @@ impl App {
         // The item menu is placed in window coordinates: a layer over the whole window.
         let window = iced::widget::stack![
             content,
+            self.toast_layer(true),
             self.item_menu_layer(true),
             self.modal_layer(true)
         ]

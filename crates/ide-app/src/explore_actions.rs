@@ -51,9 +51,9 @@ impl App {
         Some(format!("{base}{sep}{rel}"))
     }
 
-    fn explore_toast(&mut self, sid: &str, text: String) {
+    fn explore_toast(&mut self, sid: &str, tone: crate::notices::Tone, text: String) {
         if let Some(d) = self.detail_mut(sid) {
-            d.toast(text);
+            d.toast(tone, text);
         }
     }
 
@@ -102,6 +102,7 @@ impl App {
                 });
                 self.explore_toast(
                     sid,
+                    crate::notices::Tone::Success,
                     if cut {
                         tr::explore_cut_done(n)
                     } else {
@@ -128,14 +129,14 @@ impl App {
             }
             TreeEvent::Reveal(path) => {
                 if !self.target.local {
-                    self.explore_toast(sid, tr::explore_reveal_remote());
+                    self.explore_toast(sid, crate::notices::Tone::Warning, tr::explore_reveal_remote());
                     return Task::none();
                 }
                 let Some(p) = self.explore_abs(sid, repo, path.as_deref().unwrap_or("")) else {
                     return Task::none();
                 };
                 if let Err(e) = crate::item_menu::reveal_in_file_manager(&p) {
-                    self.explore_toast(sid, tr::item_reveal_os_failed(&e));
+                    self.explore_toast(sid, crate::notices::Tone::Error, tr::item_reveal_os_failed(&e));
                 }
                 Task::none()
             }
@@ -143,11 +144,11 @@ impl App {
                 let Some(p) = self.explore_abs(sid, repo, &path) else {
                     return Task::none();
                 };
-                self.explore_toast(sid, tr::item_copied_path());
+                self.explore_toast(sid, crate::notices::Tone::Success, tr::item_copied_path());
                 iced::clipboard::write(p).discard()
             }
             TreeEvent::CopyRelPath(path) => {
-                self.explore_toast(sid, tr::item_copied_rel());
+                self.explore_toast(sid, crate::notices::Tone::Success, tr::item_copied_rel());
                 iced::clipboard::write(path).discard()
             }
             TreeEvent::CopyRemoteUrl(path) => {
@@ -210,7 +211,7 @@ impl App {
         // Files copied in the file manager (not ours): copied in from their paths.
         if !os.is_empty() && !ours {
             if !self.target.local {
-                self.explore_toast(sid, tr::explore_paste_remote());
+                self.explore_toast(sid, crate::notices::Tone::Warning, tr::explore_paste_remote());
                 return Task::none();
             }
             return self.explore_copy(sid, repo, os, true, dir);
@@ -219,7 +220,7 @@ impl App {
             return Task::none();
         };
         if clip.session != sid || clip.repo != repo {
-            self.explore_toast(sid, tr::explore_paste_other_repo());
+            self.explore_toast(sid, crate::notices::Tone::Warning, tr::explore_paste_other_repo());
             return Task::none();
         }
         if clip.cut {
@@ -275,11 +276,11 @@ impl App {
     pub(crate) fn remote_url_done(&mut self, sid: &str, r: Result<String, ProtoError>) -> Task<Message> {
         match r {
             Ok(url) => {
-                self.explore_toast(sid, tr::explore_remote_url_copied());
+                self.explore_toast(sid, crate::notices::Tone::Success, tr::explore_remote_url_copied());
                 iced::clipboard::write(url).discard()
             }
             Err(e) => {
-                self.explore_toast(sid, i18n::proto_error(&e));
+                self.explore_toast(sid, crate::notices::Tone::Error, i18n::proto_error(&e));
                 Task::none()
             }
         }

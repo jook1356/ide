@@ -341,7 +341,7 @@ enum Step {
     WaitP2Base(&'static str, u64),
     /// Open the phase 2 session's repos dialog and pick this base for the test repo.
     SessionBaseP2(&'static str),
-    /// The app banner contains the needle.
+    /// A notice (title or text) contains the needle (was the sidebar banner).
     ExpectBanner(&'static str, u64),
     /// Commit `(path, content)` with this subject in the phase 2 worktree (only that path).
     CommitP2(&'static str, &'static str, &'static str),
@@ -1274,6 +1274,12 @@ fn phase2() -> Vec<Step> {
         WaitToast(10_000),
         Wait(200),
         Shot("48_definition_none_toast"),
+        // The toast is also a notice of the notification centre (rail bell).
+        App(Message::Notice(crate::notice_view::NoticeMsg::Toggle)),
+        Wait(400),
+        Shot("48b_notice_list"),
+        Pause("notice_list"),
+        App(Message::Notice(crate::notice_view::NoticeMsg::Close)),
         Log("--- rename / delete through the tree"),
         D(DetailMsg::Side(SideTab::Explore)),
         TreeRename(memo, renamed),
@@ -2262,11 +2268,16 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             true
         }
         Step::ExpectBanner(needle, ms) => {
-            let b = app.banner.clone();
+            // Banner problems are notices now: any notice's title or text.
+            let b: Vec<String> = app
+                .notices
+                .iter()
+                .map(|n| format!("{} {}", n.title.get(), n.body.as_ref().map(|t| t.get()).unwrap_or_default()))
+                .collect();
             wait!(
-                b.as_deref().is_some_and(|x| x.contains(needle)),
+                b.iter().any(|x| x.contains(needle)),
                 ms,
-                format!("banner {b:?} (want {needle:?})")
+                format!("notices {b:?} (want {needle:?})")
             )
         }
         Step::MarkP2 => {
@@ -2725,7 +2736,8 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
             )
         }
         Step::WaitToast(ms) => {
-            let t = p2_detail(sc, app).and_then(|d| d.toast.as_ref().map(|t| t.0.clone()));
+            let owner = sc.id(P2).map(|s| app.workspace_owner(&s));
+            let t = owner.and_then(|s| app.toast_text(&s));
             wait!(t.is_some(), ms, format!("transient message {t:?}"))
         }
         Step::WaitExists(rel, want, ms) => {

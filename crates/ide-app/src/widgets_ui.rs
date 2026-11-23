@@ -380,7 +380,7 @@ impl App {
                     if request.is_none()
                         && let Some(d) = self.detail_mut(&session)
                     {
-                        d.toast(tr::widget_broken_toast(&w.name, e));
+                        d.toast(crate::notices::Tone::Error, tr::widget_broken_toast(&w.name, e));
                     }
                     return self.reply_agent(request, Err(e.clone()));
                 }

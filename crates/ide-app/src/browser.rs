@@ -288,6 +288,12 @@ impl App {
                 b.can_forward = *can_go_forward;
             }
             WebEvent::NewWindowRequested(url) => new_tab = Some((b.id, url.clone())),
+            WebEvent::LoadError { url, error } => {
+                tracing::warn!("browser tab load error {url}: {error}");
+                if let Some(n) = crate::notice_view::load_error_notice(url, error) {
+                    self.notices.push(n);
+                }
+            }
             WebEvent::Console { message, .. } if b.widget.is_some() => {
                 crate::widgets_ui::console(&b.widget.as_ref().map(|w| w.id.clone()).unwrap_or_default(), message);
             }

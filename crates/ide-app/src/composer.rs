@@ -535,8 +535,8 @@ impl App {
                 Err(e) => {
                     crate::script::log(&format!("attachment upload failed: {e:?}"));
                     let msg = crate::i18n::proto_error(&e);
-                    if let Some(l) = self.live_mut(&sid) {
-                        l.detail.toast(msg);
+                    if let Some(d) = self.detail_mut(&sid) {
+                        d.toast(crate::notices::Tone::Error, msg);
                     }
                     Task::none()
                 }
@@ -554,8 +554,8 @@ impl App {
             return Task::none();
         };
         if path.is_dir() {
-            if let Some(l) = self.live_mut(sid) {
-                l.detail.toast(tr::attach_no_folder_remote());
+            if let Some(d) = self.detail_mut(sid) {
+                d.toast(crate::notices::Tone::Warning, crate::notices::Text::tr(tr::attach_no_folder_remote));
             }
             return Task::none();
         }

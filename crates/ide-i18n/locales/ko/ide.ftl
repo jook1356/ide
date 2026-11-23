@@ -283,7 +283,8 @@ close-remember = 다시 묻지 않기 (설정에서 바꿀 수 있어요)
 ## Errors shown by the app
 
 err-web-view = 웹 뷰 오류: { $detail }
-err-session-flags-failed = 세션을 바꾸지 못했어요: { $detail }
+err-session-flags-failed = 세션을 바꾸지 못했어요
+err-lists-failed = 서버에서 목록을 불러오지 못했어요
 err-choose-repo = 레포를 선택하세요.
 err-server-missing = 서버 프로그램을 찾지 못했어요: { $detail }
 
@@ -639,8 +640,7 @@ session-copied-folder = 작업 폴더 경로를 복사했어요
 session-copied-id = 세션 ID를 복사했어요
 session-open-folder-failed = 작업 폴더를 열지 못했어요: { $error }
 no-repos-in-session = 이 세션에는 레포가 없어요. ⚙에서 추가하세요.
-err-some-worktrees-failed = 일부 레포의 워크트리를 만들지 못했습니다:
-    { $detail }
+err-some-worktrees-failed = 일부 레포의 워크트리를 만들지 못했어요
 err-repo-not-found = 레포 { $id }가 등록되어 있지 않아요.
 err-repo-in-use = “{ $name }” 레포를 쓰는 세션이 { $count }개 있어요. 세션을 먼저 삭제하세요.
 err-repo-not-attached = 이 세션에는 “{ $name }” 레포가 없어요.
@@ -687,8 +687,7 @@ new-refresh-base-note = 원격 최신 커밋으로 생성해요. 로컬 기준 �
 new-base-note = 레포마다 기준 브랜치에서 새 브랜치를 만들고, 상태 표시도 그 기준 브랜치를 기준으로 해요. 기본값은 레포 설정의 기준 브랜치예요.
 base-pick-label = 기준 브랜치
 base-no-origin-branches = origin 브랜치가 없어요
-base-changed-by-rule = 기준 브랜치가 규칙에 따라 바뀌었어요:
-    { $detail }
+base-changed-by-rule = 기준 브랜치가 규칙에 따라 바뀌었어요
 session-repos-base-note = 레포마다 세션 상태 표시의 기준이에요. 바꿔도 세션 브랜치를 다시 만들거나 rebase하지는 않아요.
 init-repo-title = Git 저장소가 아니에요
 init-repo-message = 폴더가 Git 저장소가 아니에요. 초기화해서 추가할까요?
@@ -1163,3 +1162,22 @@ err-pr-push-failed = push 실패: { $detail }
 err-pr-create-unconfirmed = PR이 만들어졌는지 확인하지 못했어요: { $detail }
 err-prompt-empty = 요청 내용이 비어 있어요
 err-prompt-not-ready = 에이전트가 지금 입력을 받을 수 없어요 (세션 { $id }). 입력을 기다릴 때 다시 시도하세요
+
+# Notification centre (notice_view.rs)
+notice-bell = 알림
+notice-bell-running = 알림 · 작업 { $count }개 진행 중
+notice-title = 알림
+notice-running = 진행 중 { $count }
+notice-read-all = 모두 읽음으로 표시
+notice-clear = 끝난 알림 지우기
+notice-empty = 알림이 없어요.
+merge-notice-title = 병합 결과
+notice-restart = 재시작
+notice-attach-failed = 세션 터미널에 연결하지 못했어요
+notice-pr-status-failed = PR 상태를 확인하지 못했어요
+notice-conn-back = 서버에 다시 연결됐어요
+notice-needs-input = 입력을 기다리고 있어요
+notice-answered = 답변이 끝났어요
+notice-bell-rang = 터미널에서 벨이 울렸어요
+notice-load-failed = 페이지를 불러오지 못했어요
+notice-sync-status-failed = 원격과 브랜치 상태를 비교하지 못했어요

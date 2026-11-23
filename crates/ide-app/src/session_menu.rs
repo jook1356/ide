@@ -55,23 +55,23 @@ impl App {
         let root = live.info.root.clone();
         // Shown in the selected session's detail pane (the one on screen).
         let shown = self.selected.clone().unwrap_or_else(|| m.session.clone());
-        let toast = |this: &mut Self, msg: String| {
+        let toast = |this: &mut Self, tone: crate::notices::Tone, msg: crate::notices::Text| {
             if let Some(d) = this.detail_mut(&shown) {
-                d.toast(msg);
+                d.toast(tone, msg);
             }
         };
         match act {
             SessionAct::CopyFolder => {
-                toast(self, tr::session_copied_folder());
+                toast(self, crate::notices::Tone::Success, crate::notices::Text::tr(tr::session_copied_folder));
                 iced::clipboard::write(root).discard()
             }
             SessionAct::CopyId => {
-                toast(self, tr::session_copied_id());
+                toast(self, crate::notices::Tone::Success, crate::notices::Text::tr(tr::session_copied_id));
                 iced::clipboard::write(m.session).discard()
             }
             SessionAct::OpenFolder => {
                 if let Err(e) = open_folder(&root) {
-                    toast(self, tr::session_open_folder_failed(&e));
+                    toast(self, crate::notices::Tone::Error, tr::session_open_folder_failed(&e).into());
                 }
                 Task::none()
             }

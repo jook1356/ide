@@ -53,9 +53,17 @@ pub enum Icon {
     // Session list edit mode (session_edit.rs).
     ListCheck,
     Dots,
+    // Notification centre (notice_view.rs).
+    Bell,
+    InfoCircle,
+    CircleCheck,
+    AlertTriangle,
+    CircleX,
+    X,
+    Checks,
 }
 
-const SOURCES: [&str; 36] = [
+const SOURCES: [&str; 43] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -92,6 +100,13 @@ const SOURCES: [&str; 36] = [
     include_str!("../assets/icons/hammer.svg"),
     include_str!("../assets/icons/list-check.svg"),
     include_str!("../assets/icons/dots.svg"),
+    include_str!("../assets/icons/bell.svg"),
+    include_str!("../assets/icons/info-circle.svg"),
+    include_str!("../assets/icons/circle-check.svg"),
+    include_str!("../assets/icons/alert-triangle.svg"),
+    include_str!("../assets/icons/circle-x.svg"),
+    include_str!("../assets/icons/x.svg"),
+    include_str!("../assets/icons/checks.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -142,6 +157,6 @@ mod tests {
             assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::Dots as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Checks as usize + 1);
     }
 }

@@ -308,7 +308,8 @@ close-remember = Don't ask again (change it in Settings)
 ## Errors shown by the app
 
 err-web-view = Web view: { $detail }
-err-session-flags-failed = Could not change the session: { $detail }
+err-session-flags-failed = Could not change the session
+err-lists-failed = Could not load the lists from the server
 err-choose-repo = Choose a repository.
 err-server-missing = The server program was not found: { $detail }
 
@@ -736,8 +737,7 @@ session-copied-folder = Working folder path copied
 session-copied-id = Session ID copied
 session-open-folder-failed = Could not open the working folder: { $error }
 no-repos-in-session = This session has no repositories. Add one with ⚙.
-err-some-worktrees-failed = Some worktrees could not be created:
-    { $detail }
+err-some-worktrees-failed = Some worktrees could not be created
 err-repo-not-found = Repository { $id } is not registered.
 err-repo-in-use = { $count ->
     [one] 1 session uses
@@ -793,8 +793,7 @@ new-refresh-base-note = Creates from the remote's latest commit. The local base 
 new-base-note = Each repository gets a new branch from its base branch, and the session's status is measured against that base. The default is the repository's base branch.
 base-pick-label = Base branch
 base-no-origin-branches = No origin branches
-base-changed-by-rule = Base branches changed by their rule:
-    { $detail }
+base-changed-by-rule = Base branches changed by their rule
 session-repos-base-note = Per repository, what the session's status is measured against. Changing it does not recreate or rebase the session branch.
 init-repo-title = Not a Git repository
 init-repo-message = This folder is not a Git repository. Initialise it and add it?
@@ -1381,3 +1380,25 @@ err-pr-push-failed = Push failed: { $detail }
 err-pr-create-unconfirmed = Not sure whether the PR was created: { $detail }
 err-prompt-empty = The request is empty
 err-prompt-not-ready = The agent is not at its input right now (session { $id }); try again when it waits for input
+
+# Notification centre (notice_view.rs)
+notice-bell = Notifications
+notice-bell-running = Notifications · { $count ->
+    [one] 1 task running
+   *[other] { $count } tasks running
+}
+notice-title = Notifications
+notice-running = { NUMBER($count) } running
+notice-read-all = Mark all as read
+notice-clear = Clear finished notifications
+notice-empty = No notifications.
+merge-notice-title = Merge result
+notice-restart = Restart
+notice-attach-failed = Could not attach to the session's terminal
+notice-pr-status-failed = Could not check the PR status
+notice-conn-back = Connected to the server again
+notice-needs-input = Waiting for you
+notice-answered = The answer is done
+notice-bell-rang = The terminal rang its bell
+notice-load-failed = A page could not be loaded
+notice-sync-status-failed = Could not check the branch against its remote

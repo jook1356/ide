@@ -19,6 +19,7 @@
 //! - `App::refresh_repo(&mut self, sid: &str) -> Task<Message>`: Desk's `refresh()` after a git
 //!   action (status, History, stashes and the open branch list).
 
+use crate::notices::{Text, Tone};
 use std::collections::{BTreeSet, HashMap};
 
 use iced::Task;
@@ -444,10 +445,11 @@ impl App {
         })
     }
 
-    fn toast(&mut self, sid: &str, m: String) {
-        crate::script::log(&format!("toast {sid}: {m}"));
+    fn toast(&mut self, sid: &str, tone: Tone, m: impl Into<Text>) {
+        let m = m.into();
+        crate::script::log(&format!("toast {sid}: {}", m.get()));
         if let Some(d) = self.detail_mut(sid) {
-            d.toast(m);
+            d.toast(tone, m);
         }
     }
 
@@ -515,16 +517,16 @@ impl App {
                 {
                     self.modal = None;
                 }
-                let msg = if failed.is_empty() {
-                    tr::chg_discard_done(i18n::count(n))
+                let (tone, msg) = if failed.is_empty() {
+                    (Tone::Success, tr::chg_discard_done(i18n::count(n)))
                 } else {
                     let lines: Vec<String> = failed
                         .iter()
                         .map(|(p, e)| format!("{p}: {}", i18n::proto_error(e)))
                         .collect();
-                    tr::chg_discard_failed(&lines.join("\n"))
+                    (Tone::Error, tr::chg_discard_failed(&lines.join("\n")))
                 };
-                self.toast(sid, msg);
+                self.toast(sid, tone, msg);
                 self.refresh_repo(sid)
             }
             ActMsg::Reveal(path) => {
@@ -576,15 +578,15 @@ impl App {
             }
             ActMsg::StashPushed(n, res) => {
                 a.stash.busy = false;
-                let msg = match res {
+                let (tone, msg) = match res {
                     Ok(()) => {
                         a.stash.open = false;
                         a.stash.memo.clear();
-                        tr::chg_stash_done(i18n::count(n))
+                        (Tone::Success, tr::chg_stash_done(i18n::count(n)))
                     }
-                    Err(e) => tr::chg_stash_failed(&i18n::proto_error(&e)),
+                    Err(e) => (Tone::Error, tr::chg_stash_failed(&i18n::proto_error(&e))),
                 };
-                self.toast(sid, msg);
+                self.toast(sid, tone, msg);
                 self.refresh_repo(sid)
             }
             ActMsg::Stashes(repo, seq, res) => {
@@ -642,25 +644,32 @@ impl App {
                 {
                     self.modal = None;
                 }
-                let msg = match res {
-                    Ok(r) if !r.conflicts.is_empty() => {
-                        tr::chg_stash_conflicts(i18n::count(r.conflicts.len()))
-                    }
-                    Ok(_) => match action {
-                        StashAction::Pop => tr::chg_stash_popped(),
-                        StashAction::Apply => tr::chg_stash_applied(),
-                        StashAction::Drop => tr::chg_stash_dropped(),
-                    },
+                let (tone, msg) = match res {
+                    Ok(r) if !r.conflicts.is_empty() => (
+                        Tone::Warning,
+                        tr::chg_stash_conflicts(i18n::count(r.conflicts.len())),
+                    ),
+                    Ok(_) => (
+                        Tone::Success,
+                        match action {
+                            StashAction::Pop => tr::chg_stash_popped(),
+                            StashAction::Apply => tr::chg_stash_applied(),
+                            StashAction::Drop => tr::chg_stash_dropped(),
+                        },
+                    ),
                     Err(e) => {
                         let e = i18n::proto_error(&e);
-                        match action {
-                            StashAction::Pop => tr::chg_stash_pop_failed(&e),
-                            StashAction::Apply => tr::chg_stash_apply_failed(&e),
-                            StashAction::Drop => tr::chg_stash_drop_failed(&e),
-                        }
+                        (
+                            Tone::Error,
+                            match action {
+                                StashAction::Pop => tr::chg_stash_pop_failed(&e),
+                                StashAction::Apply => tr::chg_stash_apply_failed(&e),
+                                StashAction::Drop => tr::chg_stash_drop_failed(&e),
+                            },
+                        )
                     }
                 };
-                self.toast(sid, msg);
+                self.toast(sid, tone, msg);
                 self.refresh_repo(sid)
             }
             ActMsg::CommitMenu(sha) => {
@@ -687,12 +696,12 @@ impl App {
                     .map(move |r| dm(&sid, ActMsg::Copied(subject, r.is_ok())))
             }
             ActMsg::Copied(subject, ok) => {
-                let msg = match (ok, subject) {
-                    (false, _) => tr::chg_copy_failed(),
-                    (true, false) => tr::chg_copied_sha(),
-                    (true, true) => tr::chg_copied_subject(),
+                let (tone, msg): (Tone, fn() -> String) = match (ok, subject) {
+                    (false, _) => (Tone::Error, tr::chg_copy_failed),
+                    (true, false) => (Tone::Success, tr::chg_copied_sha),
+                    (true, true) => (Tone::Success, tr::chg_copied_subject),
                 };
-                self.toast(sid, msg);
+                self.toast(sid, tone, Text::tr(msg));
                 Task::none()
             }
             ActMsg::CommitPick(sha, kind) => {
@@ -734,7 +743,7 @@ impl App {
                     }
                 }
                 if ok {
-                    self.toast(sid, tr::chg_commit_done());
+                    self.toast(sid, Tone::Success, Text::tr(tr::chg_commit_done));
                 }
                 // Also after a failure: a conflict may leave an operation in progress.
                 self.refresh_repo(sid)
@@ -781,7 +790,7 @@ impl App {
                     Ok(b) => a.branch.list = Some(b),
                     Err(e) => {
                         let msg = i18n::proto_error(&e);
-                        self.toast(sid, msg);
+                        self.toast(sid, Tone::Error, msg);
                     }
                 }
                 Task::none()
@@ -954,6 +963,7 @@ impl App {
                 else {
                     return self.refresh_repo(sid);
                 };
+                let tone = if res.is_ok() { Tone::Success } else { Tone::Error };
                 let msg = match (res, &remote) {
                     (Ok(()), _) if mode == SwitchMode::Stash && dirty > 0 => {
                         tr::chg_switched_stash(&from, &name)
@@ -963,7 +973,7 @@ impl App {
                     (Err(e), Some(_)) => tr::chg_switch_remote_failed(&i18n::proto_error(&e)),
                     (Err(e), None) => tr::chg_switch_failed(&i18n::proto_error(&e)),
                 };
-                self.toast(sid, msg);
+                self.toast(sid, tone, msg);
                 self.refresh_repo(sid)
             }
             ActMsg::Created(res) => {
@@ -976,7 +986,7 @@ impl App {
                             _ => tr::chg_commit_done(),
                         };
                         self.modal = None;
-                        self.toast(sid, msg);
+                        self.toast(sid, Tone::Success, msg);
                     }
                     Err(e) => {
                         if let Some(f) = self.changes_modal() {

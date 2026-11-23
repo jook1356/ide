@@ -315,7 +315,7 @@ impl App {
                     sid
                 };
                 if let Some(d) = self.detail_mut(&target) {
-                    d.toast(i18n::proto_error(&e));
+                    d.toast(crate::notices::Tone::Error, i18n::proto_error(&e));
                 }
                 Task::none()
             }

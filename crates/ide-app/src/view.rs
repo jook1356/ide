@@ -316,7 +316,7 @@ impl App {
         let base = column![base, self.app_footer()].height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
         let overlay = self.modal_layer(false);
-        let mut root = stack![base, overlay].boxed();
+        let mut root = stack![base, self.toast_layer(false), overlay].boxed();
         // Frameless window (`frame.rs`): the title bar stays usable above modals.
         if let Some(id) = self.window {
             let max = self.window_maximized;
@@ -468,11 +468,13 @@ impl App {
                     .boxed(),
             );
         }
-        let col = column![top.height(Fill)]
+        let col = column![top.height(Fill), self.notice_bell()]
+        .spacing(6)
         .width(Fill)
         .align_x(Alignment::Center)
         .padding(iced::Padding {
             top: 12.0,
+            bottom: 12.0,
             ..iced::Padding::ZERO
         });
         row![
@@ -570,15 +572,7 @@ impl App {
         if self.session_edit.on {
             col = col.push(self.edit_bar());
         }
-        let mut col = col.push(scrollable(list).height(Fill).boxed());
-        if let Some(b) = &self.banner {
-            col = col.push(
-                container(text(b.as_str()).size(12))
-                    .padding(6)
-                    .style(style::error_box)
-                    .boxed(),
-            );
-        }
+        let col = col.push(scrollable(list).height(Fill).boxed());
         container(col)
             .width(self.list_w())
             .height(Fill)

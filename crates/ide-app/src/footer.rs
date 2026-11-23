@@ -177,14 +177,8 @@ pub struct MoreEntry {
 
 // ---------------------------------------------------------------------------- PR job
 
-/// Notice tone (Desk notice `tone`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Info,
-    Success,
-    Warning,
-    Error,
-}
+/// Notice tone (Desk notice `tone`): the notification centre's.
+pub use crate::notices::Tone;
 
 /// A button of the job notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -912,10 +906,10 @@ impl App {
         )
     }
 
-    fn footer_toast(&mut self, sid: &str, msg: String) {
+    fn footer_toast(&mut self, sid: &str, tone: crate::notices::Tone, msg: String) {
         crate::script::log(&format!("footer toast: {msg}"));
         if let Some(d) = self.detail_mut(sid) {
-            d.toast(msg);
+            d.toast(tone, msg);
         }
     }
 
@@ -983,6 +977,19 @@ impl App {
                     Err(e) => {
                         crate::script::log(&format!("footer sync {repo} failed: {e:?}"));
                         f.sync = None;
+                        if e.id != "disconnected" {
+                            // History only (it repeats with every check): one per repo.
+                            self.notify(
+                                crate::notices::Notice::warning(crate::notices::Text::tr(
+                                    tr::notice_sync_status_failed,
+                                ))
+                                .body(i18n::proto_error(&e))
+                                .session(self.workspace_owner(sid))
+                                .repo(repo.clone())
+                                .key(crate::notices::NoticeKey::Other(format!("sync:{sid}:{repo}")))
+                                .quiet(),
+                            );
+                        }
                     }
                 }
                 Task::none()
@@ -1059,7 +1066,7 @@ impl App {
                     Ok(()) => crate::script::log("footer: prompt sent"),
                     Err(e) => {
                         let msg = tr::foot_prompt_failed(&i18n::proto_error(&e));
-                        self.footer_toast(sid, msg);
+                        self.footer_toast(sid, crate::notices::Tone::Error, msg);
                     }
                 }
                 Task::none()
@@ -1103,12 +1110,12 @@ impl App {
                             SyncOp::Reset => Some(tr::foot_reset_done(&branch)),
                         };
                         if let Some(m) = msg {
-                            self.footer_toast(sid, m);
+                            self.footer_toast(sid, crate::notices::Tone::Success, m);
                         }
                     }
                     Err(e) => {
                         let m = tr::foot_sync_failed(&op_label(op), &i18n::proto_error(&e));
-                        self.footer_toast(sid, m);
+                        self.footer_toast(sid, crate::notices::Tone::Error, m);
                     }
                 }
                 // Desk: recount, then the PR's head / mergeability may have changed.
@@ -1203,7 +1210,7 @@ impl App {
                             String::new()
                         };
                         let msg = tr::foot_merged(&n.to_string(), &format!("{title}{extra}"));
-                        self.footer_toast(sid, msg);
+                        self.footer_toast(sid, crate::notices::Tone::Success, msg);
                         let pr = self.footer_pr(sid, &repo);
                         Task::batch([pr, self.footer_sync(sid, &repo, true)])
                     }
@@ -1261,7 +1268,7 @@ impl App {
                 match res {
                     Ok(_) => {
                         self.modal = None;
-                        self.footer_toast(sid, tr::foot_closed(&n.to_string()));
+                        self.footer_toast(sid, crate::notices::Tone::Success, tr::foot_closed(&n.to_string()));
                         self.footer_pr(sid, &repo)
                     }
                     Err(e) => {
@@ -1289,12 +1296,12 @@ impl App {
                 )
             }
             FooterMsg::BranchUpdated(repo, res) => {
-                let msg = match res {
-                    Ok(Some(m)) if !m.trim().is_empty() => m,
-                    Ok(_) => tr::foot_branch_updating(),
-                    Err(e) => tr::foot_update_branch_failed(&i18n::proto_error(&e)),
+                let (tone, msg) = match res {
+                    Ok(Some(m)) if !m.trim().is_empty() => (crate::notices::Tone::Info, m),
+                    Ok(_) => (crate::notices::Tone::Info, tr::foot_branch_updating()),
+                    Err(e) => (crate::notices::Tone::Error, tr::foot_update_branch_failed(&i18n::proto_error(&e))),
                 };
-                self.footer_toast(sid, msg);
+                self.footer_toast(sid, tone, msg);
                 self.footer_pr(sid, &repo)
             }
             FooterMsg::OpenPr => self.footer_open_pr(sid, &repo_now, true),
@@ -2780,7 +2787,7 @@ impl App {
                     }
                     Err(e) => {
                         let msg = tr::foot_continue_failed(&i18n::proto_error(&e));
-                        self.footer_toast(sid, msg.clone());
+                        self.footer_toast(sid, crate::notices::Tone::Error, msg.clone());
                         if let Some(FooterModal::Continue(f)) = self.footer_modal() {
                             f.check = Some(Load::Failed(msg));
                         }

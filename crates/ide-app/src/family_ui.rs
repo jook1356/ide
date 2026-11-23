@@ -217,16 +217,29 @@ impl App {
                 })
             }
             FamilyMsg::Merged(session, r) => {
+                use crate::notices::{Notice, Text, Tone};
+                let tone = match &r {
+                    Err(_) => Tone::Error,
+                    Ok(m) if m.iter().any(|x| matches!(x.result, MergeResult::Failed { .. })) => {
+                        Tone::Error
+                    }
+                    Ok(m) if m.iter().any(|x| matches!(x.result, MergeResult::Conflicts { .. })) => {
+                        Tone::Warning
+                    }
+                    Ok(_) => Tone::Success,
+                };
                 let msg = match r {
                     Ok(m) => merge_summary(&m),
                     Err(e) => i18n::proto_error(&e),
                 };
                 crate::script::log(&format!("merge result for {session}: {msg}"));
-                if let Some(d) = self.detail_mut(&session) {
-                    d.toast(msg);
-                } else {
-                    self.banner = Some(msg);
-                }
+                let owner = self.workspace_owner(&session);
+                self.notify(
+                    Notice::new(tone, Text::tr(tr::merge_notice_title))
+                        .body(msg)
+                        .session(owner)
+                        .toast(),
+                );
                 Task::none()
             }
             FamilyMsg::ToggleFold(id) => {

@@ -335,7 +335,8 @@ Deviations / omissions:
   'Create PR' on the notice.
 - **PR pages open in the in-app web tab**, not the OS browser.
 - **Job notice texts** are formatted when the event happens (they do not re-translate on a
-  language switch).
+  language switch). The job notice is also mirrored into the notification centre
+  (`docs/notifications.md`).
 - **브랜치 업데이트** (`pr_update_branch`) is a "…" menu entry while the open PR is behind its
   base (Desk: a button on the Merge page). The 커밋 보유 / branch state badge is on the session
   list (`branch_badge.rs`: `git.status`, `git.sync_status`, `pr.status`, `pr.unmerged` per repo,

@@ -30,10 +30,16 @@ impl App {
                     .trim()
                     .to_owned();
                 crate::script::log(&format!("agent {session}: show message {message:?}"));
-                match self.detail_mut(&session) {
-                    Some(d) if !message.is_empty() => {
-                        // Agent text, shown as is (user content, not translated).
-                        d.toast(message);
+                match self.live(&session) {
+                    Some(_) if !message.is_empty() => {
+                        // Agent text, shown as is (user content, not translated); unread in the
+                        // notification centre (it is meant for the user).
+                        self.notify(
+                            crate::notices::Notice::info(message)
+                                .session(session.clone())
+                                .open(Message::Select(session.clone()))
+                                .toast(),
+                        );
                         Ok("shown in the ide".to_owned())
                     }
                     Some(_) => Err("`message` is empty".to_owned()),

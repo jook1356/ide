@@ -400,22 +400,7 @@ impl App {
             }
             }
         };
-        let mut layers = vec![body];
-        if let Some((t, _)) = &d.toast {
-            layers.push(
-                container(
-                    container(text(t.as_str()).size(12))
-                        .padding([6, 10])
-                        .style(style::modal_card),
-                )
-                .width(Fill)
-                .height(Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::End)
-                .padding(14)
-                .boxed(),
-            );
-        }
+        let layers = vec![body];
         let body = stack(layers).width(Fill).height(Fill).boxed();
         let body = if rail {
             self.with_rail(live, body)
