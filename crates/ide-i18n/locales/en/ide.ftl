@@ -687,6 +687,26 @@ session-pin = Pin
 session-unpin = Unpin
 session-archive = Move to archive
 session-unarchive = Take out of archive
+session-edit-start = Edit sessions
+session-edit-end = Finish editing
+session-edit-check-all = Select all
+session-edit-none = Select sessions
+session-edit-count = { $count ->
+    [one] 1 selected
+   *[other] { $count } selected
+}
+session-edit-more = More
+session-edit-done = Done
+session-edit-delete-title = { $count ->
+    [one] Delete 1 session
+   *[other] Delete { $count } sessions
+}
+session-edit-delete-body = The selected sessions are stopped and removed from the list. Child sessions are deleted before their parents.
+session-edit-delete-warning = Uncommitted changes and unpushed commits are lost with the worktrees. To see what is left first, delete sessions one at a time.
+session-edit-delete-confirm = { $count ->
+    [one] Delete 1
+   *[other] Delete { $count }
+}
 archive-label = Archive
 archive-fold = Fold archive
 archive-unfold = Unfold archive

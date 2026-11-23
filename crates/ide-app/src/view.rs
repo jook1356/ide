@@ -200,7 +200,14 @@ fn archive_toggle<'a>(key: String, count: usize, open: bool) -> El<'a> {
     )
 }
 
-fn group_divider<'a>(key: String, name: String, count: usize, folded: bool) -> El<'a> {
+/// `lead`: edit mode's check box for the block, before the divider.
+fn group_divider<'a>(
+    key: String,
+    name: String,
+    count: usize,
+    folded: bool,
+    lead: Option<El<'a>>,
+) -> El<'a> {
     let tooltip = if folded {
         tr::group_unfold(&name)
     } else {
@@ -238,7 +245,20 @@ fn group_divider<'a>(key: String, name: String, count: usize, folded: bool) -> E
         .width(Fill)
         .style(style::divider)
         .on_press(Message::ToggleGroupFold(key));
-    tip(b.boxed(), tooltip)
+    let b = tip(b.boxed(), tooltip);
+    match lead {
+        Some(lead) => row![
+            container(lead).padding(iced::Padding {
+                top: 5.0,
+                left: 4.0,
+                ..iced::Padding::ZERO
+            }),
+            b
+        ]
+        .align_y(Alignment::Center)
+        .boxed(),
+        None => b,
+    }
 }
 
 pub(crate) fn error_box<'a>(e: &'a str) -> El<'a> {
@@ -479,6 +499,7 @@ impl App {
             label(tr::sessions_label()),
             space().width(Fill),
             self.sort_control(),
+            self.edit_toggle(),
             icon_button(
                 I_PLUS,
                 self.when_connected(Message::OpenNew),
@@ -497,7 +518,11 @@ impl App {
             let (archived, members): (Vec<&Live>, Vec<&Live>) =
                 members.into_iter().partition(|l| l.info.archived);
             if !key.is_empty() {
-                list = list.push(group_divider(key.clone(), name, members.len(), folded));
+                let lead = self.session_edit.on.then(|| {
+                    let all: Vec<&Live> = members.iter().chain(archived.iter()).copied().collect();
+                    self.edit_group_box(&key, &all)
+                });
+                list = list.push(group_divider(key.clone(), name, members.len(), folded, lead));
             }
             if !folded {
                 // Children under their parent (docs/session-family.md).
@@ -523,9 +548,11 @@ impl App {
             );
         }
 
-        let mut col = column![sessions_header, profile, scrollable(list).height(Fill),]
-            .spacing(10)
-            .padding(10);
+        let mut col = column![sessions_header, profile].spacing(10).padding(10);
+        if self.session_edit.on {
+            col = col.push(self.edit_bar());
+        }
+        let mut col = col.push(scrollable(list).height(Fill).boxed());
         if let Some(b) = &self.banner {
             col = col.push(
                 container(text(b.as_str()).size(12))
@@ -850,7 +877,11 @@ impl App {
                 .boxed(),
         );
         // Desk: a pinned row shows a filled pin before the rest.
+        let editing = self.session_edit.on;
         let mut content = row![].spacing(6).align_y(Alignment::Center);
+        if editing {
+            content = content.push(self.edit_row_box(&s.id));
+        }
         if s.pinned {
             content = content.push(icons::icon(Icon::PinFilled, 12.0, style::ACCENT_TEXT));
         }
@@ -859,7 +890,7 @@ impl App {
             .push(column![title, sub].width(Fill).boxed());
         // Add child / pin / delete take room inside the row (pushing the title) only while
         // hovered.
-        if self.session_hover.as_deref() == Some(s.id.as_str()) {
+        if !editing && self.session_hover.as_deref() == Some(s.id.as_str()) {
             content = content.push(self.session_actions(live));
         }
         // Desk: a parent's fold toggle with its child count, always at the row's right end.
@@ -888,16 +919,42 @@ impl App {
         }
         // Children are indented per level.
         let content = row![space().width((depth * 14) as f32), content].align_y(Alignment::Center);
+        // Edit mode: a click (un)checks the row and its children instead of opening it.
+        let checked = editing && self.session_edit.checked.contains(&s.id);
         let main = button(content)
             .padding([4, 6])
             .width(Fill)
-            .style(style::row(selected))
-            .on_press(Message::Select(s.id.clone()));
+            .style(style::row(if editing { checked } else { selected }))
+            .on_press(if editing {
+                Message::SessionEdit(crate::session_edit::EditMsg::Row(s.id.clone()))
+            } else {
+                Message::Select(s.id.clone())
+            });
+        if editing {
+            return main.boxed();
+        }
         let main = mouse_area(main)
             .on_enter(Message::SessionHover(s.id.clone(), true))
             .on_exit(Message::SessionHover(s.id.clone(), false))
             .boxed();
         crate::session_menu::with_menu(main, &s.id)
+    }
+
+    /// The list header's edit mode toggle (Desk's 세션 편집 / 편집 끝내기).
+    fn edit_toggle(&self) -> El<'_> {
+        let on = self.session_edit.on;
+        tip(
+            button(icons::icon(
+                Icon::ListCheck,
+                16.0,
+                if on { style::ACCENT_TEXT } else { style::DIM },
+            ))
+            .padding(3)
+            .style(style::icon_toggle(on))
+            .on_press(Message::SessionEdit(crate::session_edit::EditMsg::Toggle))
+            .boxed(),
+            if on { tr::session_edit_end() } else { tr::session_edit_start() },
+        )
     }
 
     /// The hovered session row's pin / delete buttons.
@@ -2800,6 +2857,7 @@ impl App {
             Modal::SkillEdit(f) => self.skill_modal_card(f),
             Modal::AddProfile => self.add_profile_card(),
             Modal::NewChild(f) => self.child_card(f),
+            Modal::BulkDelete(f) => self.bulk_delete_card(f),
             Modal::SelfUpdate => self.update_card(),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),

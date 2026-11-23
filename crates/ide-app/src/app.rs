@@ -550,6 +550,8 @@ pub enum Modal {
     AddProfile,
     /// 하위 세션 만들기 (`family_ui.rs`).
     NewChild(crate::family_ui::ChildForm),
+    /// The session list's edit mode: delete the checked sessions (`session_edit.rs`).
+    BulkDelete(crate::session_edit::BulkDeleteForm),
     /// ide 빌드 후 재시작: confirm (`self_update.rs`).
     SelfUpdate,
 }
@@ -931,6 +933,8 @@ pub enum Message {
     SessionAct(crate::session_menu::SessionAct),
     /// Session families (`family_ui.rs`).
     Family(crate::family_ui::FamilyMsg),
+    /// The session list's edit mode (`session_edit.rs`).
+    SessionEdit(crate::session_edit::EditMsg),
     /// Self-update from the footer (`self_update.rs`).
     Update(crate::self_update::UpdateMsg),
     /// Close the session menu, then handle the message (세션 설정, 삭제).
@@ -1188,6 +1192,8 @@ pub struct App {
     pub badges: crate::branch_badge::Badges,
     /// The session list's sort menu is open.
     pub sort_open: bool,
+    /// The session list's edit mode (`session_edit.rs`).
+    pub session_edit: crate::session_edit::SessionEdit,
 }
 
 impl App {
@@ -1299,6 +1305,7 @@ impl App {
             explore_settings: false,
             badges: Default::default(),
             sort_open: false,
+            session_edit: Default::default(),
         }
     }
 
@@ -1435,6 +1442,27 @@ impl App {
         self.sessions.iter().find(|l| l.id() == id)
     }
 
+
+    /// Drops a deleted session from the app: its row, web view, saved detail state and the
+    /// selection (which moves to the first listed session). The caller saves the UI state.
+    pub(crate) fn forget_session(&mut self, id: &str) {
+        if let Some(idx) = self.sessions.iter().position(|l| l.id() == id) {
+            let live = self.sessions.remove(idx);
+            if let Some(w) = live.web {
+                w.close();
+            }
+        }
+        self.ui.web_urls.remove(id);
+        self.ui.detail.remove(id);
+        self.session_edit.checked.remove(id);
+        if self.selected.as_deref() == Some(id) {
+            self.selected = self
+                .sessions
+                .iter()
+                .find(|l| self.in_filter(&l.info))
+                .map(|l| l.info.id.clone());
+        }
+    }
     pub(crate) fn live_mut(&mut self, id: &str) -> Option<&mut Live> {
         self.sessions.iter_mut().find(|l| l.id() == id)
     }
@@ -1928,7 +1956,7 @@ impl App {
         self.after_select()
     }
 
-    fn after_select(&mut self) -> Task<Message> {
+    pub(crate) fn after_select(&mut self) -> Task<Message> {
         self.sync_web();
         self.open_items = false;
         let uterms = match self.selected.clone() {
@@ -2165,21 +2193,7 @@ impl App {
                         crate::script::log(&format!(
                             "deleted session {id} (remove_worktree={remove}, root {root})"
                         ));
-                        if let Some(idx) = self.sessions.iter().position(|l| l.id() == id) {
-                            let live = self.sessions.remove(idx);
-                            if let Some(w) = live.web {
-                                w.close();
-                            }
-                        }
-                        self.ui.web_urls.remove(&id);
-                        self.ui.detail.remove(&id);
-                        if self.selected.as_deref() == Some(id.as_str()) {
-                            self.selected = self
-                                .sessions
-                                .iter()
-                                .find(|l| self.in_filter(&l.info))
-                                .map(|l| l.info.id.clone());
-                        }
+                        self.forget_session(&id);
                         if matches!(&self.modal, Some(Modal::Delete(f)) if f.id == id) {
                             self.modal = None;
                         }
@@ -2457,6 +2471,7 @@ impl App {
                     Some(Modal::Close(f)) => f.busy,
                     Some(Modal::SessionRepos(f)) => f.busy,
                     Some(Modal::NewChild(f)) => f.busy,
+                    Some(Modal::BulkDelete(f)) => f.busy,
                     Some(Modal::Changes(f)) => f.busy,
                     Some(Modal::Footer(f)) => f.busy(),
                     _ => false,
@@ -3657,6 +3672,7 @@ impl App {
             }
             Message::SessionAct(a) => self.on_session_act(a),
             Message::Family(m) => self.on_family(m),
+            Message::SessionEdit(m) => self.on_session_edit(m),
             Message::Update(m) => self.on_update(m),
             Message::SessionMenuThen(m) => {
                 self.session_menu = None;
