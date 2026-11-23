@@ -14,6 +14,9 @@ use crate::style;
 
 type El<'a> = Element<'a, Message>;
 
+/// Height of the 분리 / 공유 choices in the dialog.
+const CHOICE_H: f32 = 72.0;
+
 /// Levels below a root session (the server's `ide_core::family::MAX_DEPTH`).
 pub const MAX_DEPTH: usize = 2;
 
@@ -266,6 +269,8 @@ impl App {
             )
             .padding([6, 10])
             .width(Fill)
+            // Same height for both, whatever their hints wrap to.
+            .height(CHOICE_H)
             .style(style::choice(on))
             .on_press(fm(FamilyMsg::Shared(shared)))
             .boxed()
