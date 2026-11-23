@@ -17,6 +17,20 @@ protocol changed, the user restarts the server (Settings) afterwards.
 Windows; the exe runs from `<target>\release`; the repository it was built from
 (`CARGO_MANIFEST_DIR/../..`) has `.git`, `Cargo.toml` and `scripts\ide-update.ps1`.
 
+## What is built
+
+Always the **original repository's branch as merged**, never the files of a checkout: other
+worktrees (ide sessions) share the original checkout's branch, so its files can lag behind it.
+
+- Repository: the original one, found from the build path's common git dir
+  (`git rev-parse --git-common-dir`), also when the binary was built in a worktree.
+- Commit: after `git fetch origin`, `origin/<branch>` (the original checkout's branch, `main`),
+  or the local branch when it is ahead of it (merged but not pushed). Without a remote: the local branch.
+- Build checkout: `<target>-src` (e.g. `C:\t\ide-src`), a detached worktree of the original
+  repository set to that commit (`checkout --force --detach` + `clean -fd`); the original checkout
+  is never touched. The last built commit is kept in `<data>\self-update\built-commit` (`from` of
+  the next run).
+
 ## Files (`<data>\self-update\`)
 
 `ide-update.ps1` (copied before each run: the pull may rewrite the repository's copy),
@@ -26,8 +40,8 @@ Windows; the exe runs from `<target>\release`; the repository it was built from
 
 | Phase | Meaning |
 |---|---|
-| `pulling` | `git pull --ff-only`. If it fails (local changes, conflicts, no upstream) the checkout is built as it is. |
-| `building` | `ide.exe` / `ide-server.exe` are renamed to `*.<run>.old` (a running exe can be renamed, not overwritten), then `cargo build --release -p ide-app -p ide-server` with the user's `PATH`, `CEF_PATH`, `WGPU_BACKEND` and `CARGO_TARGET_DIR=<target>`. A failed build moves the old files back (`failed`). |
+| `pulling` | `git fetch origin`, pick the commit, set the build checkout to it (see above). A failed fetch builds the local branch. |
+| `building` | `ide.exe` / `ide-server.exe` are renamed to `*.<run>.old` (a running exe can be renamed, not overwritten), then `cargo build --release -p ide-app -p ide-server` in the build checkout with the user's `PATH`, `CEF_PATH`, `WGPU_BACKEND` and `CARGO_TARGET_DIR=<target>`. A failed build moves the old files back (`failed`). |
 | `ready` | Built; the footer shows a purple restart icon. Clicking writes the run id to `apply-request`. If the app closes first: `done` with message `closed-before-restart` (the next start uses the new build). |
 | `swapping` | The app that applied quits; the script waits for its pid (killed after 60 s) and starts the new `ide.exe`. |
 | `done` | Written by the new app at startup (`confirm_started`). |

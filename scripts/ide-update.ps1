@@ -1,4 +1,4 @@
-# ide self-update (docs/self-update.md): pull, build, wait for the user's restart, swap, start the
+# ide self-update (docs/self-update.md): fetch, build the branch, wait for the user's restart, swap, start the
 # new app, roll back when it does not come up. Started detached by the app (ide-app/src/self_update.rs)
 # from a copy in <data>\self-update\, so a pull that rewrites this file does not change a running run.
 #
@@ -60,7 +60,7 @@ function Fail([string] $why) {
     exit 1
 }
 
-# Run a command line in $RepoRoot; its output goes to the log. Returns the exit code.
+# Run a command line in the current folder; its output goes to the log. Returns the exit code.
 function Run([string] $commandLine) {
     Log "> $commandLine"
     $out = & cmd.exe /d /c "$commandLine 2>&1"
@@ -80,7 +80,6 @@ Get-ChildItem -LiteralPath $AppDir -ErrorAction SilentlyContinue | Where-Object 
 }
 
 try {
-    Set-Location -LiteralPath $RepoRoot
     # The environment of a fresh login (the app may have been started before tools were installed).
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
     foreach ($k in 'CEF_PATH', 'WGPU_BACKEND') {
@@ -89,14 +88,52 @@ try {
     }
     $env:CARGO_TARGET_DIR = $TargetDir
 
-    $from = (& git rev-parse --short HEAD 2>$null)
+    # Always the original repository: a binary built in a worktree (this script's own build
+    # checkout, or an ide session's) names that worktree; its common git dir is the original's.
+    $common = (& git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $common) {
+        $orig = Split-Path -Parent ([IO.Path]::GetFullPath($common.Trim()))
+        if (Test-Path -LiteralPath (Join-Path $orig 'Cargo.toml')) { $RepoRoot = $orig }
+    }
+    Log "repository $RepoRoot"
+    Set-Location -LiteralPath $RepoRoot
+
+    # The commit to build: the branch as merged, never the original checkout's files (other
+    # worktrees share its branch, so those files can lag behind it). origin/<branch> after a
+    # fetch, or the local branch when it is ahead of it (merged, not pushed yet).
+    $branch = (& git symbolic-ref --quiet --short HEAD 2>$null)
+    if (-not $branch) { $branch = 'main' }
+    $branch = $branch.Trim()
+    $commit = $null
     if (-not $SkipPull) {
         Status 'pulling'
-        # A pull that cannot fast-forward (local changes, conflicts, no upstream) is skipped:
-        # the checkout is built as it is.
-        if ((Run 'git pull --ff-only') -ne 0) { Log 'pull skipped: building the checkout as it is' }
+        if ((Run 'git fetch --quiet origin') -ne 0) { Log 'fetch failed: building the local branch' }
+        $remote = (& git rev-parse --verify --quiet "refs/remotes/origin/$branch" 2>$null)
+        if ($remote) {
+            $commit = $remote.Trim()
+            & git merge-base --is-ancestor "refs/remotes/origin/$branch" "refs/heads/$branch" 2>$null
+            if ($LASTEXITCODE -eq 0) { $commit = (& git rev-parse "refs/heads/$branch").Trim() }
+        }
     }
-    $to = (& git rev-parse --short HEAD 2>$null)
+    if (-not $commit) { $commit = (& git rev-parse "refs/heads/$branch").Trim() }
+    $to = (& git rev-parse --short $commit).Trim()
+    $builtFile = Join-Path (Split-Path -Parent $StatusFile) 'built-commit'
+    if (Test-Path -LiteralPath $builtFile) { $from = ([IO.File]::ReadAllText($builtFile)).Trim() }
+    Log "building $branch at $to"
+
+    # The build checkout: a worktree of the original repository next to the target dir (short
+    # ASCII path), set to exactly that commit.
+    $src = "$TargetDir-src"
+    if (Test-Path -LiteralPath (Join-Path $src '.git')) {
+        Set-Location -LiteralPath $src
+        if ((Run "git checkout --quiet --force --detach $commit") -ne 0) { throw 'checkout of the build tree failed' }
+        Run 'git clean -fdq' | Out-Null
+    } else {
+        Run 'git worktree prune' | Out-Null
+        if (Test-Path -LiteralPath $src) { Remove-Item -LiteralPath $src -Recurse -Force }
+        if ((Run "git worktree add --detach `"$src`" $commit") -ne 0) { throw 'creating the build tree failed' }
+        Set-Location -LiteralPath $src
+    }
 
     Status 'building'
     # A running exe cannot be overwritten but can be renamed: the running app and daemon keep
@@ -113,6 +150,7 @@ try {
         }
         Fail 'build failed (the running ide is unchanged)'
     }
+    [IO.File]::WriteAllText($builtFile, $to, $utf8)
 } catch {
     Fail "update error: $($_.Exception.Message)"
 }
