@@ -80,6 +80,16 @@ Get-ChildItem -LiteralPath $AppDir -ErrorAction SilentlyContinue | Where-Object 
 }
 
 try {
+    # Always the original repository: a binary built in a worktree (an ide session's) names that
+    # worktree; its common git dir belongs to the original checkout.
+    $common = (& git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $common) {
+        $main = Split-Path -Parent ([IO.Path]::GetFullPath($common.Trim()))
+        if ((Test-Path -LiteralPath (Join-Path $main 'Cargo.toml')) -and $main -ne $RepoRoot) {
+            Log "using the original repository $main (not $RepoRoot)"
+            $RepoRoot = $main
+        }
+    }
     Set-Location -LiteralPath $RepoRoot
     # The environment of a fresh login (the app may have been started before tools were installed).
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -89,6 +99,20 @@ try {
     }
     $env:CARGO_TARGET_DIR = $TargetDir
 
+    # Another worktree on the same branch (an ide session's) may have moved the branch under
+    # this checkout: files that still equal an earlier commit of the branch (nothing unsaved)
+    # are brought up to HEAD. Real local changes are left alone.
+    & git diff --quiet HEAD 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        foreach ($c in (& git rev-list --max-count=200 HEAD~1 2>$null)) {
+            & git diff --quiet $c 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Log "checkout was at $c behind its branch: updating it to HEAD"
+                Run 'git reset --hard HEAD' | Out-Null
+                break
+            }
+        }
+    }
     $from = (& git rev-parse --short HEAD 2>$null)
     if (-not $SkipPull) {
         Status 'pulling'
