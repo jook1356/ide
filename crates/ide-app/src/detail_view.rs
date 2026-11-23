@@ -269,6 +269,8 @@ impl App {
         let identity: El<'a> = match &active {
             ItemKey::Terminal(id) => self.uterm_identity(live, id),
             ItemKey::Browser(id) => self.browser_identity(live, *id),
+            // Nothing open (the page is not open by default).
+            ItemKey::Web if d.item(&ItemKey::Web).is_none() => space().width(Fill).boxed(),
             ItemKey::Web => row![
                 icon_button(
                     I_BACK,
@@ -366,6 +368,7 @@ impl App {
             // `None` (the fallback above) shows the page.
             let item = if active == d.active { d.active_item() } else { None };
             match item {
+            None if d.item(&ItemKey::Web).is_none() => message_body(tr::rail_empty(), false),
             Some(Item::Web) | None => match &live.web {
                 // Under a modal the page stays visible as a frozen, dimmed snapshot of its
                 // last frame (no input reaches it, CEF stops rendering); the backdrop and the
@@ -559,15 +562,11 @@ impl App {
                     .width(Fill)
                     .style(style::row(*k == d.active))
                     .on_press(Message::Detail(sid.clone(), DetailMsg::Activate(k.clone())));
-                    let close: El<'_> = if *k == ItemKey::Web {
-                        space().width(24).boxed()
-                    } else {
-                        icon_button(
-                            I_CLOSE,
-                            Some(Message::Detail(sid.clone(), DetailMsg::Close(k.clone()))),
-                            tr::close(),
-                        )
-                    };
+                    let close: El<'_> = icon_button(
+                        I_CLOSE,
+                        Some(Message::Detail(sid.clone(), DetailMsg::Close(k.clone()))),
+                        tr::close(),
+                    );
                     list = list.push(self.item_row(
                         live,
                         row![main, close]

@@ -929,7 +929,9 @@ impl App {
     /// Open `url` in the session's web tab (Desk opens PR pages in the OS browser).
     pub fn footer_open_url(&mut self, sid: &str, url: &str) -> Task<Message> {
         crate::script::log(&format!("footer: open {url}"));
-        if let Some(l) = self.live_mut(sid) {
+        // The page belongs to the folder's detail area.
+        let owner = self.workspace_owner(sid);
+        if let Some(l) = self.live_mut(&owner) {
             l.url_input = url.to_owned();
             if let Some(w) = &l.web {
                 w.navigate(url);

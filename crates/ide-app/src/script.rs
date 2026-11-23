@@ -3073,8 +3073,10 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     "navigate detail tab to a data: URL ({} chars)",
                     url.len()
                 ));
-                tasks.push(app.update(Message::UrlInput(url)));
-                tasks.push(app.update(Message::UrlSubmit));
+                // The session's page is not open by default: open it at `url`.
+                if let Some(sid) = app.selected.clone() {
+                    tasks.push(app.footer_open_url(&sid, &url));
+                }
             }
             Step::WaitWebTitle(needle, ms) => {
                 let title = app

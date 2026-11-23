@@ -77,7 +77,8 @@ impl SideTab {
 /// Identity of an open item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemKey {
-    /// The session's web page (always open).
+    /// The session's web page (opened on demand, e.g. a PR link; closable, not remembered).
+    /// Also the "nothing" value of `Detail::active` while it is not open.
     Web,
     /// A file in the editor ([`qualify`]d path).
     File(String),
@@ -100,10 +101,11 @@ pub enum ItemKey {
 }
 
 impl ItemKey {
-    /// Stable string for `ui.json` (`Compare` is not remembered).
+    /// Stable string for `ui.json` (`Web`, `Compare`, terminals and browser tabs are not
+    /// remembered).
     pub fn encode(&self) -> Option<String> {
         Some(match self {
-            ItemKey::Web => "web".into(),
+            ItemKey::Web => return None,
             ItemKey::File(p) => format!("file:{p}"),
             ItemKey::Diff { staged: true, path } => format!("diff:s:{path}"),
             ItemKey::Diff {
@@ -385,7 +387,8 @@ impl Detail {
     /// `first_repo`: the session's first repo; files saved before multi-repo sessions (plain
     /// paths) belong to it.
     pub fn new(saved: Option<&DetailUi>, first_repo: Option<&str>) -> Self {
-        let mut items: Vec<(ItemKey, Item)> = vec![(ItemKey::Web, Item::Web)];
+        // Nothing is open by default (the web page opens on demand).
+        let mut items: Vec<(ItemKey, Item)> = Vec::new();
         let mut active = ItemKey::Web;
         let mut side = SideTab::Explore;
         if let Some(ui) = saved {
@@ -442,17 +445,14 @@ impl Detail {
         }
     }
 
-    /// The items `set` covers (the web page never).
+    /// The items `set` covers.
     pub fn close_set(&self, set: &CloseSet) -> Vec<ItemKey> {
         self.items
             .iter()
-            .filter(|(k, item)| {
-                *k != ItemKey::Web
-                    && match set {
-                        CloseSet::All => true,
-                        CloseSet::Idle => !matches!(item, Item::File(f) if f.dirty()),
-                        CloseSet::Others(keep) => k != keep,
-                    }
+            .filter(|(k, item)| match set {
+                CloseSet::All => true,
+                CloseSet::Idle => !matches!(item, Item::File(f) if f.dirty()),
+                CloseSet::Others(keep) => k != keep,
             })
             .map(|(k, _)| k.clone())
             .collect()
@@ -1228,13 +1228,12 @@ impl App {
         Task::batch([act, jump])
     }
 
-    /// Close `keys` (never the web page): asks once first when some are files with unsaved
-    /// edits (Desk's `closeMany` / `confirmDiscard`).
+    /// Close `keys`: asks once first when some are files with unsaved edits (Desk's
+    /// `closeMany` / `confirmDiscard`).
     fn close_keys(&mut self, sid: &str, keys: Vec<ItemKey>) -> Task<Message> {
         // Browser tabs close here; terminals are stopped and removed by the server.
         let (tabs, keys): (Vec<ItemKey>, Vec<ItemKey>) = keys
             .into_iter()
-            .filter(|k| *k != ItemKey::Web)
             .partition(|k| matches!(k, ItemKey::Browser(_)));
         for k in tabs {
             if let ItemKey::Browser(id) = k {
@@ -1285,11 +1284,14 @@ impl App {
 
     /// Remove `keys` and show the item that took the shown one's place.
     pub(crate) fn close_items(&mut self, sid: &str, keys: &[ItemKey]) -> Task<Message> {
+        if keys.contains(&ItemKey::Web) {
+            self.close_page(sid);
+        }
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
         let at = d.items.iter().position(|(k, _)| keys.contains(k) && *k == d.active);
-        d.items.retain(|(k, _)| *k == ItemKey::Web || !keys.contains(k));
+        d.items.retain(|(k, _)| !keys.contains(k));
         if let Some(i) = at {
             d.active = d
                 .items
@@ -1302,12 +1304,15 @@ impl App {
     }
 
     fn close_item(&mut self, sid: &str, key: &ItemKey) -> Task<Message> {
+        if self.detail(sid).is_none_or(|d| d.item(key).is_none()) {
+            return Task::none();
+        }
+        if *key == ItemKey::Web {
+            self.close_page(sid);
+        }
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
-        if *key == ItemKey::Web {
-            return Task::none();
-        }
         let Some(i) = d.items.iter().position(|(k, _)| k == key) else {
             return Task::none();
         };
@@ -2565,8 +2570,9 @@ mod tests {
 
     #[test]
     fn keys_round_trip() {
+        // The web page is not remembered (it is not open by default).
+        assert_eq!(ItemKey::Web.encode(), None);
         for k in [
-            ItemKey::Web,
             ItemKey::File("src/한글.ts".into()),
             ItemKey::Diff {
                 staged: true,
@@ -2639,6 +2645,7 @@ mod tests {
     fn restore_from_ui() {
         let ui = DetailUi {
             open: vec![
+                "web".into(),
                 "file:src/main.ts".into(),
                 "diff:w:README.md".into(),
                 "bogus".into(),
@@ -2648,7 +2655,8 @@ mod tests {
             side: "changes".into(),
         };
         let d = Detail::new(Some(&ui), Some("0123abcd"));
-        assert_eq!(d.items.len(), 3);
+        // A saved "web" (older versions) is not reopened: the page is not open by default.
+        assert_eq!(d.items.len(), 2);
         assert_eq!(d.side, SideTab::Changes);
         assert_eq!(
             d.active,
@@ -2661,14 +2669,13 @@ mod tests {
         assert_eq!(
             d.to_ui().open,
             vec![
-                "web",
                 "file:0123abcd:src/main.ts",
                 "diff:w:0123abcd:README.md"
             ]
         );
         assert_eq!(d.repo, "0123abcd");
         // Without a repo they cannot be opened.
-        assert_eq!(Detail::new(Some(&ui), None).items.len(), 1);
+        assert!(Detail::new(Some(&ui), None).items.is_empty());
     }
 
     #[test]

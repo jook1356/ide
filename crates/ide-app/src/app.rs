@@ -1495,6 +1495,33 @@ impl App {
         }
     }
 
+    /// Whether `owner`'s pane shows its web page: the page is open (an item that can be
+    /// closed, not open by default) and active, or the active item is another session's
+    /// terminal (the pane falls back to the page).
+    pub(crate) fn page_shown(&self, owner: &Live) -> bool {
+        let d = &owner.detail;
+        d.item(&ItemKey::Web).is_some()
+            && (d.active == ItemKey::Web || !self.item_shown(owner, &d.active))
+    }
+
+    /// Close `sid`'s web page item's view and forget its address (the item itself is removed
+    /// by the caller).
+    pub(crate) fn close_page(&mut self, sid: &str) {
+        let owner = self.workspace_owner(sid);
+        if let Some(l) = self.live_mut(&owner) {
+            if let Some(w) = l.web.take() {
+                w.close();
+            }
+            l.url_input.clear();
+            l.web_title.clear();
+            l.loading = false;
+            l.can_back = false;
+            l.can_forward = false;
+            l.error = None;
+        }
+        self.ui.web_urls.remove(&owner);
+    }
+
     /// Configuration whose sessions the sidebar shows.
     pub fn current_configuration(&self) -> String {
         self.ui
@@ -1869,9 +1896,7 @@ impl App {
             .filter(|id| {
                 // The page shows when it is active, or when the active item is another
                 // session's terminal (the pane falls back to the page).
-                self.live(id).is_some_and(|l| {
-                    l.detail.active == ItemKey::Web || !self.item_shown(l, &l.detail.active)
-                })
+                self.live(id).is_some_and(|l| self.page_shown(l))
             });
         if let Some(id) = &show {
             let runtime = self.runtime.clone();
@@ -4110,9 +4135,7 @@ impl App {
             .filter(|id| {
                 // The page shows when it is active, or when the active item is another
                 // session's terminal (the pane falls back to the page).
-                self.live(id).is_some_and(|l| {
-                    l.detail.active == ItemKey::Web || !self.item_shown(l, &l.detail.active)
-                })
+                self.live(id).is_some_and(|l| self.page_shown(l))
             });
         let Some(live) = self
             .sessions

@@ -213,7 +213,8 @@ Known gaps (phase 1):
   Browser / Changes / History / Explore with close buttons) and the collapse button. No tab
   strip. The side panel has the tabs Changes (count badge) / History (unpushed badge) / Explore
   (file and text search on top of the tree); see `docs/side-panel.md`.
-- **Per session** ([`Detail`] in `Live`): open items (`Web` is always there; files in
+- **Per session** ([`Detail`] in `Live`): open items (nothing is open by default; `Web`, the session's page, opens on demand
+  (e.g. a PR link from the footer), closes like any item and is not remembered; files in
   `CodeView`, diffs in `DiffView`, disk-vs-buffer comparisons), the tree, the changes list, the
   search. Open items, the shown item and the side tab are stored in `ui.json`
   (`detail.<session>`) and restored lazily (files are read when shown).

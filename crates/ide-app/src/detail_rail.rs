@@ -486,15 +486,11 @@ fn rail_row<'a>(
         ItemKey::Terminal(_) => tr::uterm_remove(),
         _ => tr::close(),
     };
-    let close: El<'a> = if *k == ItemKey::Web {
-        space().width(24).boxed()
-    } else {
-        icon_button(
-            I_CLOSE,
-            Some(Message::Detail(sid.to_owned(), DetailMsg::Close(k.clone()))),
-            close_tip,
-        )
-    };
+    let close: El<'a> = icon_button(
+        I_CLOSE,
+        Some(Message::Detail(sid.to_owned(), DetailMsg::Close(k.clone()))),
+        close_tip,
+    );
     row![main, close]
         .spacing(2)
         .align_y(Alignment::Center)

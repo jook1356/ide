@@ -360,8 +360,8 @@ impl App {
                 items.push(entry(tr::item_open_vscode(), local.then(|| Message::ItemAct(ItemAct::OpenVsCode))));
             }
         }
-        let others = live.detail.items.iter().any(|(k, _)| *k != ItemKey::Web && *k != m.key);
-        let any = live.detail.items.iter().any(|(k, _)| *k != ItemKey::Web);
+        let others = live.detail.items.iter().any(|(k, _)| *k != m.key);
+        let any = !live.detail.items.is_empty();
         items.push(rule());
         if let ItemKey::Terminal(id) = &m.key {
             let running = live
@@ -371,7 +371,7 @@ impl App {
                 if running { tr::uterm_stop_remove() } else { tr::uterm_remove() },
                 Some(Message::UTerm(crate::uterm::UTermMsg::Remove(id.clone()))),
             ));
-        } else if m.key != ItemKey::Web {
+        } else {
             items.push(entry(
                 tr::close(),
                 Some(Message::Detail(sid.to_owned(), DetailMsg::Close(m.key.clone()))),
