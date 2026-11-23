@@ -321,12 +321,17 @@ impl App {
                 }
             }
         }
-        container(r.padding([0, 8]))
+        // A top border separates the bar from the rail / session list (same ground).
+        let bar = container(r.padding([0, 8]))
             .height(FOOTER_H)
             .width(Fill)
             .align_y(Alignment::Center)
-            .style(style::bg(style::SIDEBAR))
-            .boxed()
+            .style(style::bg(style::SIDEBAR));
+        column![
+            container(space().height(1).width(Fill)).style(style::bg(style::BORDER)),
+            bar,
+        ]
+        .boxed()
     }
 
     pub(crate) fn update_card(&self) -> El<'_> {
