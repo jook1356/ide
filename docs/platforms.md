@@ -48,6 +48,10 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
   ignore it). Check: unfocus the app, let an agent finish, and see whether the taskbar entry is
   marked.
 
+- [ ] **Restart an incompatible server.** `old_server::kill_tree` ends the daemon's process
+  group with `kill -TERM -<pid>` (assumes `spawn_daemon` made it a group leader). Check: run an
+  old daemon, start a newer-protocol app, press 서버 재시작 in the connection status.
+
 ## macOS: to do
 
 The maintainer has no Mac, so nothing here has been built or run. This list is the hand-off for
@@ -176,6 +180,7 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: `old_server.rs` ends an incompatible daemon by pid; `kill -TERM -<pid>` off Windows (unbuilt).
 - 2026-11-23: widgets: CEF custom scheme `ide-widget://` (`scheme.rs`), registered in every
   process; checked on Windows only.
 - 2026-11-23: notification centre flashes the taskbar / Dock while unfocused

@@ -357,9 +357,17 @@ impl App {
             Conn::Reconnecting => Notice::warning(Text::tr(tr::conn_reconnecting)).toast(),
             Conn::Disconnected(d) => {
                 let d = d.clone();
-                Notice::error(Text::tr(move || tr::conn_disconnected(&d)))
-                    .action(Text::tr(tr::conn_retry), Message::Retry, ActionStyle::Primary)
-                    .toast()
+                let n = Notice::error(Text::tr(move || tr::conn_disconnected(&d)));
+                if self.server_outdated {
+                    n.action(
+                        Text::tr(tr::old_server_confirm),
+                        Message::OldServer(crate::old_server::OldServerMsg::Ask),
+                        ActionStyle::Primary,
+                    )
+                } else {
+                    n.action(Text::tr(tr::conn_retry), Message::Retry, ActionStyle::Primary)
+                }
+                .toast()
             }
             Conn::Connecting => return,
         };

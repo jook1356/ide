@@ -526,6 +526,8 @@ pub enum Modal {
     NewSession(NewForm),
     Delete(DeleteForm),
     StopServer(StopServerForm),
+    /// End an incompatible local server and start this app's (`old_server.rs`).
+    RestartOldServer(StopServerForm),
     /// Confirm switching to another server.
     SwitchServer(ServerPref),
     Close(CloseForm),
@@ -943,6 +945,8 @@ pub enum Message {
     Family(crate::family_ui::FamilyMsg),
     /// The session list's edit mode (`session_edit.rs`).
     SessionEdit(crate::session_edit::EditMsg),
+    /// An incompatible local server (`old_server.rs`).
+    OldServer(crate::old_server::OldServerMsg),
     /// Self-update from the footer (`self_update.rs`).
     Update(crate::self_update::UpdateMsg),
     /// Close the session menu, then handle the message (세션 설정, 삭제).
@@ -1140,6 +1144,8 @@ pub struct App {
     /// Self-update (`self_update.rs`): possible here, the last run's status, the run this app
     /// started or applied (it quits when that run swaps), a start error.
     pub update_available: bool,
+    /// The local server speaks another protocol (`old_server.rs`).
+    pub server_outdated: bool,
     pub update_status: Option<crate::self_update::Status>,
     pub update_run: Option<String>,
     pub update_error: Option<String>,
@@ -1303,6 +1309,7 @@ impl App {
             session_hover: None,
             new_answers: Default::default(),
             update_available: false,
+            server_outdated: false,
             update_status: None,
             update_run: None,
             update_error: None,
@@ -1816,6 +1823,7 @@ impl App {
     fn on_client(&mut self, ev: ClientEvent) -> Task<Message> {
         match ev {
             ClientEvent::Connected(w) => {
+                self.server_outdated = false;
                 crate::script::log(&format!(
                     "connected: server {} (instance {}, resumed {})",
                     w.server_version, w.server_instance, w.resumed
@@ -1857,6 +1865,8 @@ impl App {
             }
             ClientEvent::Disconnected { error } => {
                 crate::script::log(&format!("disconnected: {error:?}"));
+                self.server_outdated = self.target.local
+                    && error.as_ref().is_some_and(|e| e.id == "proto-version");
                 self.conn = match error {
                     None => Conn::Reconnecting,
                     Some(e) => Conn::Disconnected(i18n::proto_error(&e)),
@@ -3755,6 +3765,7 @@ impl App {
             Message::Family(m) => self.on_family(m),
             Message::SessionEdit(m) => self.on_session_edit(m),
             Message::Update(m) => self.on_update(m),
+            Message::OldServer(m) => self.on_old_server(m),
             Message::Notice(m) => self.on_notice(m),
             Message::SessionMenuThen(m) => {
                 self.session_menu = None;

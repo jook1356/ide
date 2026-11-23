@@ -801,7 +801,8 @@ impl App {
         ]
         .spacing(6)
         .align_y(Alignment::Center);
-        if retry && self.target.transport.is_ok() {
+        // An incompatible server: the row below offers 서버 재시작 instead.
+        if retry && !self.server_outdated && self.target.transport.is_ok() {
             r = r.push(
                 button(text(tr::conn_retry()).size(12))
                     .padding([4, 10])
@@ -2014,7 +2015,19 @@ impl App {
         if let Some(e) = &f.server_error {
             c = c.push(error_box(e));
         }
-        c = c.push(
+        // An incompatible server cannot be asked to stop: the row offers 서버 재시작.
+        let stop_row = if self.server_outdated {
+            row![
+                text(tr::old_server_note())
+                    .size(12)
+                    .color(style::RED)
+                    .width(Fill),
+                button(text(tr::old_server_confirm()).size(13))
+                    .padding([5, 12])
+                    .style(style::danger)
+                    .on_press(Message::OldServer(crate::old_server::OldServerMsg::Ask)),
+            ]
+        } else {
             row![
                 text(tr::server_note())
                     .size(12)
@@ -2025,10 +2038,8 @@ impl App {
                     .style(style::danger)
                     .on_press_maybe(online.then_some(Message::AskStopServer)),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .boxed(),
-        );
+        };
+        c = c.push(stop_row.spacing(8).align_y(Alignment::Center).boxed());
         c.boxed()
     }
 
@@ -2950,6 +2961,7 @@ impl App {
             Modal::NewChild(f) => self.child_card(f),
             Modal::BulkDelete(f) => self.bulk_delete_card(f),
             Modal::SelfUpdate => self.update_card(),
+            Modal::RestartOldServer(f) => self.old_server_card(f),
             Modal::WidgetGrant(f) => self.widget_grant_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
