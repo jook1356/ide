@@ -32,6 +32,8 @@ use crate::{def, fsops, git, scripts, search};
 /// migration to the repository registry (folders that are git repos get registered).
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
+mod widgets;
+
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Env var naming the `gh` program ([`ServerConfig::gh`]).
 pub const GH_ENV: &str = "IDE_GH";
@@ -587,6 +589,15 @@ impl UserCtx {
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
     /// asks the connected apps).
     pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        if tool == crate::bridge::TOOL_WIDGET {
+            return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
+                Ok(v) => self.widget_tool(session, &v).await,
+                Err(e) => ide_proto::AgentToolResult {
+                    text: format!("invalid arguments: {e}"),
+                    is_error: true,
+                },
+            };
+        }
         if crate::bridge::is_family_tool(tool) {
             let parsed: serde_json::Value = match serde_json::from_str(if args.trim().is_empty() { "{}" } else { args }) {
                 Ok(v) => v,
@@ -1863,6 +1874,10 @@ impl UserCtx {
                 Ok(Response::Merges(self.merge_child(&id, squash)?))
             }
             Request::SessionSyncParent { id } => Ok(Response::Merges(self.sync_parent(&id)?)),
+            Request::WidgetList { session } => Ok(Response::Widgets(self.widget_list(&session)?)),
+            Request::WidgetFile { session, widget, path } => self.widget_file(&session, &widget, &path),
+            Request::WidgetGrant { session, widget, tools } => self.widget_grant(&session, &widget, &tools),
+            Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
             Request::ScriptsList { session, repo } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 Ok(Response::Scripts(scripts::discover(j.root())))
