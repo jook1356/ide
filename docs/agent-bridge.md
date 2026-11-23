@@ -3,7 +3,7 @@
 Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
 tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
 hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
-workspace's write lease, task queue, terminals, browser, previews, mods) come next.
+workspace's write lease, task queue, terminals, browser, previews) come next; widgets (Desk's mods) are in `docs/widgets.md`.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why
@@ -172,6 +172,7 @@ start go to stderr.
 | `ide_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
 | `ide_show_message` | app | `{message}`: a toast in the session's detail panel |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon | session families: `docs/session-family.md` |
+| `ide_widget` | daemon (`guide`, `list`), app (`open`, `close`) | widgets: `docs/widgets.md` |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.
@@ -192,4 +193,4 @@ Plan for the features on top of the bridge: `docs/agent-features-roadmap.md`.
 1. Codex hooks (see Hooks); the write lease of shared workspaces on `agent.hook`.
 2. Pushing to the agent: queued prompts / steering through the PTY (`session.send_prompt`).
 3. Feature tools on this transport: related sessions (create child, send, read), run_task,
-   terminals, browser (CEF), previews, mods.
+   terminals, browser (CEF), previews (widgets: done, `docs/widgets.md`).
