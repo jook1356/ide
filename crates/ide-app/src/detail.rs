@@ -794,14 +794,17 @@ pub(crate) fn msg(sid: &str, m: DetailMsg) -> Message {
 // ---------------------------------------------------------------------------------- logic
 
 impl App {
+    /// The detail area of `sid`'s folder (shared by the sessions of one folder).
     pub fn detail(&self, sid: &str) -> Option<&Detail> {
-        self.live(sid).map(|l| &l.detail)
+        let owner = self.workspace_owner(sid);
+        self.live(&owner).map(|l| &l.detail)
     }
 
     pub fn detail_mut(&mut self, sid: &str) -> Option<&mut Detail> {
+        let owner = self.workspace_owner(sid);
         self.sessions
             .iter_mut()
-            .find(|l| l.info.id == sid)
+            .find(|l| l.info.id == owner)
             .map(|l| &mut l.detail)
     }
 
@@ -810,10 +813,14 @@ impl App {
         (!self.ui.detail_collapsed)
             .then(|| self.selected.clone())
             .flatten()
+            .map(|id| self.workspace_owner(&id))
     }
 
     /// Remember the session's open items in `ui.json`.
     pub fn persist_detail(&mut self, sid: &str) {
+        // Kept under the folder owner: the sessions of one folder share it.
+        let owner = self.workspace_owner(sid);
+        let sid = owner.as_str();
         let Some(d) = self.detail(sid) else { return };
         let ui = d.to_ui();
         if self.ui.detail.get(sid) != Some(&ui) {
@@ -1437,8 +1444,12 @@ impl App {
         match m {
             DetailMsg::Activate(k) => {
                 self.open_items = false;
-                // An item of another session (a 공통 tab): that session is shown first.
-                if self.selected.as_deref() != Some(sid) {
+                // An item of another folder (a 공통 tab): that session is shown first.
+                if self
+                    .selected
+                    .as_deref()
+                    .is_none_or(|s| self.workspace_owner(s) != self.workspace_owner(sid))
+                {
                     self.selected = Some(sid.to_owned());
                     self.save_ui();
                     let shown = self.activate(sid, k);

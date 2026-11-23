@@ -85,9 +85,14 @@ impl Live {
 }
 
 impl App {
-    /// A terminal of `live`'s session or a 공용 one.
+    /// A terminal by id: `live`'s, the session its id names (`<session>:t<n>`, the detail
+    /// area of a folder shows its sessions' terminals) or a 공용 one.
     pub fn find_uterm<'a>(&'a self, live: &'a Live, id: &str) -> Option<&'a UTermView> {
         live.uterm(id)
+            .or_else(|| {
+                let (sid, _) = id.rsplit_once(":t")?;
+                self.live(sid)?.uterm(id)
+            })
             .or_else(|| self.global_uterms.iter().find(|t| t.info.id == id))
     }
 
@@ -209,6 +214,8 @@ impl App {
                 Task::none()
             }
             UTermMsg::Open(sid, shell) => {
+                // The detail area is the folder's; the terminal is the shown session's.
+                let sid = if sid.is_empty() { sid } else { self.term_session(&sid) };
                 self.new_menu = false;
                 self.rail_open = false;
                 let Some(c) = self.online() else {

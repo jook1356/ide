@@ -63,6 +63,15 @@ provider's prompt input), never through tests (no prompts to real CLIs).
   count), as Desk's tree.
 - Row menu: 하위 세션 만들기 (title, 분리 / 공유, the parent's repos for 분리).
 - Errors above appear as the usual banner.
+- **The detail area is per folder**: the sessions of one folder (a parent and its shared
+  children) share one detail area — open items (files, diffs, commits), browser tabs, the web
+  page and the side panel (tab, repo, filters, scripts). The app keeps it in the folder owner's
+  state (`App::workspace_owner`: up the parents while `shared`; `detail()` / `detail_mut()` /
+  `persist_detail` / the views use it). Terminals stay each session's: the terminal lists show
+  the selected session's (`App::term_live`), another session's terminal that is the folder's
+  active item is not shown (the page instead), terminal ids name their session
+  (`<session>:t<n>`) for lookups. Separate children have their own folder, so their own detail
+  area. 공통 tabs stay global.
 
 ## Protocol (14)
 

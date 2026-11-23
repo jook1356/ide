@@ -194,7 +194,7 @@ impl App {
             return space().width(0).boxed();
         }
         let portion = 1000u16.saturating_sub((self.ui.split_ratio * 1000.0).round() as u16);
-        let body: El<'_> = match self.selected_live() {
+        let body: El<'_> = match self.shown_live() {
             Some(live) => self.pane(live, false),
             None => column![
                 container(
@@ -221,7 +221,7 @@ impl App {
 
     /// The side panel right of the detail pane (fixed width, outside the split).
     pub fn side_area(&self) -> El<'_> {
-        match self.selected_live() {
+        match self.shown_live() {
             Some(live) if !self.ui.detail_collapsed => {
                 row![self.side_handle(), self.side_panel(live)].boxed()
             }
@@ -260,7 +260,13 @@ impl App {
     pub(crate) fn pane<'a>(&'a self, live: &'a Live, in_window: bool) -> El<'a> {
         let d = &live.detail;
         let sid = live.info.id.clone();
-        let identity: El<'a> = match &d.active {
+        // Another session's terminal is the folder's active item: show the page instead.
+        let active = if self.item_shown(live, &d.active) {
+            d.active.clone()
+        } else {
+            ItemKey::Web
+        };
+        let identity: El<'a> = match &active {
             ItemKey::Terminal(id) => self.uterm_identity(live, id),
             ItemKey::Browser(id) => self.browser_identity(live, *id),
             ItemKey::Web => row![
@@ -352,12 +358,14 @@ impl App {
         .width(Fill)
         .style(style::bg(style::HEADER));
 
-        let body: El<'a> = if let ItemKey::Browser(id) = &d.active {
+        let body: El<'a> = if let ItemKey::Browser(id) = &active {
             self.browser_body(live, *id)
-        } else if let ItemKey::Terminal(id) = &d.active {
+        } else if let ItemKey::Terminal(id) = &active {
             self.uterm_body(live, id)
         } else {
-            match d.active_item() {
+            // `None` (the fallback above) shows the page.
+            let item = if active == d.active { d.active_item() } else { None };
+            match item {
             Some(Item::Web) | None => match &live.web {
                 // Under a modal the page stays visible as a frozen, dimmed snapshot of its
                 // last frame (no input reaches it, CEF stops rendering); the backdrop and the
@@ -570,11 +578,12 @@ impl App {
                     ));
                 }
             }
-            // The session's terminals (`uterm.rs`).
-            let shown_terms: Vec<&crate::uterm::UTermView> = live
+            // The shown session's terminals (`uterm.rs`; the folder's other sessions keep theirs).
+            let term_live = self.term_live(live);
+            let shown_terms: Vec<&crate::uterm::UTermView> = term_live
                 .uterms
                 .iter()
-                .filter(|t| !self.is_common(&live.info.id, &ItemKey::Terminal(t.info.id.clone())))
+                .filter(|t| !self.is_common(term_live.id(), &ItemKey::Terminal(t.info.id.clone())))
                 .collect();
             if !shown_terms.is_empty() {
                 list = list.push(

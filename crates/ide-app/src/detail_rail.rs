@@ -266,12 +266,13 @@ impl App {
             }
             list = list.push(space().height(4).boxed());
         }
-        // The session's terminals (`uterm.rs`), then Desk's "+ 새로 열기" row.
-        let terms: Vec<ItemKey> = live
+        // The shown session's terminals (`uterm.rs`), then Desk's "+ 새로 열기" row.
+        let term_live = self.term_live(live);
+        let terms: Vec<ItemKey> = term_live
             .uterms
             .iter()
             .map(|t| ItemKey::Terminal(t.info.id.clone()))
-            .filter(|k| !self.is_common(sid, k))
+            .filter(|k| !self.is_common(term_live.id(), k))
             .collect();
         if !terms.is_empty() {
             list = list.push(group_heading(

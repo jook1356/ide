@@ -967,7 +967,7 @@ impl App {
     /// The open Changes-row or commit menu, drawn at the pointer over the app window
     /// (`space()` when none is open).
     pub fn side_menu_layer(&self) -> El<'_> {
-        let Some(live) = self.selected_live() else {
+        let Some(live) = self.shown_live() else {
             return space().boxed();
         };
         let a = &live.detail.acts;

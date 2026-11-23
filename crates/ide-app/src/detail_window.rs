@@ -306,7 +306,7 @@ impl App {
         ]
         .spacing(4)
         .align_y(Alignment::Center);
-        let body: El<'_> = match self.selected_live() {
+        let body: El<'_> = match self.shown_live() {
             Some(live) => self.pane(live, true),
             None => container(text(tr::no_session()).size(13).color(style::DIM))
                 .center(Fill)

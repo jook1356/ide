@@ -1425,6 +1425,58 @@ impl App {
         self.selected.as_deref().and_then(|id| self.live(id))
     }
 
+    /// The session whose folder `sid` works in: a shared child's owner (up its parents),
+    /// else `sid` itself. Sessions of one folder share one detail area (open items, browser
+    /// tabs, web page, side panel); terminals stay each session's (`docs/session-family.md`).
+    pub fn workspace_owner(&self, sid: &str) -> String {
+        let mut cur = sid.to_owned();
+        for _ in 0..=crate::family_ui::MAX_DEPTH {
+            match self.live(&cur) {
+                Some(l) if l.info.shared => match &l.info.parent {
+                    Some(p) if self.live(p).is_some() => cur = p.clone(),
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// The session whose detail area is shown: the selected session's folder owner.
+    pub fn shown_live(&self) -> Option<&Live> {
+        let id = self.workspace_owner(self.selected.as_deref()?);
+        self.live(&id)
+    }
+
+    /// Whose terminals a detail area of `owner` shows: the selected session when it works in
+    /// that folder, else the owner.
+    pub(crate) fn term_live<'a>(&'a self, owner: &'a Live) -> &'a Live {
+        match self.selected_live() {
+            Some(s) if self.workspace_owner(s.id()) == owner.id() => s,
+            _ => owner,
+        }
+    }
+
+    /// The session a terminal opened from `sid`'s detail area belongs to: the selected
+    /// session when it works in that folder (terminals are each session's), else `sid`.
+    pub(crate) fn term_session(&self, sid: &str) -> String {
+        match self.selected.as_deref() {
+            Some(s) if self.workspace_owner(s) == self.workspace_owner(sid) => s.to_owned(),
+            _ => sid.to_owned(),
+        }
+    }
+
+    /// Is this item shown in the detail area now? Terminals: only the shown session's (and
+    /// the 공용 ones).
+    pub(crate) fn item_shown(&self, owner: &Live, k: &ItemKey) -> bool {
+        match k {
+            ItemKey::Terminal(id) => {
+                id.starts_with("g:") || id.starts_with(&format!("{}:", self.term_live(owner).id()))
+            }
+            _ => true,
+        }
+    }
+
     /// Configuration whose sessions the sidebar shows.
     pub fn current_configuration(&self) -> String {
         self.ui
@@ -1795,9 +1847,13 @@ impl App {
             .detail_visible()
             .then(|| self.selected.clone())
             .flatten()
+            .map(|id| self.workspace_owner(&id))
             .filter(|id| {
-                self.live(id)
-                    .is_some_and(|l| l.detail.active == ItemKey::Web)
+                // The page shows when it is active, or when the active item is another
+                // session's terminal (the pane falls back to the page).
+                self.live(id).is_some_and(|l| {
+                    l.detail.active == ItemKey::Web || !self.item_shown(l, &l.detail.active)
+                })
             });
         if let Some(id) = &show {
             let runtime = self.runtime.clone();
@@ -3236,7 +3292,7 @@ impl App {
                     if let Some(b) = self.browser_mut(b) {
                         b.url_input = v;
                     }
-                } else if let Some(id) = self.selected.clone()
+                } else if let Some(id) = self.selected.clone().map(|i| self.workspace_owner(&i))
                     && let Some(live) = self.live_mut(&id)
                 {
                     live.url_input = v;
@@ -3252,7 +3308,7 @@ impl App {
                     {
                         v.navigate(&url);
                     }
-                } else if let Some(live) = self.selected_live() {
+                } else if let Some(live) = self.shown_live() {
                     let url = crate::browser::address_to_url(&live.url_input)
                         .unwrap_or_else(|| normalize_url(""));
                     if let Some(w) = &live.web {
@@ -3877,7 +3933,7 @@ impl App {
 
     /// Run `f` on the page shown in the selected session's pane (a browser tab or its web page).
     fn with_web(&mut self, f: impl FnOnce(&WebView)) -> Task<Message> {
-        let view = match (self.shown_browser(), self.selected_live()) {
+        let view = match (self.shown_browser(), self.shown_live()) {
             (Some(id), Some(l)) => self.browser(l, id).and_then(|b| b.view.as_ref()),
             (None, Some(l)) => l.web.as_ref(),
             _ => None,
@@ -4031,9 +4087,13 @@ impl App {
             .detail_visible()
             .then(|| self.selected.clone())
             .flatten()
+            .map(|id| self.workspace_owner(&id))
             .filter(|id| {
-                self.live(id)
-                    .is_some_and(|l| l.detail.active == ItemKey::Web)
+                // The page shows when it is active, or when the active item is another
+                // session's terminal (the pane falls back to the page).
+                self.live(id).is_some_and(|l| {
+                    l.detail.active == ItemKey::Web || !self.item_shown(l, &l.detail.active)
+                })
             });
         let Some(live) = self
             .sessions

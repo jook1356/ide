@@ -156,7 +156,7 @@ impl App {
 
     /// The browser tab shown in the selected session's pane, if one is.
     pub(crate) fn shown_browser(&self) -> Option<u32> {
-        let live = self.selected_live()?;
+        let live = self.shown_live()?;
         match &live.detail.active {
             ItemKey::Browser(id) if self.browser(live, *id).is_some() => Some(*id),
             _ => None,
@@ -196,6 +196,8 @@ impl App {
         let Some(sid) = sid.or_else(|| self.selected.clone()) else {
             return Task::none();
         };
+        // Browser tabs belong to the folder's detail area.
+        let sid = self.workspace_owner(&sid);
         if global {
             self.global_browsers.push(b);
         } else if let Some(l) = self.live_mut(&sid) {

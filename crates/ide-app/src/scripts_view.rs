@@ -255,7 +255,10 @@ impl App {
                 name,
                 command,
             } => {
-                let live = self.live(sid);
+                // Scripts run in a terminal of the shown session (the folder's other sessions
+                // keep theirs).
+                let tsid = self.term_session(sid);
+                let live = self.live(&tsid);
                 if let Some(id) = live.and_then(|l| running(l, &repo, &folder, &command)) {
                     return self.on_detail(sid.to_owned(), DetailMsg::Activate(ItemKey::Terminal(id)));
                 }
@@ -267,7 +270,7 @@ impl App {
                     Some(f) if !f.is_empty() => format!("{f} · {name}"),
                     _ => name,
                 };
-                let sid = sid.to_owned();
+                let sid = tsid;
                 Task::perform(
                     {
                         let sid = sid.clone();
@@ -478,7 +481,7 @@ impl App {
                     } else {
                         format!("{}/{}", repo_path.trim_end_matches(['/', '\\']), g.folder)
                     };
-                    let term = running_at(live, &cwd, &x.run);
+                    let term = running_at(self.term_live(live), &cwd, &x.run);
                     list = list.push(script_row(sid, g, x, term, level));
                 }
             }
