@@ -49,6 +49,9 @@ const PAD_Y: f32 = 12.5;
 /// Height the text grows to before it scrolls (about 10 lines).
 const MAX_H: f32 = 10.0 * LINE_H + 2.0 * PAD_Y;
 const RADIUS: f32 = 14.0;
+/// Widest the box gets (as in Hermes Desk's chat input); wider panes keep side margins so
+/// lines stay readable.
+const MAX_W: f32 = 820.0;
 /// Sent prompts remembered per session.
 const HISTORY: usize = 100;
 /// Between the paste and its Enter: long enough for the program to finish the paste.
@@ -836,7 +839,7 @@ impl App {
             ]
             .align_y(Alignment::End),
         )
-        .width(Fill)
+        .width(iced::Length::Fill.max(MAX_W))
         .style(move |_| container::Style {
             background: Some(style::INPUT.into()),
             border: iced::Border {
@@ -856,7 +859,7 @@ impl App {
             .on_exit(Message::DropHover(Dest::Composer, false));
         container(boxed)
             .padding([8, 10])
-            .width(Fill)
+            .center_x(Fill)
             .style(style::bg(style::HEADER))
             .boxed()
     }
