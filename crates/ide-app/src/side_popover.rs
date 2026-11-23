@@ -2,8 +2,9 @@
 //! iced's `popover::Position::Right` centres the popup vertically on the button; this wraps
 //! such a popover and moves its overlay so the popup's top is level with the button's (the
 //! popup is laid out by the popover in a first pass, see `overlay`). The popover's own snapping
-//! is off: it snaps into the clip of the enclosing scrollable (the rail list), which pushed
-//! the popup back over the button; this one keeps the popup inside the window vertically.
+//! is off and its clip is the window: both are the enclosing scrollable's (the rail list)
+//! otherwise, which pushes the popup back over the button or hides it outside the rail. This
+//! one keeps the popup inside the window vertically.
 
 use iced::advanced::Widget;
 use iced::advanced::layout::{self, Layout};
@@ -131,7 +132,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for TopAligned<'_, Me
         let centred = base.y + (base.height - popup_h) / 2.0;
         let top = base.y.min(window.height - popup_h).max(0.0);
         let shifted = Vector::new(translation.x, translation.y + top - centred);
+        // The popover draws its popup clipped to `viewport + translation`: make that the whole
+        // window, not the enclosing scrollable's clip (which hid the popup outside the rail).
+        let whole = Rectangle {
+            x: -shifted.x,
+            y: -shifted.y,
+            width: window.width,
+            height: window.height,
+        };
         self.inner
-            .overlay(tree, layout, renderer, viewport, shifted, window)
+            .overlay(tree, layout, renderer, &whole, shifted, window)
     }
 }
