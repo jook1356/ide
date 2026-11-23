@@ -17,7 +17,8 @@ pub mod rpc;
 pub mod term;
 
 pub use agents::{
-    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
+    AccountInfo, AccountState, ConfigurationInfo, IntegrationAction, IntegrationInfo, IntegrationState,
+    McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
     ProviderDetection, ProviderInfo, RepoInfo, BaseRuleInfo, BaseRulePreview, SessionKind, SessionMode, SessionRepo, Support,
 };
 pub use error::ProtoError;

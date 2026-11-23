@@ -884,12 +884,87 @@ fn claude_hooks() {
     assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "P writes here");
     // A deny only means something for PreToolUse.
     assert_eq!(Claude.hook_reply("Stop", &HookDecision::Deny { reason: "x".into() }), HookReply::default());
-    // Codex: no hooks yet (registration unverified), so nothing is registered.
-    assert_eq!(Codex.hook_caps(), HookCaps::NONE);
+    // Codex: hooks come from the account integration, never per session.
+    assert_eq!(Codex.hook_caps().guard_edits, Support::Native);
     let out = assemble(&Codex, &inp, &f.env).unwrap();
     assert!(
         !out.spec.args.iter().any(|a| a.starts_with("hooks") || a == "--settings"),
         "{:?}",
         out.spec.args
     );
+}
+
+/// Codex's account integration: ide's entries in `CODEX_HOME/hooks.json` next to the user's
+/// own hooks (kept), status (missing / installed / outdated), uninstall; Codex hook input.
+#[test]
+fn codex_integration() {
+    let f = fixture("agents-codex-integration");
+    let acct = account(&f, "codex");
+    std::fs::create_dir_all(&acct.dir).unwrap();
+    let program = f.bin.join(exe("ide-server"));
+    let targets = HookTargets {
+        program: Some(program.clone()),
+    };
+    assert!(Codex.capabilities().integration && !Claude.capabilities().integration);
+    assert_eq!(Claude.integration_status(&acct, &targets), IntegrationStatus::NotNeeded);
+    assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Missing);
+    // The user's own hook stays.
+    let own = serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify-me"}]}]}, "description": "mine"});
+    std::fs::write(acct.dir.join("hooks.json"), own.to_string()).unwrap();
+    let r = Codex.integration_install(&acct, &targets).unwrap();
+    assert_eq!(r.approve_with.as_deref(), Some("/hooks"));
+    assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Installed);
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(acct.dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(v["description"], "mine");
+    let stop = v["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2, "{v}");
+    assert_eq!(stop[0]["hooks"][0]["command"], "notify-me");
+    let pre = &v["hooks"]["PreToolUse"][0];
+    assert_eq!(pre["matcher"], "apply_patch|Edit|Write");
+    let cmd = pre["hooks"][0]["command"].as_str().unwrap();
+    assert!(cmd.ends_with(" hook --provider codex PreToolUse"), "{cmd}");
+    assert!(cmd.starts_with('"'), "a path with blanks is quoted: {cmd}");
+    // Installing again replaces ide's entries instead of adding more.
+    Codex.integration_install(&acct, &targets).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(acct.dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
+    // Another program (the IDE moved): outdated.
+    let moved = HookTargets {
+        program: Some(f.t.0.join("elsewhere").join(exe("ide-server"))),
+    };
+    assert_eq!(Codex.integration_status(&acct, &moved), IntegrationStatus::Outdated);
+    Codex.integration_uninstall(&acct).unwrap();
+    assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Missing);
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(acct.dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(v, own, "only the user's hooks are left");
+
+    // Hook input.
+    let patch = serde_json::json!({
+        "cwd": f.cwd.display().to_string(),
+        "tool_name": "apply_patch",
+        "tool_input": {"command": ["apply_patch", "*** Begin Patch
+*** Update File: src/a.rs
+@@
+-x
++y
+*** Add File: b.rs
++z
+*** End Patch
+"]},
+    });
+    assert_eq!(
+        Codex.parse_hook("PreToolUse", patch.to_string().as_bytes()),
+        Some(HookEvent::PreTool(ToolUse::Edit {
+            tool: "apply_patch".into(),
+            paths: vec![
+                f.cwd.join("src/a.rs").display().to_string(),
+                f.cwd.join("b.rs").display().to_string(),
+            ],
+        }))
+    );
+    assert_eq!(Codex.parse_hook("PermissionRequest", b"{}"), Some(HookEvent::NeedsInput { permission: true }));
+    assert_eq!(Codex.parse_hook("Stop", b"{}"), Some(HookEvent::Stopped));
+    let deny = Codex.hook_reply("PreToolUse", &HookDecision::Deny { reason: "r".into() });
+    let v: serde_json::Value = serde_json::from_str(&deny.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
 }

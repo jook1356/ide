@@ -1455,6 +1455,7 @@ impl UserCtx {
                         hooks: support(c.hooks),
                         resume: c.resume,
                         session_name: c.session_name,
+                        integration: c.integration,
                         original_repo: ModeCaps {
                             skills: support(c.original_repo.skills),
                             mcp: support(c.original_repo.mcp),
@@ -1553,6 +1554,46 @@ impl UserCtx {
                 );
                 self.notify(Notify::AccountsChanged);
                 Ok(Response::Unit)
+            }
+            Request::AccountIntegration {
+                provider,
+                slug,
+                action,
+            } => {
+                use ide_agents::IntegrationStatus as S;
+                use ide_proto::{IntegrationAction as A, IntegrationInfo, IntegrationState as I};
+                let p = self.provider(&provider)?;
+                let acct = self
+                    .accounts
+                    .lock()
+                    .unwrap()
+                    .require(&provider, &slug)
+                    .map_err(core)?
+                    .clone();
+                let targets = self.bridge.hook_targets();
+                if action != A::Status && targets.program.is_none() {
+                    return Err(ProtoError::new("bad-request")
+                        .arg("detail", "the integration needs the ide daemon"));
+                }
+                let mut approve_with = None;
+                match action {
+                    A::Status => {}
+                    A::Install => {
+                        approve_with = p.integration_install(&acct, &targets).map_err(core)?.approve_with;
+                        self.audit("account.integration_install", &format!("{provider}/{slug}"));
+                    }
+                    A::Uninstall => {
+                        p.integration_uninstall(&acct).map_err(core)?;
+                        self.audit("account.integration_uninstall", &format!("{provider}/{slug}"));
+                    }
+                }
+                let state = match p.integration_status(&acct, &targets) {
+                    S::NotNeeded => I::NotNeeded,
+                    S::Missing => I::Missing,
+                    S::Installed => I::Installed,
+                    S::Outdated => I::Outdated,
+                };
+                Ok(Response::Integration(IntegrationInfo { state, approve_with }))
             }
             Request::AccountStatus { provider, slug } => {
                 let p = self.provider(&provider)?;

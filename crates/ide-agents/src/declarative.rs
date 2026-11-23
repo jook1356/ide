@@ -252,6 +252,7 @@ impl AgentProvider for DeclarativeProvider {
             hooks: Support::Unsupported,
             resume: false,
             session_name: false,
+            integration: false,
             original_repo: crate::ModeSupport {
                 skills,
                 mcp: Support::Unsupported,

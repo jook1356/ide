@@ -584,3 +584,42 @@ async fn hooks_drive_the_activity() {
     app.delete_session(&s.id, true).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `account.integration`: a Codex account gets ide's hooks in its `hooks.json` (install /
+/// status / uninstall); Claude needs none; without a daemon (no hook program) nothing is
+/// installed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_integration() {
+    use ide_client::{IntegrationAction as A, IntegrationState as S};
+    let dir = tmp_dir("bridge-integration");
+    let data = dir.join("data");
+    let server = bridged_server(&data, &dir.join("bin"));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let providers = c.providers(false).await.unwrap();
+    let caps = |id: &str| providers.iter().find(|p| p.id == id).unwrap().caps.integration;
+    assert!(caps("codex") && !caps("claude"));
+    let codex = c.create_account("codex", "Work").await.unwrap();
+    let claude = c.create_account("claude", "Work").await.unwrap();
+    assert_eq!(c.account_integration("claude", &claude.slug, A::Status).await.unwrap().state, S::NotNeeded);
+    assert_eq!(c.account_integration("codex", &codex.slug, A::Status).await.unwrap().state, S::Missing);
+    let i = c.account_integration("codex", &codex.slug, A::Install).await.unwrap();
+    assert_eq!((i.state, i.approve_with.as_deref()), (S::Installed, Some("/hooks")));
+    let hooks = data.join("accounts").join("codex").join(&codex.slug).join("hooks.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert!(cmd.contains("ide-server-fake hook --provider codex Stop"), "{cmd}");
+    let i = c.account_integration("codex", &codex.slug, A::Uninstall).await.unwrap();
+    assert_eq!(i.state, S::Missing);
+    drop(c);
+
+    // No daemon: nothing to point the hooks at.
+    let plain = Server::new(ServerConfig::for_paths(Paths::new(dir.join("data2"))));
+    let c = Client::connect(memory(&plain), opts()).await.unwrap();
+    let a = c.create_account("codex", "Work").await.unwrap();
+    assert_eq!(
+        c.account_integration("codex", &a.slug, A::Install).await.unwrap_err().id,
+        "bad-request"
+    );
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}

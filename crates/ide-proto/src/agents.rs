@@ -33,8 +33,37 @@ pub struct ProviderCaps {
     pub resume: bool,
     /// The session title is passed as the CLI's session name.
     pub session_name: bool,
+    /// Accounts can get a one-time integration (`account.integration`).
+    #[serde(default)]
+    pub integration: bool,
     /// Support in original-repo sessions (the fields above: workspace sessions).
     pub original_repo: ModeCaps,
+}
+
+/// An account's integration (`docs/agent-bridge.md`, "Account integration").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntegrationState {
+    NotNeeded,
+    Missing,
+    Installed,
+    /// Installed for another hook program: install again.
+    Outdated,
+}
+
+/// What `account.integration` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntegrationAction {
+    Status,
+    Install,
+    Uninstall,
+}
+
+/// `account.integration`'s answer: the state, and after an install the command that approves
+/// the hooks in the CLI (shown as is).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationInfo {
+    pub state: IntegrationState,
+    pub approve_with: Option<String>,
 }
 
 /// Support of the configuration parts in one session mode.

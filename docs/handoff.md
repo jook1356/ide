@@ -7,7 +7,7 @@
 
 - `ide` = Hermes Desk(Electron+React)를 **Rust + iced(master) + CEF(OSR)** 로 옮기는 앱.
   클라이언트(`ide-app`, iced 창)와 사용자별 데몬 서버(`ide-server`)로 나뉘고, 둘은 `ide-proto`
-  프레임 프로토콜(현재 **PROTO_VERSION 14**)로 통신해요.
+  프레임 프로토콜(현재 **PROTO_VERSION 15**)로 통신해요.
 - **원칙: Hermes Desk가 명세예요.** 구조·흐름·문구·아이콘을 Desk(`powered_ide`)에서 읽고 그대로
   옮겨요. 임의로 "개선"한 대안을 제안하지 말고, 피할 수 없는 차이는 각 `docs/*.md`의
   "Deviations" 절에 이유와 함께 적어요. 예외: 사용자가 Desk보다 나아가자고 정한 것(세션 가족,
@@ -58,6 +58,8 @@
 - 세션 가족: 분리/공유 하위 세션(최대 2단계), 머지·따라잡기, 가족 도구 5개, 트리 UI(프로토콜 14) —
   `ba21292`
 - 공유 폴더 쓰기 권한(훅으로 편집 거부, `ide_request_write_access` / `ide_release_write_access`)
+- Codex 계정 통합 설치(계정 화면 설치/갱신/제거, `CODEX_HOME/hooks.json`에 ide 항목만, Codex에서
+  `/hooks`로 한 번 승인, 프로토콜 15)
 
 ## 5. 남은 일 / 확인 필요
 
@@ -66,9 +68,8 @@
     중"), 편집 거부 메시지가 Claude에 어떻게 보이는지
   - 화면 판독 규칙(`crates/ide-agents/screens/*.toml`)이 실제 Claude/Codex 화면과 맞는지
   - `ide` MCP 도구(가족 도구 포함)를 에이전트가 실제로 쓰는지
-- **결정 대기: Codex 통합 설치** — Codex 훅은 계정 폴더(`CODEX_HOME/hooks.json`)에만 넣을 수 있어서
-  "계정 폴더에 쓰지 않는다" 규칙에 예외가 필요해요(사용자가 계정 화면에서 직접 설치할 때만). 그전까지
-  Codex는 상태는 화면 판독으로 보이지만 공유 폴더 편집 거부는 안 돼요(지침만).
+- **Codex 통합 설치 실제 확인**: 설치 후 Codex `/hooks` 승인 화면, 훅이 실제로 불리는지(Windows에서
+  어떤 셸로 실행되는지 포함), 편집 거부가 동작하는지.
 - **사용자 수동 확인 대기**: 분리된 상세 창의 한글 IME 입력, 상세 창 고정 상태에서 최소화/복원, 다른
   DPI 모니터 간 이동과 저장 위치.
 - **저장소 설정**: GitHub 기본 브랜치가 아직 `hermes/20261120-0935-a3f0`일 수 있어요. 이 PC의 `gh`는

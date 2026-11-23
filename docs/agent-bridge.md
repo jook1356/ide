@@ -76,13 +76,36 @@ provider's file:
   shown (cleared when selected).
 - Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call: the shared folder's write
   lease (`docs/session-family.md`) refuses edits of members that do not hold it.
-- Codex: not registered. Its docs (developers.openai.com/codex/hooks) give hooks only in
-  `hooks.json` / `config.toml` files (system, `$CODEX_HOME`, project), not as a command-line
-  override, and every non-managed hook needs trust review (`/hooks`, hash-based);
-  `--dangerously-bypass-hook-trust` would also run the user's own untrusted hooks. Writing the
-  account home is not allowed. To do: verify whether `-c hooks...` works and how trust applies
-  to it, then implement `apply_hooks` / `parse_hook` (`apply_patch` is the edit tool) /
-  `hook_reply` in `codex.rs`.
+- Codex: through the account integration (below). Its docs (developers.openai.com/codex/hooks)
+  give hooks only in `hooks.json` / `config.toml` files (system, `$CODEX_HOME`, project), not
+  as a command-line override, and every non-managed hook needs trust review (`/hooks`,
+  hash-based); `--dangerously-bypass-hook-trust` would also run the user's own untrusted hooks.
+  `codex.rs` parses `SessionStart`, `UserPromptSubmit`, `Stop`, `PermissionRequest` and
+  `PreToolUse` (`apply_patch` / `Edit` / `Write` -> edits, paths from the patch's `*** Add /
+  Update / Delete File:` / `*** Move to:` lines, relative to the hook input's `cwd`) and answers
+  a deny like Claude Code (`hookSpecificOutput.permissionDecision`) (d).
+
+## Account integration (protocol 15)
+
+For CLIs whose hooks can only live in their config home (Codex). Only on the user's request
+(accounts page: 설치 / 갱신 / 제거), the one exception to "accounts are never written":
+
+- `AgentProvider::integration_status / integration_install / integration_uninstall`
+  (`ide-agents/src/integration.rs`); `Caps.integration` says a provider has one. Codex writes
+  ide's entries into `CODEX_HOME/hooks.json` (the account dir): one group per event, command
+  `<ide-server> hook --provider codex <event>` (path quoted only when it has blanks: the command
+  runs through a shell (a)), `timeout` 10; `PreToolUse` matcher `apply_patch|Edit|Write`. ide's
+  entries are found by their command (` hook --provider codex `); the user's own hooks and the
+  file's other keys are kept; installing again replaces ide's entries; uninstall removes only
+  them. Status: missing / installed / outdated (installed for another program path).
+- After an install Codex must trust the new hooks once: `approve_with = "/hooks"`, shown on
+  the accounts page ("Approve ide's hooks once in the Codex CLI with /hooks").
+- `account.integration {provider, slug, action: Status | Install | Uninstall}` ->
+  `Integration {state, approve_with}`; install / uninstall need the daemon (the hook program)
+  and are audited. The hooks run for every Codex start with that account, also outside ide:
+  without an ide session's env the hook program exits at once with no opinion.
+- (a) Not checked against the real Codex: that it reads the entries, the trust prompt, the
+  shell used on Windows, the hook input fields.
 - (a) Not yet checked against the real Claude Code: that `--settings` hooks load next to the
   user's settings, that the exec form (`args`) runs on the supported versions, and that the
   events fire as documented. Opening a session in the app shows it (SessionStart -> the row's

@@ -9,7 +9,8 @@
 //!   `sessions/<id>/agent/` ([`LaunchPlan::scratch`]) and, for workspace sessions only, files in
 //!   the session folder ([`AgentProvider::prepare_root`]; the folder is the agent's cwd and lies
 //!   outside every repository).
-//! - Accounts are never written (only by the CLI's own login flow).
+//! - Accounts are never written (only by the CLI's own login flow), except ide's own hook
+//!   entries when the user installs an account integration ([`integration`]).
 //! - Unsupported capability -> documented fallback (skills become instructions) or a note in
 //!   [`Assembled::notes`]; never silently dropped.
 //! - Provider-specific code stays in this crate: callers go through [`Providers`] and the trait.
@@ -37,6 +38,7 @@ pub mod declarative;
 mod detect;
 pub mod fallback;
 pub mod hooks;
+pub mod integration;
 pub mod screen;
 mod plan;
 mod prompt;
@@ -55,6 +57,7 @@ pub use codex::Codex;
 pub use declarative::{DeclarativeProvider, DeclarativeSpec};
 pub use detect::{Detection, parse_version, version_at_least};
 pub use hooks::{HookCaps, HookDecision, HookEvent, HookReply, HookTargets, ToolUse};
+pub use integration::{IntegrationReport, IntegrationStatus};
 pub use plan::LaunchPlan;
 pub use prompt::{
     PASTE_SUBMIT_DELAY_MS, PromptInput, PromptRefusal, PromptWrite, clean_prompt, prompt_writes,
@@ -112,6 +115,8 @@ pub struct Caps {
     pub resume: bool,
     /// The session title is passed as the CLI's session name.
     pub session_name: bool,
+    /// Accounts can get a one-time integration ([`integration`]).
+    pub integration: bool,
     /// Support in original-repo sessions.
     pub original_repo: ModeSupport,
 }
@@ -139,6 +144,7 @@ impl Caps {
         hooks: Support::Unsupported,
         resume: false,
         session_name: false,
+        integration: false,
         original_repo: ModeSupport {
             skills: Support::Unsupported,
             mcp: Support::Unsupported,
@@ -287,6 +293,22 @@ pub trait AgentProvider: Send + Sync {
     /// ([`screen`]). Default: none.
     fn screen_manifest(&self) -> Option<&'static screen::ScreenManifest> {
         None
+    }
+    /// The account's integration with `hooks.program` ([`integration`]). Default: not needed.
+    fn integration_status(&self, _acct: &AccountDir, _hooks: &HookTargets) -> IntegrationStatus {
+        IntegrationStatus::NotNeeded
+    }
+    /// Install (or update) the account's integration: only ide's entries are written.
+    fn integration_install(
+        &self,
+        _acct: &AccountDir,
+        _hooks: &HookTargets,
+    ) -> Result<IntegrationReport> {
+        Ok(IntegrationReport::default())
+    }
+    /// Remove ide's entries from the account.
+    fn integration_uninstall(&self, _acct: &AccountDir) -> Result<()> {
+        Ok(())
     }
     /// The CLI's hook output for a decision. Default: print nothing, exit 0 (no opinion).
     fn hook_reply(&self, _event: &str, _decision: &HookDecision) -> HookReply {

@@ -661,6 +661,15 @@ merge-conflicts = { $count ->
    *[other] { $name }: { $count } files in conflict; resolve them in Changes and commit
 }
 merge-failed = { $name }: failed, nothing changed ({ $error })
+integration-checking = Checking the ide integration…
+integration-missing = ide integration: not installed
+integration-installed = ide integration: installed
+integration-outdated = ide integration: outdated
+integration-install = Install
+integration-update = Update
+integration-uninstall = Remove
+integration-tooltip = Adds ide’s hooks to this account’s CLI settings (only ide’s entries; your own hooks stay), so ide sees what the agent does and can refuse edits in shared folders.
+integration-approve = Approve ide’s hooks once in the { $provider } CLI with { $command }.
 session-pin = Pin
 session-unpin = Unpin
 session-archive = Move to archive

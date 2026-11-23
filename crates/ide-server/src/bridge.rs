@@ -111,6 +111,13 @@ impl BridgeState {
         }
     }
 
+    /// Where hooks report to: the daemon's `ide-server` (none without a daemon).
+    pub fn hook_targets(&self) -> HookTargets {
+        HookTargets {
+            program: self.config.as_ref().map(|c| c.exe.clone()),
+        }
+    }
+
     /// The bridge of a session (creates its token on first use), `None` without a daemon.
     pub fn for_session(&self, session: &str) -> Option<Bridge> {
         let c = self.config.as_ref()?;

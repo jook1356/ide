@@ -388,6 +388,9 @@ pub struct SettingsForm {
     pub acct_renaming: Option<(String, String, String)>,
     /// Last status check per account (provider, slug).
     pub acct_status: Vec<((String, String), Option<AccountState>)>,
+    /// Account integrations (providers that have one), and after an install how to approve it
+    /// in the CLI (`None` while checking).
+    pub acct_integration: Vec<((String, String), Option<ide_client::IntegrationInfo>)>,
     pub cfg_name: String,
     /// Profiles page (Desk's agents page): the profile picked in the list beside the rail
     /// (`None` = the first) and the armed delete of the title row.
@@ -749,6 +752,9 @@ pub enum Message {
     AcctLogin(String, String),
     LoginOpened(Result<SessionInfo, ProtoError>),
     AcctStatus(String, String),
+    /// An account's integration: check, install or uninstall.
+    AcctIntegration(String, String, ide_client::IntegrationAction),
+    AcctIntegrationDone(String, String, Result<ide_client::IntegrationInfo, ProtoError>),
     AcctStatusDone(String, String, Result<AccountState, ProtoError>),
     AcctStartRename(String, String),
     AcctRenameInput(String),
@@ -1516,6 +1522,24 @@ impl App {
         )
     }
 
+    /// Check the integration of accounts whose provider has one and that are not known yet.
+    fn integration_checks(&mut self) -> Task<Message> {
+        let todo: Vec<(String, String)> = self
+            .accounts
+            .iter()
+            .filter(|a| {
+                self.providers
+                    .iter()
+                    .any(|p| p.id == a.provider && p.caps.integration)
+            })
+            .map(|a| (a.provider.clone(), a.slug.clone()))
+            .filter(|k| !self.settings.acct_integration.iter().any(|(x, _)| x == k))
+            .collect();
+        Task::batch(todo.into_iter().map(|(p, s)| {
+            self.update_inner(Message::AcctIntegration(p, s, ide_client::IntegrationAction::Status))
+        }))
+    }
+
     /// Merge the server's session list: keep terminal models and web views of known sessions.
     fn apply_lists(&mut self, lists: Lists) -> Task<Message> {
         let (providers, accounts, configs, list) = lists;
@@ -1845,7 +1869,10 @@ impl App {
                     return Task::none();
                 }
                 match r {
-                    Ok(lists) => self.apply_lists(lists),
+                    Ok(lists) => {
+                        let t = self.apply_lists(lists);
+                        Task::batch([t, self.integration_checks()])
+                    }
                     Err(e) => {
                         if e.id != "disconnected" {
                             self.banner = Some(i18n::proto_error(&e));
@@ -2914,6 +2941,34 @@ impl App {
                     },
                     move |r| Message::AcctStatusDone(provider.clone(), slug.clone(), r),
                 )
+            }
+            Message::AcctIntegration(provider, slug, action) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                let key = (provider.clone(), slug.clone());
+                let _ = self.with_settings(|f| {
+                    f.acct_integration.retain(|(k, _)| k != &key);
+                    f.acct_integration.push((key, None));
+                });
+                Task::perform(
+                    {
+                        let (p, s) = (provider.clone(), slug.clone());
+                        async move { c.account_integration(&p, &s, action).await }
+                    },
+                    move |r| Message::AcctIntegrationDone(provider.clone(), slug.clone(), r),
+                )
+            }
+            Message::AcctIntegrationDone(provider, slug, r) => {
+                crate::script::log(&format!("account integration {provider}/{slug}: {r:?}"));
+                self.with_settings(|f| {
+                    let key = (provider, slug);
+                    f.acct_integration.retain(|(k, _)| k != &key);
+                    match r {
+                        Ok(i) => f.acct_integration.push((key, Some(i))),
+                        Err(e) => f.error = Some(i18n::proto_error(&e)),
+                    }
+                })
             }
             Message::AcctStatusDone(provider, slug, r) => {
                 crate::script::log(&format!("account status {provider}/{slug}: {r:?}"));

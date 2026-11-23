@@ -86,6 +86,7 @@ impl AgentProvider for Claude {
             hooks: Support::Native,
             resume: false,
             session_name: true,
+            integration: false,
             original_repo: ModeSupport {
                 skills: Support::Native,
                 mcp: Support::Native,

@@ -2382,6 +2382,44 @@ impl App {
             .collect()
     }
 
+    /// An account's integration state and its button (providers that have one; `docs/agent-bridge.md`).
+    fn integration_controls<'a>(
+        &'a self,
+        f: &'a SettingsForm,
+        a: &'a ide_client::AccountInfo,
+        online: bool,
+    ) -> El<'a> {
+        use ide_client::{IntegrationAction as A, IntegrationState as S};
+        if !self.provider(&a.provider).is_some_and(|p| p.caps.integration) {
+            return space().width(0).boxed();
+        }
+        let key = (a.provider.clone(), a.slug.clone());
+        let state = f.acct_integration.iter().find(|(k, _)| *k == key).map(|(_, i)| i.as_ref().map(|i| i.state));
+        let (label, action, button_label) = match state {
+            None | Some(None) => (tr::integration_checking(), None, None),
+            Some(Some(S::NotNeeded)) => return space().width(0).boxed(),
+            Some(Some(S::Missing)) => (tr::integration_missing(), Some(A::Install), Some(tr::integration_install())),
+            Some(Some(S::Outdated)) => (tr::integration_outdated(), Some(A::Install), Some(tr::integration_update())),
+            Some(Some(S::Installed)) => (tr::integration_installed(), Some(A::Uninstall), Some(tr::integration_uninstall())),
+        };
+        let mut r = row![text(label).size(11).color(style::DIM)]
+            .spacing(6)
+            .align_y(Alignment::Center);
+        if let (Some(action), Some(bl)) = (action, button_label) {
+            r = r.push(tip(
+                button(text(bl).size(11))
+                    .padding([3, 8])
+                    .style(style::secondary)
+                    .on_press_maybe(online.then(|| {
+                        Message::AcctIntegration(a.provider.clone(), a.slug.clone(), action)
+                    }))
+                    .boxed(),
+                tr::integration_tooltip(),
+            ));
+        }
+        r.boxed()
+    }
+
     /// Accounts page: accounts per provider (add = create + open the login command).
     fn accounts_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
         let mut list: Column<El<'_>> = Column::new().spacing(4);
@@ -2416,7 +2454,9 @@ impl App {
                 ]
                 .spacing(6)
                 .boxed(),
-                _ => row![
+                _ => {
+                    let integration = self.integration_controls(f, a, online);
+                    row![
                     text(g).size(13).color(gc),
                     text(a.name.as_str()).size(13),
                     text(self.provider_name(&a.provider))
@@ -2424,6 +2464,7 @@ impl App {
                         .color(style::DIM),
                     space().width(Fill),
                     text(status).size(11).color(style::DIM),
+                    integration,
                     button(text(tr::account_check()).size(11))
                         .padding([3, 8])
                         .style(style::secondary)
@@ -2452,7 +2493,28 @@ impl App {
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center)
+                .boxed()
+                }
+            };
+            // After an install: how to approve the hooks in the CLI.
+            let key = (a.provider.clone(), a.slug.clone());
+            let approve = f
+                .acct_integration
+                .iter()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, i)| i.as_ref())
+                .filter(|i| i.state == ide_client::IntegrationState::Installed)
+                .and_then(|i| i.approve_with.clone());
+            let row_el: El<'_> = match approve {
+                Some(cmd) => column![
+                    row_el,
+                    text(tr::integration_approve(&self.provider_name(&a.provider), &cmd))
+                        .size(11)
+                        .color(style::AMBER),
+                ]
+                .spacing(4)
                 .boxed(),
+                None => row_el,
             };
             list = list.push(
                 container(row_el)

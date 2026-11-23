@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 14;
+pub const PROTO_VERSION: u32 = 15;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -557,6 +557,13 @@ pub enum Request {
     SessionSyncParent {
         id: String,
     },
+    /// An account's integration (`Integration`): its state, install or uninstall (only the
+    /// user asks for it: the accounts page).
+    AccountIntegration {
+        provider: String,
+        slug: String,
+        action: crate::IntegrationAction,
+    },
     /// Agent bridge connections only: the tools of the bridge (`AgentTools`).
     AgentTools,
     /// Agent bridge connections only: call a tool with JSON arguments (`AgentResult`).
@@ -1089,6 +1096,7 @@ impl Request {
             Request::SessionCreateChild { .. } => "session.create_child",
             Request::SessionMergeChild { .. } => "session.merge_child",
             Request::SessionSyncParent { .. } => "session.sync_parent",
+            Request::AccountIntegration { .. } => "account.integration",
             Request::AgentTools => "agent.tools",
             Request::AgentCall { .. } => "agent.call",
             Request::AgentReply { .. } => "agent.reply",
@@ -1291,6 +1299,7 @@ pub enum Response {
     /// `None`: no opinion; `Some(reason)`: refuse the tool call.
     AgentHookDecision(Option<String>),
     Merges(Vec<RepoMerge>),
+    Integration(crate::IntegrationInfo),
 }
 
 /// Server -> client event.
@@ -1474,6 +1483,7 @@ mod tests {
                         hooks: crate::Support::Unsupported,
                         resume: false,
                         session_name: true,
+                        integration: false,
                         original_repo: crate::ModeCaps {
                             skills: crate::Support::Native,
                             mcp: crate::Support::Native,

@@ -916,6 +916,26 @@ impl Client {
         expect_unit(self.call(Request::AgentReply { request, result }).await)
     }
 
+    /// `account.integration`: the account's integration state, install or uninstall.
+    pub async fn account_integration(
+        &self,
+        provider: &str,
+        slug: &str,
+        action: ide_proto::IntegrationAction,
+    ) -> Result<ide_proto::IntegrationInfo, ProtoError> {
+        match self
+            .call(Request::AccountIntegration {
+                provider: provider.into(),
+                slug: slug.into(),
+                action,
+            })
+            .await?
+        {
+            Response::Integration(i) => Ok(i),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected an integration")),
+        }
+    }
+
     /// `session.create_child`: a child of `parent` (shared folder, or own worktrees of `repos`
     /// branched from the parent's; empty = all of the parent's).
     #[allow(clippy::too_many_arguments)]
