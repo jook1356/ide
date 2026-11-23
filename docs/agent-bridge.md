@@ -62,7 +62,7 @@ provider's file:
 | Step | Trait method | Claude Code (`claude.rs`) |
 |---|---|---|
 | register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<ide-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
-| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (`Edit|Write|MultiEdit|NotebookEdit`) -> PreTool(Edit {paths}) |
+| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (every tool) -> PreTool (Edit {paths} for `Edit|Write|MultiEdit|NotebookEdit`), `SubagentStart` / `SubagentStop` (`agent_id`) -> BackgroundStarted / BackgroundEnded {id} |
 | answer | `hook_reply(event, decision) -> HookReply` | deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":...}}`, exit 0; no opinion: nothing, exit 0 (never "allow": that would skip Claude's permission prompts) (d) |
 | caps | `hook_caps()` | status, edit guard: native; shell guard: unsupported |
 
@@ -74,7 +74,15 @@ provider's file:
 - Activity (`SessionInfo.activity`, `Notify::Activity`; also set by screen detection): Unknown until the process reports
   (reset on every start, Unknown while not running); SessionStart / Stop -> Idle; prompt / tool
   use -> Working (Desk's 답변 중); permission prompt / question -> NeedsInput (Desk's 응답 필요);
-  the user typing in the terminal while NeedsInput -> Working (the answer). The app shows the
+  the user typing in the terminal while NeedsInput -> Working (the answer).
+- Background work (`HookEvent::BackgroundStarted / BackgroundEnded {id}`, provider-agnostic;
+  `BridgeState::hook_activity`): work that can outlive the turn (Claude Code: background
+  agents). A Stop while some id runs keeps Working; the last end after the Stop -> Idle; an
+  end inside a running turn (a foreground subagent) or of an unknown id changes nothing; tool
+  calls (also a background agent's) -> Working without reopening the turn (a CLI resuming on
+  its own with a result sends no prompt event); an idle screen while work runs is Working.
+  Contract: a provider that reports a start reports its end for the same id. SessionStart and
+  a new process forget running ids (a lost end cannot hold a session for good). The app shows the
   phase on the session row and Desk's 새 답변 for a turn that ended while another session was
   shown (cleared when selected).
 - Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call: the shared folder's write
@@ -112,7 +120,9 @@ For CLIs whose hooks can only live in their config home (Codex). Only on the use
 - (a) Not yet checked against the real Claude Code: that `--settings` hooks load next to the
   user's settings, that the exec form (`args`) runs on the supported versions, and that the
   events fire as documented. Opening a session in the app shows it (SessionStart -> the row's
-  activity; a prompt -> 답변 중).
+  activity; a prompt -> 답변 중). Also not checked: that `SubagentStart` / `SubagentStop` fire
+  for background agents with the same `agent_id` (a session that waits for one stays 답변 중
+  and turns idle when it ends).
 
 ## Screen detection
 

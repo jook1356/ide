@@ -27,7 +27,7 @@ use crate::detail::{Detail, DetailMsg, ItemKey};
 use crate::i18n::{self, tr};
 use crate::script::Script;
 use crate::session_sort::{SortCriterion, SortDir, SortKey};
-use crate::ui_state::{CloseAction, DetailUi, Page, SPLIT_RANGE, ServerPref, UiState};
+use crate::ui_state::{CloseAction, DetailUi, FontSlot, Page, SPLIT_RANGE, ServerPref, UiState};
 
 /// Width of the navigation rail in logical pixels, its right border included.
 pub const RAIL_W: f32 = 64.0;
@@ -799,6 +799,8 @@ pub enum Message {
     SettingsApplyServer,
     SwitchServerConfirm,
     SetOnClose(CloseAction),
+    /// Settings page: a font picked (blank = the default).
+    SetFont(FontSlot, String),
     CloseRemember(bool),
     /// Close dialog: exit, sessions keep running in the daemon.
     CloseKeep,
@@ -1123,6 +1125,10 @@ pub struct App {
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
     pub settings: SettingsForm,
+    /// Settings page: the font pickers (UI, code, terminal), listing the installed families.
+    pub font_pickers: [iced::widget::combo_box::State<String>; 3],
+    /// The UI font in effect (read at start; a change applies after a restart).
+    pub boot_ui_font: String,
     /// The pointer is over the rail's work button (shows the session-list toggle icon).
     pub rail_hover: bool,
     /// The session row under the pointer (shows its pin / delete buttons).
@@ -1231,6 +1237,14 @@ impl App {
     pub fn load(data_dir: PathBuf, runtime: WebRuntime, remote_override: Option<String>) -> Self {
         let ui = UiState::load(&data_dir);
         ide_i18n::apply(ui.language);
+        ide_views::theme::set_code_font(&ui.fonts.code);
+        let mut term_config = TermConfig::default();
+        if !ui.fonts.terminal.is_empty() {
+            term_config.font_family = ui.fonts.terminal.clone();
+        }
+        let fonts = installed_font_families();
+        let font_pickers = [(); 3].map(|_| iced::widget::combo_box::State::new(fonts.clone()));
+        let boot_ui_font = ui.fonts.ui.clone();
         let target = build_target(&ui.server, remote_override.as_deref());
         let settings = SettingsForm::new(&ui.server);
         let conn = match &target.transport {
@@ -1254,7 +1268,7 @@ impl App {
             sessions: Vec::new(),
             selected: None,
             ui,
-            term_config: TermConfig::default(),
+            term_config,
             window: None,
             window_size: Size::new(1400.0, 860.0),
             window_maximized: false,
@@ -1272,6 +1286,8 @@ impl App {
             scripts_drag: None,
             modal: None,
             settings,
+            font_pickers,
+            boot_ui_font,
             rail_hover: false,
             session_hover: None,
             new_answers: Default::default(),
@@ -3782,6 +3798,24 @@ impl App {
                 self.save_ui();
                 Task::none()
             }
+            Message::SetFont(slot, name) => {
+                self.ui.fonts.set(slot, &name);
+                let name = self.ui.fonts.get(slot).to_owned();
+                match slot {
+                    // iced's default font is fixed at start: applied by the next start.
+                    FontSlot::Ui => {}
+                    FontSlot::Code => ide_views::theme::set_code_font(&name),
+                    FontSlot::Terminal => {
+                        self.term_config.font_family = if name.is_empty() {
+                            TermConfig::default().font_family
+                        } else {
+                            name
+                        };
+                    }
+                }
+                self.save_ui();
+                Task::none()
+            }
             Message::SettingsServerSsh(v) => self.with_settings(|f| {
                 f.ssh = v;
                 f.server_error = None;
@@ -4421,6 +4455,24 @@ pub fn same_path(a: &str, b: &str) -> bool {
         }
     }
     norm(a) == norm(b)
+}
+
+/// Font families installed on this machine (first, usually English, name of each face),
+/// sorted and deduplicated: the Settings font pickers' choices.
+fn installed_font_families() -> Vec<String> {
+    let mut fs = iced::advanced::graphics::text::font_system()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut names: Vec<String> = fs
+        .raw()
+        .db()
+        .faces()
+        .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        .filter(|n| !n.is_empty() && !n.starts_with('.') && n != "Iced-Icons")
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
 }
 
 #[cfg(test)]

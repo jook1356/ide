@@ -326,7 +326,7 @@ impl App {
                 14.0,
                 style::DIM,
             ))
-            .push(text(tr::scripts_title()).size(11).font(style::BOLD).color(style::DIM).boxed())
+            .push(text(tr::scripts_title()).size(11).font(style::bold()).color(style::DIM).boxed())
         .spacing(6)
         .align_y(Alignment::Center);
         if total > 0 {
@@ -446,7 +446,7 @@ impl App {
                     style::DIM,
                 ))
                 .push(ide_views::icons::file_icon(&name))
-                .push(text(name).size(12).font(style::BOLD).wrapping(text::Wrapping::None).boxed())
+                .push(text(name).size(12).font(style::bold()).wrapping(text::Wrapping::None).boxed())
             .spacing(6)
             .align_y(Alignment::Center);
             if !g.folder.is_empty() {
@@ -510,7 +510,7 @@ impl App {
                         style::DIM,
                     ))
                     .push(ide_views::icons::file_icon(st.2))
-                    .push(text(st.1.to_owned()).size(12).font(style::BOLD).wrapping(text::Wrapping::None).boxed())
+                    .push(text(st.1.to_owned()).size(12).font(style::bold()).wrapping(text::Wrapping::None).boxed())
                 .spacing(6)
                 .align_y(Alignment::Center);
                 r = r.push(

@@ -183,7 +183,7 @@ fn load(text: &str) -> GEditor {
     let mut ed = GEditor::with_text("");
     ed.update(
         Size::new(1000.0, theme::CODE_LINE),
-        theme::MONO,
+        theme::mono(),
         Pixels(theme::CODE_SIZE),
         LineHeight::Absolute(Pixels(theme::CODE_LINE)),
         Wrapping::None,
@@ -394,7 +394,7 @@ impl<'a, M: Clone> CodeEditor<'a, M> {
             matches: &[],
             current_match: None,
             plain: false,
-            font: theme::MONO,
+            font: theme::mono(),
             padding: iced::Padding {
                 top: PAD_TOP,
                 left: PAD_LEFT,
@@ -971,7 +971,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for CodeEditor<'_, M> {
                                 bounds: Size::new(gutter_w, h),
                                 size: Pixels(self.size),
                                 line_height: LineHeight::Absolute(Pixels(self.line_height)),
-                                font: theme::MONO,
+                                font: theme::mono(),
                                 align_x: text::Alignment::Right,
                                 align_y: alignment::Vertical::Top,
                                 shaping: text::Shaping::Basic,

@@ -451,7 +451,7 @@ impl App {
             .push(
                 text(tr::session_edit_delete_title(f.ids.len() as i64))
                     .size(18)
-                    .font(style::BOLD)
+                    .font(style::bold())
                     .boxed(),
             )
             .push(text(tr::session_edit_delete_body()).size(13).color(style::DIM).boxed())

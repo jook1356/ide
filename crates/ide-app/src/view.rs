@@ -3,13 +3,14 @@
 //! which stays in the widget tree. Modal dialogs on top.
 
 use iced::widget::{
-    Column, Row, button, center, checkbox, column, container, mouse_area, opaque, pick_list, popover,
+    Column, Row, button, center, checkbox, column, combo_box, container, mouse_area, opaque, pick_list,
+    popover,
     row, scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
 use ide_client::{AccountState, BrowseEntry};
 use ide_i18n::LanguagePref;
-use ide_term::TerminalView;
+use ide_term::{TermConfig, TerminalView};
 
 use crate::app::{
     ALL_CONFIGURATIONS, App, Choice, Conn, DIVIDER_W, Live, Message,
@@ -21,7 +22,7 @@ use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
 use crate::session_sort::{SortDir, SortItem, SortKey};
 use crate::style;
-use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
+use crate::ui_state::{CloseAction, FontSlot, LOGIN_GROUP, Page, ServerPref};
 
 type El<'a> = Element<'a, Message>;
 
@@ -45,6 +46,13 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
         ),
         None => ("●".into(), style::DIM),
     }
+}
+
+/// As wide as the content, but never more than the room a row leaves after its fixed-size
+/// siblings (iced's `Length::Fluid(Constraint::Max)`; `iced::length` is not re-exported, and
+/// stacking `Fit` onto a max-bounded `Fill` yields exactly that length).
+fn fit_up_to_room() -> Length {
+    Length::Fit.stack(Length::Fill.max(f32::INFINITY))
 }
 
 pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
@@ -73,6 +81,16 @@ pub(crate) fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: Strin
 
 fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
+}
+
+/// Name shown for the default UI font (iced's sans-serif family on each platform).
+fn default_ui_font_name() -> String {
+    if cfg!(windows) { "Segoe UI".into() } else { tr::font_system() }
+}
+
+/// Name shown for the default code font (`ide_views::theme`).
+fn default_code_font_name() -> String {
+    if cfg!(windows) { "Consolas".into() } else { tr::font_system() }
 }
 
 /// A section of a page in a bordered card (Hermes Desk's `Paper withBorder p="md"`).
@@ -124,7 +142,7 @@ fn folder_entry_row(e: &BrowseEntry, tag: Option<String>) -> El<'_> {
     }
     if e.is_git_repo {
         r = r.push(tip(
-            container(text("git").size(10).font(style::BOLD).color(style::GREEN))
+            container(text("git").size(10).font(style::bold()).color(style::GREEN))
                 .padding([0, 5])
                 .style(|_| container::Style {
                     border: iced::Border {
@@ -220,7 +238,7 @@ fn group_divider<'a>(
             .width(10),
         text(name)
             .size(11)
-            .font(style::BOLD)
+            .font(style::bold())
             .color(style::DIM)
             .wrapping(text::Wrapping::None)
             .ellipsis(text::Ellipsis::End),
@@ -660,7 +678,7 @@ impl App {
             let mut col: Column<El<'_>> = Column::new().spacing(8);
             col = col.push(
                 row![
-                    text(tr::session_sort()).size(13).font(style::BOLD),
+                    text(tr::session_sort()).size(13).font(style::bold()),
                     space().width(Fill),
                     button(text(tr::session_sort_reset()).size(11))
                         .padding([2, 8])
@@ -777,7 +795,7 @@ impl App {
             column![
                 text(tr::conn_target(&self.server_label()))
                     .size(11)
-                    .font(style::BOLD)
+                    .font(style::bold())
                     .color(style::DIM)
                     .wrapping(text::Wrapping::WordOrGlyph),
                 text(msg)
@@ -845,8 +863,10 @@ impl App {
         let own_worktrees =
             s.mode == ide_client::SessionMode::Workspace && !s.shared && !s.repos.is_empty();
         let title: El<'a> = if own_worktrees {
+            // The title only as wide as its text (cut with … when the row is too narrow), so
+            // the mark sits right after it.
             row![
-                title,
+                title.width(fit_up_to_room()),
                 tip(
                     icons::icon(Icon::GitBranch, 11.0, style::DIM),
                     tr::session_own_worktrees()
@@ -1061,7 +1081,7 @@ impl App {
         let header = container(
             row![
                 text(glyph).size(13).color(gcolor),
-                text(s.title.as_str()).size(13).font(style::BOLD),
+                text(s.title.as_str()).size(13).font(style::bold()),
                 text(
                     s.repos
                         .first()
@@ -1070,7 +1090,7 @@ impl App {
                 )
                 .size(12)
                 .color(style::DIM)
-                .font(style::MONO),
+                .font(style::mono()),
                 text(s.root.as_str())
                     .size(11)
                     .color(style::FAINT)
@@ -1224,7 +1244,7 @@ impl App {
             .align_y(Alignment::Center);
         if count > 0 {
             content = content.push(
-                container(text(count.min(99).to_string()).size(10).font(style::BOLD))
+                container(text(count.min(99).to_string()).size(10).font(style::bold()))
                     .padding([0, 5])
                     .style(|_| container::Style {
                         background: Some(style::BORDER.into()),
@@ -1285,7 +1305,7 @@ impl App {
         ]
         .spacing(6);
         if f.use_worktrees {
-            c = c.push(text(tr::worktree_repos_label()).size(12).font(style::BOLD).boxed());
+            c = c.push(text(tr::worktree_repos_label()).size(12).font(style::bold()).boxed());
             let mut list: Column<El<'_>> = Column::new().spacing(3);
             for r in &self.repos {
                 let id = r.id.clone();
@@ -1346,7 +1366,7 @@ impl App {
                     .style(style::warn_box)
                     .boxed(),
             );
-            c = c.push(text(tr::original_repo_label()).size(12).font(style::BOLD).boxed());
+            c = c.push(text(tr::original_repo_label()).size(12).font(style::bold()).boxed());
             let choices: Vec<Choice> = self
                 .repos
                 .iter()
@@ -1392,9 +1412,9 @@ impl App {
         };
         let s = &live.info;
         let mut c = column![
-            text(tr::session_settings()).size(18).font(style::BOLD),
+            text(tr::session_settings()).size(18).font(style::bold()),
             column![
-                text(tr::session_name_label()).size(12).font(style::BOLD),
+                text(tr::session_name_label()).size(12).font(style::bold()),
                 text_input(tr::session_title_placeholder(), &f.title)
                     .on_input(Message::SessionReposTitle)
                     .on_submit_maybe((!f.busy && self.connected()).then_some(Message::SessionReposSave))
@@ -1404,11 +1424,11 @@ impl App {
             ]
             .spacing(4),
             row![
-                text(tr::session_repos_label()).size(12).font(style::BOLD),
+                text(tr::session_repos_label()).size(12).font(style::bold()),
                 space().width(Fill),
                 text(s.root.as_str())
                     .size(11)
-                    .font(style::MONO)
+                    .font(style::mono())
                     .color(style::FAINT)
                     .wrapping(text::Wrapping::None)
                     .ellipsis(text::Ellipsis::Start),
@@ -1432,7 +1452,7 @@ impl App {
                 row_el = row_el.push(
                     text(format!("{} ←", r.branch))
                         .size(11)
-                        .font(style::MONO)
+                        .font(style::mono())
                         .color(style::DIM).boxed(),
                 );
                 row_el = row_el.push(self.base_picker(
@@ -1445,7 +1465,7 @@ impl App {
                 row_el = row_el.push(
                     text(format!("{} ← {}", r.branch, r.base))
                         .size(11)
-                        .font(style::MONO)
+                        .font(style::mono())
                         .color(style::DIM).boxed(),
                 );
             }
@@ -1478,7 +1498,7 @@ impl App {
                 c = c.push(
                     text(tr::session_repos_add_label())
                         .size(12)
-                        .font(style::BOLD)
+                        .font(style::bold())
                         .boxed(),
                 );
                 for r in addable {
@@ -1680,14 +1700,14 @@ impl App {
                 tr::pick_root_title()
             })
             .size(18)
-            .font(style::BOLD),
+            .font(style::bold()),
             text(tr::pick_root_note()).size(12).color(style::DIM),
             text_input(tr::pick_path_placeholder(), &f.path)
                 .id(PICK_PATH_ID)
                 .on_input(Message::PickPath)
                 .on_submit(Message::PickPathGo)
                 .size(12)
-                .font(style::MONO)
+                .font(style::mono())
                 .padding([5, 8])
                 .style(style::input)
                 .width(Fill),
@@ -1701,7 +1721,7 @@ impl App {
             row![
                 text(target.unwrap_or_default())
                     .size(11)
-                    .font(style::MONO)
+                    .font(style::mono())
                     .color(style::DIM)
                     .width(Fill)
                     .wrapping(text::Wrapping::None)
@@ -1835,13 +1855,14 @@ impl App {
                 tr::settings(),
                 vec![
                     card(self.language_section()),
+                    card(self.font_section()),
                     card(self.server_section(f, online)),
                     card(self.on_close_section()),
                 ],
             ),
         };
         let mut c = column![
-            container(text(title).size(22).font(style::BOLD))
+            container(text(title).size(22).font(style::bold()))
                 .height(40)
                 .align_y(Alignment::Center),
         ]
@@ -1887,6 +1908,63 @@ impl App {
         column![label(tr::language_label()), languages]
             .spacing(10)
             .boxed()
+    }
+
+    /// Settings page: UI / code / terminal font. Each picker lists the installed families
+    /// (type to filter); 기본값 clears the choice.
+    fn font_section(&self) -> El<'_> {
+        let rows = [
+            (FontSlot::Ui, tr::font_ui(), default_ui_font_name()),
+            (FontSlot::Code, tr::font_code(), default_code_font_name()),
+            (FontSlot::Terminal, tr::font_terminal(), TermConfig::default().font_family),
+        ];
+        let mut c = column![label(tr::font_label())].spacing(10);
+        for (i, (slot, name, default)) in rows.into_iter().enumerate() {
+            let current = match slot {
+                FontSlot::Ui => &self.ui.fonts.ui,
+                FontSlot::Code => &self.ui.fonts.code,
+                FontSlot::Terminal => &self.ui.fonts.terminal,
+            };
+            let placeholder = if current.is_empty() {
+                tr::font_default(&default)
+            } else {
+                tr::font_placeholder()
+            };
+            let picker = combo_box(
+                &self.font_pickers[i],
+                placeholder,
+                (!current.is_empty()).then_some(current),
+                move |f: String| Message::SetFont(slot, f),
+            )
+            .size(13.0)
+            .padding([5, 8])
+            .input_style(style::input)
+            .width(Fill);
+            c = c.push(
+                row![
+                    text(name).size(13).width(80),
+                    picker,
+                    button(text(tr::font_reset()).size(13))
+                        .padding([5, 12])
+                        .style(style::secondary)
+                        .on_press_maybe(
+                            (!current.is_empty()).then(|| Message::SetFont(slot, String::new())),
+                        ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .boxed(),
+            );
+        }
+        if self.ui.fonts.ui != self.boot_ui_font {
+            c = c.push(
+                text(tr::font_restart_note())
+                    .size(12)
+                    .color(style::AMBER)
+                    .boxed(),
+            );
+        }
+        c.boxed()
     }
 
     /// Settings page: connection status, local / SSH server, stop server.
@@ -2001,7 +2079,7 @@ impl App {
         let f = &self.settings;
         let online = self.connected();
         let head = row![
-            text(tr::nav_repos()).size(13).font(style::BOLD),
+            text(tr::nav_repos()).size(13).font(style::bold()),
             space().width(Fill),
             tip(
                 button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
@@ -2088,7 +2166,7 @@ impl App {
         match selected {
             None => {
                 c = c.push(
-                    container(text(tr::repos_title()).size(22).font(style::BOLD))
+                    container(text(tr::repos_title()).size(22).font(style::bold()))
                         .height(40)
                         .align_y(Alignment::Center)
                         .boxed(),
@@ -2117,7 +2195,7 @@ impl App {
                     sessions = sessions.push(
                         row![
                             text(l.info.title.as_str()).size(12).width(Fill),
-                            text(branch).size(11).font(style::MONO).color(style::DIM),
+                            text(branch).size(11).font(style::mono()).color(style::DIM),
                         ]
                         .spacing(8)
                         .boxed(),
@@ -2155,12 +2233,12 @@ impl App {
                         column![
                             text(r.name.as_str())
                                 .size(22)
-                                .font(style::BOLD)
+                                .font(style::bold())
                                 .wrapping(text::Wrapping::None)
                                 .ellipsis(text::Ellipsis::End),
                             text(r.path.as_str())
                                 .size(12)
-                                .font(style::MONO)
+                                .font(style::mono())
                                 .color(style::DIM),
                         ]
                         .spacing(2)
@@ -2205,7 +2283,7 @@ impl App {
                 label(tr::repo_base_label()),
                 text(if r.base.is_empty() { tr::repo_base_unknown() } else { r.base.clone() })
                     .size(13)
-                    .font(style::MONO),
+                    .font(style::mono()),
             ]
             .spacing(6)
             .boxed();
@@ -2337,7 +2415,7 @@ impl App {
                     .on_input(Message::BaseRuleMatch)
                     .size(12)
                     .padding([5, 8])
-                    .font(style::MONO)
+                    .font(style::mono())
                     .style(style::input).boxed(),
             );
             c = c.push(small(tr::base_rule_version_note()).boxed());
@@ -2350,7 +2428,7 @@ impl App {
                 col = col.push(
                     text(p.pick.clone().unwrap_or_else(tr::base_rule_no_pick))
                         .size(13)
-                        .font(style::MONO)
+                        .font(style::mono())
                         .color(if p.pick.is_some() { style::TEXT } else { style::RED })
                         .boxed(),
                 );
@@ -2363,13 +2441,13 @@ impl App {
                     col = col.push(small(tr::base_rule_last_pick(last, pick)).boxed());
                 }
                 for m in p.matched.iter().take(8) {
-                    col = col.push(text(format!("✓ {m}")).size(11).font(style::MONO).color(style::DIM).boxed());
+                    col = col.push(text(format!("✓ {m}")).size(11).font(style::mono()).color(style::DIM).boxed());
                 }
                 for x in p.excluded.iter().take(8) {
                     col = col.push(
                         text(format!("✕ {x} — {}", tr::base_rule_excluded()))
                             .size(11)
-                            .font(style::MONO)
+                            .font(style::mono())
                             .color(style::FAINT)
                             .boxed(),
                     );
@@ -2662,7 +2740,7 @@ impl App {
                     space().height(0).boxed()
                 };
                 let mut c = column![
-                    text(tr::new_session()).size(18).font(style::BOLD),
+                    text(tr::new_session()).size(18).font(style::bold()),
                     label(tr::agent_label()),
                     providers,
                     account_row,
@@ -2713,7 +2791,7 @@ impl App {
                 let mut c = column![
                     text(tr::delete_session_title(title))
                         .size(18)
-                        .font(style::BOLD),
+                        .font(style::bold()),
                     text(tr::delete_session_body()).size(13).color(style::DIM),
                     checkbox(f.remove_worktree)
                         .label(tr::delete_remove_worktree())
@@ -2732,7 +2810,7 @@ impl App {
                     c = c.push(
                         text(lines.join("\n"))
                             .size(11)
-                            .font(style::MONO)
+                            .font(style::mono())
                             .color(style::FAINT)
                             .boxed(),
                     );
@@ -2763,7 +2841,7 @@ impl App {
             }
             Modal::StopServer(f) => {
                 let mut c = column![
-                    text(tr::stop_server_title()).size(18).font(style::BOLD),
+                    text(tr::stop_server_title()).size(18).font(style::bold()),
                     text(tr::stop_server_body()).size(13).color(style::DIM),
                 ]
                 .spacing(10);
@@ -2804,7 +2882,7 @@ impl App {
                     ServerPref::Ssh { host, .. } => format!("ssh {host}"),
                 };
                 column![
-                    text(tr::switch_server_title()).size(18).font(style::BOLD),
+                    text(tr::switch_server_title()).size(18).font(style::bold()),
                     text(tr::switch_server_body(&target))
                         .size(13)
                         .color(style::DIM),
@@ -2828,7 +2906,7 @@ impl App {
             Modal::Close(f) => {
                 let running = self.sessions.iter().filter(|l| l.state.is_alive()).count();
                 let mut c = column![
-                    text(tr::close_title()).size(18).font(style::BOLD),
+                    text(tr::close_title()).size(18).font(style::bold()),
                     text(tr::close_body(i18n::count(running)))
                         .size(13)
                         .color(style::DIM),
@@ -2884,8 +2962,8 @@ impl App {
             Modal::InitRepo(f) => {
                 // Desk's `ws:pickRepo` question for a plain folder.
                 let mut c = column![
-                    text(tr::init_repo_title()).size(18).font(style::BOLD),
-                    text(f.path.as_str()).size(12).font(style::MONO).color(style::DIM),
+                    text(tr::init_repo_title()).size(18).font(style::bold()),
+                    text(f.path.as_str()).size(12).font(style::mono()).color(style::DIM),
                     text(tr::init_repo_message()).size(13),
                     text(tr::init_repo_detail()).size(12).color(style::DIM),
                     text(tr::init_repo_no_remote()).size(12).color(style::DIM),
@@ -2928,7 +3006,7 @@ impl App {
                                 .align_y(Alignment::Center),
                                 text(t.preview.as_str())
                                     .size(11)
-                                    .font(style::MONO)
+                                    .font(style::mono())
                                     .color(style::DIM)
                                     .wrapping(text::Wrapping::None)
                                     .ellipsis(text::Ellipsis::End),
@@ -2943,7 +3021,7 @@ impl App {
                     );
                 }
                 column![
-                    text(tr::def_pick_title(&f.name)).size(16).font(style::BOLD),
+                    text(tr::def_pick_title(&f.name)).size(16).font(style::bold()),
                     scrollable(list).height(Length::Shrink),
                 ]
                 .spacing(10)
@@ -2960,7 +3038,7 @@ impl App {
                         tr::delete_entry_title(name)
                     })
                     .size(18)
-                    .font(style::BOLD),
+                    .font(style::bold()),
                     text(if many {
                         tr::delete_many_body()
                     } else if f.is_dir {
@@ -2972,7 +3050,7 @@ impl App {
                     .color(style::DIM),
                     text(f.path.as_str())
                         .size(11)
-                        .font(style::MONO)
+                        .font(style::mono())
                         .color(style::FAINT),
                 ]
                 .spacing(10);
@@ -3004,7 +3082,7 @@ impl App {
             Modal::CloseDirty(f) if f.keys.len() == 1 && f.dirty.len() == 1 => column![
                 text(tr::unsaved_title(crate::detail::file_name(&f.dirty[0])))
                     .size(18)
-                    .font(style::BOLD),
+                    .font(style::bold()),
                 text(tr::unsaved_body()).size(13).color(style::DIM),
                 row![
                     button(text(tr::cancel()).size(13))
@@ -3029,10 +3107,10 @@ impl App {
             Modal::CloseDirty(f) => {
                 let mut names = Column::new().spacing(2);
                 for p in &f.dirty {
-                    names = names.push(text(crate::detail::file_name(p)).size(12).font(style::MONO));
+                    names = names.push(text(crate::detail::file_name(p)).size(12).font(style::mono()));
                 }
                 column![
-                    text(tr::close_many_title()).size(18).font(style::BOLD),
+                    text(tr::close_many_title()).size(18).font(style::bold()),
                     text(tr::close_many_body()).size(13).color(style::DIM),
                     names,
                     row![
@@ -3065,5 +3143,14 @@ impl App {
             .on_press(Message::CloseModal),
         )
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fit_up_to_room_is_fluid_max() {
+        // The session row's title relies on this exact length (see `fit_up_to_room`).
+        assert_eq!(format!("{:?}", super::fit_up_to_room()), "Fluid(Max)");
     }
 }

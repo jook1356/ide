@@ -37,7 +37,7 @@ impl App {
         let online = self.connected();
         let shown = self.profile_shown().map(|c| c.slug.as_str());
         let head = row![
-            text(tr::nav_configurations()).size(13).font(style::BOLD),
+            text(tr::nav_configurations()).size(13).font(style::bold()),
             space().width(Fill),
             tip(
                 button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
@@ -146,7 +146,7 @@ impl App {
             }
             _ => {
                 c = c.push(
-                    container(text(tr::nav_configurations()).size(22).font(style::BOLD))
+                    container(text(tr::nav_configurations()).size(22).font(style::bold()))
                         .height(40)
                         .align_y(Alignment::Center)
                         .boxed(),
@@ -170,7 +170,7 @@ impl App {
         let mut title = row![
             text(e.base.name.as_str())
                 .size(22)
-                .font(style::BOLD)
+                .font(style::bold())
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End),
         ]
@@ -376,7 +376,7 @@ impl App {
         let f = &self.settings;
         let can = self.connected() && !f.busy && !f.cfg_name.trim().is_empty();
         let mut c = column![
-            text(tr::profile_add()).size(18).font(style::BOLD),
+            text(tr::profile_add()).size(18).font(style::bold()),
             text(tr::configurations_note()).size(12).color(style::DIM),
             text_input(tr::configuration_name_placeholder(), &f.cfg_name)
                 .id(CONFIG_NAME_ID)
@@ -414,7 +414,7 @@ impl App {
 /// the content.
 fn section<'a>(title: String, note: Option<String>, action: Option<El<'a>>, body: El<'a>) -> El<'a> {
     let mut head = iced::widget::Row::<El<'a>>::new()
-        .push(text(title).size(15).font(style::BOLD).boxed())
+        .push(text(title).size(15).font(style::bold()).boxed())
         .push(space().width(Fill).boxed())
         .align_y(Alignment::Center);
     if let Some(a) = action {
