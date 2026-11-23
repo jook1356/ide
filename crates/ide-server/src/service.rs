@@ -617,7 +617,7 @@ impl UserCtx {
     /// answer is `Some(reason)` to refuse a tool call (no rule refuses anything yet).
     pub fn agent_hook(&self, session: &str, event: ide_proto::AgentHookEvent) -> Option<String> {
         self.bridge.mark_hooked(session);
-        if let Some(a) = crate::bridge::activity_after(&event) {
+        if let Some(a) = self.bridge.hook_activity(session, &event) {
             self.set_activity(session, a);
         }
         match &event {
@@ -739,8 +739,10 @@ impl UserCtx {
             let Some(state) = m.detect(&input) else {
                 continue;
             };
-            let a = crate::bridge::screen_activity(state);
-            if self.bridge.screen_says(&id, a) {
+            if let Some(a) = self
+                .bridge
+                .screen_says(&id, crate::bridge::screen_activity(state))
+            {
                 self.set_activity(&id, a);
             }
         }

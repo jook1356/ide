@@ -28,6 +28,14 @@ pub enum HookEvent {
     NeedsInput { permission: bool },
     /// The agent is about to use a tool.
     PreTool(ToolUse),
+    /// Work that can outlive the turn started (a background agent, task, ...): the session
+    /// stays working after [`HookEvent::Stopped`] until every started `id` ended. `id` is the
+    /// CLI's own, opaque to the IDE. A provider that reports this must also report
+    /// [`HookEvent::BackgroundEnded`] for the same `id` (a start without an end keeps the
+    /// session working until the CLI's next `SessionStart` or process).
+    BackgroundStarted { id: String },
+    /// Work started with [`HookEvent::BackgroundStarted`] ended.
+    BackgroundEnded { id: String },
 }
 
 /// A tool call, as far as the IDE cares.

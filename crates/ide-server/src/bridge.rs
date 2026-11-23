@@ -96,6 +96,8 @@ pub struct BridgeState {
     activity: Mutex<HashMap<String, AgentActivity>>,
     /// Sessions whose CLI reported through hooks since its process started.
     hooked: Mutex<std::collections::HashSet<String>>,
+    /// Work of each session's agent that can outlive its turn (hooks' `Background*`).
+    background: Mutex<HashMap<String, Background>>,
     /// Write access of shared folders: folder owner's session id -> the holder's (missing =
     /// the owner).
     leases: Mutex<HashMap<String, String>>,
@@ -103,6 +105,14 @@ pub struct BridgeState {
     queue: Mutex<HashMap<String, std::collections::VecDeque<String>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     seq: AtomicU64,
+}
+
+/// A session's background work: the ids still running and whether its turn ended (`Stopped`
+/// since the last `PromptSubmitted`). Provider-agnostic: only the hook events' ids.
+#[derive(Debug, Default)]
+struct Background {
+    running: std::collections::HashSet<String>,
+    turn_ended: bool,
 }
 
 impl BridgeState {
@@ -165,6 +175,57 @@ impl BridgeState {
     pub fn reset(&self, session: &str) {
         self.activity.lock().unwrap().remove(session);
         self.hooked.lock().unwrap().remove(session);
+        self.background.lock().unwrap().remove(session);
+    }
+
+    /// The activity a hook event of `session` means (`None`: unchanged). A turn that ends
+    /// while background work runs stays working until the last of it ends.
+    pub fn hook_activity(&self, session: &str, event: &AgentHookEvent) -> Option<AgentActivity> {
+        let mut all = self.background.lock().unwrap();
+        let bg = all.entry(session.to_owned()).or_default();
+        Some(match event {
+            AgentHookEvent::SessionStart => {
+                *bg = Background::default();
+                AgentActivity::Idle
+            }
+            AgentHookEvent::PromptSubmitted => {
+                bg.turn_ended = false;
+                AgentActivity::Working
+            }
+            AgentHookEvent::Stopped => {
+                bg.turn_ended = true;
+                if bg.running.is_empty() {
+                    AgentActivity::Idle
+                } else {
+                    AgentActivity::Working
+                }
+            }
+            // Tool calls also come from background work: they do not reopen the turn.
+            AgentHookEvent::PreEdit { .. }
+            | AgentHookEvent::PreShell { .. }
+            | AgentHookEvent::PreTool { .. } => AgentActivity::Working,
+            AgentHookEvent::NeedsInput { .. } => AgentActivity::NeedsInput,
+            AgentHookEvent::BackgroundStarted { id } => {
+                bg.running.insert(id.clone());
+                return None;
+            }
+            AgentHookEvent::BackgroundEnded { id } => {
+                // An unknown id (or a repeated end) changes nothing.
+                if !bg.running.remove(id) || !(bg.turn_ended && bg.running.is_empty()) {
+                    return None;
+                }
+                AgentActivity::Idle
+            }
+        })
+    }
+
+    /// Background work of `session` still runs.
+    fn background_running(&self, session: &str) -> bool {
+        self.background
+            .lock()
+            .unwrap()
+            .get(session)
+            .is_some_and(|b| !b.running.is_empty())
     }
 
     /// Who holds the write access of `owner`'s folder.
@@ -222,13 +283,20 @@ impl BridgeState {
         self.hooked.lock().unwrap().insert(session.to_owned());
     }
 
-    /// The activity the screen shows, to apply or not: without hooks the screen decides;
-    /// with hooks it only adds a visible dialog (hooks report it late or not at all) and its
-    /// end.
-    pub fn screen_says(&self, session: &str, seen: AgentActivity) -> bool {
-        !self.hooked.lock().unwrap().contains(session)
+    /// The activity to apply for what the screen shows (`None`: keep the current one): without
+    /// hooks the screen decides; with hooks it only adds a visible dialog (hooks report it late
+    /// or not at all) and its end. An idle screen while background work runs is working.
+    pub fn screen_says(&self, session: &str, seen: AgentActivity) -> Option<AgentActivity> {
+        let applies = !self.hooked.lock().unwrap().contains(session)
             || seen == AgentActivity::NeedsInput
-            || self.activity(session) == AgentActivity::NeedsInput
+            || self.activity(session) == AgentActivity::NeedsInput;
+        if !applies {
+            return None;
+        }
+        if seen == AgentActivity::Idle && self.background_running(session) {
+            return Some(AgentActivity::Working);
+        }
+        Some(seen)
     }
 
     /// Set a session's agent activity; `true` when it changed.
@@ -278,18 +346,6 @@ impl BridgeState {
     }
 }
 
-/// The activity a hook event means (`None`: unchanged).
-pub fn activity_after(event: &AgentHookEvent) -> Option<AgentActivity> {
-    Some(match event {
-        AgentHookEvent::SessionStart | AgentHookEvent::Stopped => AgentActivity::Idle,
-        AgentHookEvent::PromptSubmitted
-        | AgentHookEvent::PreEdit { .. }
-        | AgentHookEvent::PreShell { .. }
-        | AgentHookEvent::PreTool { .. } => AgentActivity::Working,
-        AgentHookEvent::NeedsInput { .. } => AgentActivity::NeedsInput,
-    })
-}
-
 /// A provider's hook event on the wire.
 pub fn wire_event(e: HookEvent) -> AgentHookEvent {
     match e {
@@ -302,6 +358,8 @@ pub fn wire_event(e: HookEvent) -> AgentHookEvent {
             AgentHookEvent::PreShell { tool, command }
         }
         HookEvent::PreTool(ToolUse::Other { tool }) => AgentHookEvent::PreTool { tool },
+        HookEvent::BackgroundStarted { id } => AgentHookEvent::BackgroundStarted { id },
+        HookEvent::BackgroundEnded { id } => AgentHookEvent::BackgroundEnded { id },
     }
 }
 
@@ -833,17 +891,62 @@ mod tests {
     /// Without hooks the screen decides; with hooks it only adds a visible dialog and its end.
     #[test]
     fn hooks_and_screen() {
+        use AgentActivity::{Idle, NeedsInput, Working};
         let b = BridgeState::new(None);
-        assert!(b.screen_says("s", AgentActivity::Working));
-        assert!(b.screen_says("s", AgentActivity::Idle));
+        assert_eq!(b.screen_says("s", Working), Some(Working));
+        assert_eq!(b.screen_says("s", Idle), Some(Idle));
         b.mark_hooked("s");
-        b.set_activity("s", AgentActivity::Working);
-        assert!(!b.screen_says("s", AgentActivity::Idle), "hooks keep the turn");
-        assert!(b.screen_says("s", AgentActivity::NeedsInput), "a dialog shows at once");
-        b.set_activity("s", AgentActivity::NeedsInput);
-        assert!(b.screen_says("s", AgentActivity::Working), "the dialog went away");
+        b.set_activity("s", Working);
+        assert_eq!(b.screen_says("s", Idle), None, "hooks keep the turn");
+        assert_eq!(b.screen_says("s", NeedsInput), Some(NeedsInput), "a dialog shows at once");
+        b.set_activity("s", NeedsInput);
+        assert_eq!(b.screen_says("s", Working), Some(Working), "the dialog went away");
+        b.hook_activity("s", &AgentHookEvent::BackgroundStarted { id: "a".into() });
+        assert_eq!(b.screen_says("s", Idle), Some(Working), "background work runs");
         b.reset("s");
         assert_eq!(b.activity("s"), AgentActivity::Unknown);
-        assert!(b.screen_says("s", AgentActivity::Idle), "a new process: no hooks yet");
+        assert_eq!(b.screen_says("s", Idle), Some(Idle), "a new process: no hooks, no work");
+    }
+
+    /// A turn that ends while background work runs stays working until the last of it ends.
+    #[test]
+    fn background_work_holds_the_turn() {
+        use AgentActivity::{Idle, NeedsInput, Working};
+        use AgentHookEvent as E;
+        let b = BridgeState::new(None);
+        let h = |e: E| b.hook_activity("s", &e);
+        let start = |id: &str| E::BackgroundStarted { id: id.into() };
+        let end = |id: &str| E::BackgroundEnded { id: id.into() };
+        let tool = || E::PreTool { tool: "Read".into() };
+
+        // No background work: as before.
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::Stopped), Some(Idle));
+
+        // Work started inside a turn and ended inside it (a foreground subagent).
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(start("f")), None);
+        assert_eq!(h(end("f")), None, "the turn still runs");
+        assert_eq!(h(E::Stopped), Some(Idle));
+
+        // Two background agents outlive the turn.
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(start("a")), None);
+        assert_eq!(h(start("b")), None);
+        assert_eq!(h(E::Stopped), Some(Working), "held by a and b");
+        assert_eq!(h(tool()), Some(Working), "a background agent's tool call");
+        assert_eq!(h(E::NeedsInput { permission: true }), Some(NeedsInput));
+        assert_eq!(h(end("a")), None, "b still runs");
+        // The CLI resumes with a's result (no prompt), ends that turn: b still holds it.
+        assert_eq!(h(tool()), Some(Working));
+        assert_eq!(h(E::Stopped), Some(Working));
+        assert_eq!(h(end("b")), Some(Idle), "the last one ended");
+        assert_eq!(h(end("b")), None, "an unknown or repeated end changes nothing");
+
+        // A new conversation forgets work it never saw end.
+        assert_eq!(h(start("c")), None);
+        assert_eq!(h(E::SessionStart), Some(Idle));
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::Stopped), Some(Idle));
     }
 }
