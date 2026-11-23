@@ -17,6 +17,9 @@ pub struct LaunchSpec {
     pub cwd: PathBuf,
     /// Variables to set on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Inherited variables to remove (before `env` is applied), e.g. markers of an agent CLI
+    /// that started the server itself.
+    pub env_remove: Vec<String>,
 }
 
 /// The parts of the process environment that launch resolution depends on. Injectable so

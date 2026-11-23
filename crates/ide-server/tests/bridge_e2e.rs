@@ -553,7 +553,7 @@ async fn hooks_drive_the_activity() {
     };
 
     assert_eq!(info().await, AgentActivity::Unknown, "nothing reported yet");
-    assert_eq!(hook(AgentHookEvent::SessionStart).await, None);
+    assert_eq!(hook(AgentHookEvent::SessionStart { conversation: None }).await, None);
     assert_eq!(next_activity().await, AgentActivity::Idle);
     assert_eq!(hook(AgentHookEvent::PromptSubmitted).await, None);
     assert_eq!(next_activity().await, AgentActivity::Working);

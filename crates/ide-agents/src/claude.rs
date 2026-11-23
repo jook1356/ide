@@ -11,6 +11,8 @@
 //! | Outside dirs | `--add-dir` (legacy worktrees, the repositories' git dirs) |
 //! | Session name | `-n <title>` |
 //! | Hooks | `<scratch>/settings.json` (`{"hooks": ...}`) via `--settings`; exec form (`command` = the hook program, `args`), no shell (d) |
+//! | Resume | fresh: `--session-id <uuid>`; next start: `--resume <uuid>` if `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` follows `/clear` and `/resume` |
+//! | Inherited env | markers of a Claude Code that started the server (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, ...) are removed: with them the CLI runs as a child session and keeps no transcript (v 2.1.330) |
 
 use ide_core::{McpServer, Result};
 
@@ -25,6 +27,87 @@ use crate::{
 /// Claude Code's screen rules (`screens/claude.toml`).
 static SCREEN: std::sync::LazyLock<crate::screen::ScreenManifest> =
     std::sync::LazyLock::new(|| crate::screen::bundled(include_str!("../screens/claude.toml")));
+
+/// Env vars a running Claude Code sets for the processes it starts (its tool shells). A server
+/// started from such a shell (an agent building and running ide) passes them on; a session's
+/// `claude` then takes itself for a child of that Claude Code and writes no transcript, so
+/// neither `/resume` nor [`AgentProvider::resume_conversation`] finds it. Settings a user sets
+/// on purpose (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CONFIG_DIR`, ...) are not in this list.
+const INHERITED_SESSION_ENV: [&str; 13] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
+
+/// A Claude Code session id: a UUID (`8-4-4-4-12` hex digits). Anything else (a hook input
+/// is not trusted) is never passed as an argument or used in a path.
+pub(crate) fn is_session_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A random version-4 UUID (std only: two `RandomState` hashes of the time and a counter).
+fn new_session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let word = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        h.write_u64(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        h.finish()
+    };
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&word().to_le_bytes());
+    b[8..].copy_from_slice(&word().to_le_bytes());
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// Claude Code's config home for a session: the account's dir, else the server's
+/// `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn config_home(acct: Option<&AccountDir>) -> Option<std::path::PathBuf> {
+    if let Some(a) = acct {
+        return Some(a.dir.clone());
+    }
+    if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Some(d.into());
+    }
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join(".claude"))
+}
+
+/// Whether Claude Code kept a transcript of session `id` under `home`
+/// (`projects/<cwd as a folder name>/<id>.jsonl`; every project folder is searched, so the
+/// CLI's folder-name rules need not be repeated here).
+pub(crate) fn has_transcript(home: &std::path::Path, id: &str) -> bool {
+    let file = format!("{id}.jsonl");
+    std::fs::read_dir(home.join("projects")).is_ok_and(|rd| {
+        rd.flatten()
+            .any(|e| e.path().join(&file).is_file())
+    })
+}
 
 /// Claude Code's file-editing tools (their `tool_input.file_path` / `notebook_path`).
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
@@ -84,7 +167,7 @@ impl AgentProvider for Claude {
             mcp: Support::Native,
             instructions: Support::Native,
             hooks: Support::Native,
-            resume: false,
+            resume: true,
             session_name: true,
             integration: false,
             original_repo: ModeSupport {
@@ -120,6 +203,9 @@ impl AgentProvider for Claude {
     }
 
     fn begin(&self, plan: &mut LaunchPlan, acct: Option<&AccountDir>) {
+        for k in INHERITED_SESSION_ENV {
+            plan.remove_env(k);
+        }
         if let Some(a) = acct {
             plan.env.extend(self.account_env(a));
         }
@@ -127,6 +213,26 @@ impl AgentProvider for Claude {
             let title = plan.title.trim().to_owned();
             plan.arg("-n").arg(title);
         }
+    }
+
+    fn new_conversation(&self, plan: &mut LaunchPlan) -> Option<String> {
+        let id = new_session_id();
+        plan.arg("--session-id").arg(id.clone());
+        Some(id)
+    }
+
+    fn resume_conversation(
+        &self,
+        plan: &mut LaunchPlan,
+        id: &str,
+        acct: Option<&AccountDir>,
+    ) -> bool {
+        // `--resume` with an unknown id ends the CLI with an error: resume only what it kept.
+        if !is_session_id(id) || !config_home(acct).is_some_and(|h| has_transcript(&h, id)) {
+            return false;
+        }
+        plan.arg("--resume").arg(id);
+        true
     }
 
     fn apply_skills(&self, plan: &mut LaunchPlan, skills: &[Skill]) -> Result<()> {
@@ -242,7 +348,11 @@ impl AgentProvider for Claude {
         let v: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
         match event {
-            "SessionStart" => Some(HookEvent::SessionStart),
+            "SessionStart" => Some(HookEvent::SessionStart {
+                conversation: Some(s("session_id"))
+                    .filter(|id| is_session_id(id))
+                    .map(str::to_owned),
+            }),
             "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
             "Stop" => Some(HookEvent::Stopped),
             // Without an id the start and its end cannot be paired: ignored.

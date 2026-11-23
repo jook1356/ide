@@ -162,8 +162,10 @@ impl Server {
             },
             self.config.bridge.clone(),
         )?);
+        let _ = ctx.this.set(Arc::downgrade(&ctx));
         users.insert(user.id.clone(), ctx.clone());
         crate::bridge::spawn_screen_watch(Arc::downgrade(&ctx));
+        spawn_autostart(Arc::downgrade(&ctx));
         Ok(ctx)
     }
 
@@ -236,6 +238,19 @@ impl Server {
     }
 }
 
+/// Restart the sessions that were running when the server last went away, resuming their
+/// conversations ([`Session::autostart`], [`UserCtx::start`]).
+fn spawn_autostart(ctx: std::sync::Weak<UserCtx>) {
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    rt.spawn(async move {
+        if let Some(c) = ctx.upgrade() {
+            let _ = tokio::task::spawn_blocking(move || c.autostart()).await;
+        }
+    });
+}
+
 pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::new();
@@ -277,6 +292,8 @@ pub struct UserCtx {
     github: GithubSetup,
     /// The agent bridge: sessions' tokens, app calls in flight.
     bridge: crate::bridge::BridgeState,
+    /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
+    this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
 }
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
@@ -352,6 +369,7 @@ impl UserCtx {
             write_lock: Mutex::new(()),
             github,
             bridge: crate::bridge::BridgeState::new(bridge),
+            this: std::sync::OnceLock::new(),
         })
     }
 
@@ -628,6 +646,19 @@ impl UserCtx {
     /// answer is `Some(reason)` to refuse a tool call (no rule refuses anything yet).
     pub fn agent_hook(&self, session: &str, event: ide_proto::AgentHookEvent) -> Option<String> {
         self.bridge.mark_hooked(session);
+        // The CLI's conversation changed (a new one after `/clear`, another via `/resume`):
+        // the next start resumes that one.
+        if let ide_proto::AgentHookEvent::SessionStart {
+            conversation: Some(c),
+        } = &event
+            && let Ok(id) = SessionId::parse(session)
+        {
+            let _ = self
+                .sessions
+                .lock()
+                .unwrap()
+                .set_conversation(&id, Some(c.clone()));
+        }
         if let Some(a) = self.bridge.hook_activity(session, &event) {
             self.set_activity(session, a);
         }
@@ -1905,6 +1936,8 @@ impl UserCtx {
             Request::SessionStop { id } => {
                 let s = self.resolve_session(&id)?;
                 self.stop(&s);
+                // Stopped by the user: not restarted when the server starts again.
+                let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
                 Ok(Response::Session(self.info(&s)))
             }
             Request::SessionRestart { id } => {
@@ -2468,6 +2501,11 @@ impl UserCtx {
 
     /// The launch spec of a session (generates its scratch files).
     pub fn launch_spec(&self, s: &Session) -> Result<LaunchSpec, ProtoError> {
+        Ok(self.assemble(s)?.spec)
+    }
+
+    /// The assembled launch of a session: spec + the conversation it starts or resumes.
+    fn assemble(&self, s: &Session) -> Result<ide_agents::Assembled, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let p = self.provider(&s.provider)?;
         let account = match &s.account {
@@ -2484,7 +2522,13 @@ impl UserCtx {
         if s.kind == SessionKind::Login {
             let acct = account
                 .ok_or_else(|| core(ide_core::Error::ProviderNoLogin(s.provider.clone())))?;
-            return ide_agents::login_spec(p, &acct, &s.root, &self.launch_env).map_err(core);
+            return ide_agents::login_spec(p, &acct, &s.root, &self.launch_env)
+                .map(|spec| ide_agents::Assembled {
+                    spec,
+                    notes: Vec::new(),
+                    conversation: None,
+                })
+                .map_err(core);
         }
         let configuration = {
             let mut store = self.configs.lock().unwrap();
@@ -2519,7 +2563,7 @@ impl UserCtx {
             tracing::warn!("session {}: {n}", s.id);
             self.audit("session.note", &format!("{} {n}", s.id));
         }
-        Ok(built.spec)
+        Ok(built)
     }
 
     fn start(&self, s: &Session) -> Result<(), ProtoError> {
@@ -2529,17 +2573,95 @@ impl UserCtx {
         {
             self.after_exit(s);
         }
-        let spec = self.launch_spec(s)?;
+        let built = self.assemble(s)?;
         // A new process: nothing reported yet.
         self.bridge.reset(s.id.as_str());
         let host = self.host(s);
         host.start(|cols, rows| {
             self.runner
-                .spawn_pty(&self.user, &SpawnSpec::from_launch(&spec, cols, rows))
+                .spawn_pty(&self.user, &SpawnSpec::from_launch(&built.spec, cols, rows))
         })?;
-        let _ = self.sessions.lock().unwrap().touch(&s.id);
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let _ = sessions.touch(&s.id);
+            if built.conversation.is_some() {
+                let _ = sessions.set_conversation(&s.id, built.conversation.clone());
+            }
+            if s.kind == SessionKind::Agent && self.resumable(s) {
+                let _ = sessions.set_autostart(&s.id, true);
+                self.clear_autostart_on_exit(&host, &s.id);
+            }
+        }
         self.audit("session.start", s.id.as_str());
         Ok(())
+    }
+
+    /// The session's provider resumes conversations (only those sessions are restarted when
+    /// the server starts: anything else would come back as a fresh conversation).
+    fn resumable(&self, s: &Session) -> bool {
+        self.provider(&s.provider)
+            .is_ok_and(|p| p.capabilities().resume)
+    }
+
+    /// Keep [`Session::autostart`] current for the process just started on `host`: when it exits
+    /// by itself (`/exit`, a crash) it is not restarted next time. A kill (`session.stop`,
+    /// which clears the mark itself, or a server shutdown, which keeps it) ends the watch.
+    fn clear_autostart_on_exit(&self, host: &Arc<TermHost>, id: &SessionId) {
+        let (Some(me), Ok(rt)) = (
+            self.this.get().cloned(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            return;
+        };
+        let mut state = host.subscribe_state();
+        let id = id.clone();
+        rt.spawn(async move {
+            loop {
+                let now = *state.borrow_and_update();
+                match now {
+                    SessionState::Exited(_) => {
+                        if let Some(c) = me.upgrade() {
+                            let _ = c.sessions.lock().unwrap().set_autostart(&id, false);
+                        }
+                        return;
+                    }
+                    SessionState::Stopped => return,
+                    _ => {}
+                }
+                if state.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Restart the sessions marked [`Session::autostart`] (server start). Blocking.
+    fn autostart(&self) {
+        let due: Vec<Session> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .filter(|s| s.autostart && s.kind == SessionKind::Agent)
+            .cloned()
+            .collect();
+        for s in due {
+            if !self.resumable(&s) {
+                let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
+                continue;
+            }
+            if self.existing_host(s.id.as_str()).is_some_and(|h| h.is_running()) {
+                continue;
+            }
+            match self.start(&s) {
+                Ok(()) => self.audit("session.autostart", s.id.as_str()),
+                Err(e) => {
+                    tracing::warn!("session {}: restart after server start failed: {e:?}", s.id);
+                    let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
+                }
+            }
+        }
     }
 
     fn stop(&self, s: &Session) {
@@ -3021,6 +3143,7 @@ impl UserCtx {
                     args: args.to_vec(),
                     cwd: cwd.to_path_buf(),
                     env: Vec::new(),
+                    env_remove: Vec::new(),
                     cols,
                     rows,
                 },

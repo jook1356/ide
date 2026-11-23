@@ -211,8 +211,13 @@ async fn claude_and_codex_specs_from_a_configuration() {
         assert!(ide_core::same_path(&spec.cwd, &repo));
         if provider == "claude" {
             assert_eq!(s.title, "Claude Code · repo");
+            // A fresh conversation: `--session-id <uuid>` right after the name.
+            let mut args = spec.args.clone();
+            assert_eq!(args.get(2).map(String::as_str), Some("--session-id"));
+            assert_eq!(args.get(3).map(String::len), Some(36));
+            args.drain(2..4);
             assert_eq!(
-                spec.args,
+                args,
                 vec![
                     "-n".to_owned(),
                     "Claude Code · repo".into(),

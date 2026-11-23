@@ -102,6 +102,7 @@ pub fn finish<P: AgentProvider + ?Sized>(
         args,
         cwd: plan.cwd,
         env: plan.env,
+        env_remove: plan.env_remove,
     })
 }
 

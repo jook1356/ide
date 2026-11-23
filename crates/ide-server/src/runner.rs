@@ -25,6 +25,8 @@ pub struct SpawnSpec {
     pub cwd: PathBuf,
     /// Extra environment variables.
     pub env: Vec<(String, String)>,
+    /// Inherited environment variables to remove (before `env`).
+    pub env_remove: Vec<String>,
     /// Initial size.
     pub cols: u16,
     /// Initial size.
@@ -39,6 +41,7 @@ impl SpawnSpec {
             args: spec.args.clone(),
             cwd: spec.cwd.clone(),
             env: spec.env.clone(),
+            env_remove: spec.env_remove.clone(),
             cols,
             rows,
         }
@@ -105,6 +108,9 @@ impl Runner for SameUserRunner {
         // and most CLIs drop every colour (and Claude its grey prompt background) when they
         // inherit it. A spec may still set it on purpose (`spec.env` is applied after).
         for k in NO_COLOR_VARS {
+            cmd.env_remove(k);
+        }
+        for k in &spec.env_remove {
             cmd.env_remove(k);
         }
         for (k, v) in &spec.env {

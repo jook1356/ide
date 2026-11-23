@@ -109,7 +109,12 @@ pub enum AgentActivity {
 /// A hook of a session's agent CLI, normalized (`ide-server hook`; see `docs/agent-bridge.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentHookEvent {
-    SessionStart,
+    /// The CLI started (or resumed / cleared) a conversation (`conversation`: the CLI's id of
+    /// it, if reported; the server stores it for resuming).
+    SessionStart {
+        #[serde(default)]
+        conversation: Option<String>,
+    },
     PromptSubmitted,
     Stopped,
     NeedsInput { permission: bool },

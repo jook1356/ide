@@ -120,6 +120,7 @@ fn input<'a>(
         },
         account: acct,
         configuration: cfg,
+        conversation: None,
         bridge: None,
     }
 }
@@ -251,6 +252,70 @@ fn worktree_untouched(f: &Fixture) {
     );
 }
 
+/// The args without Claude's `--session-id <id>` pair (checked to be the launch's
+/// conversation, right after the name flag).
+fn without_session_id(out: &Assembled) -> Vec<String> {
+    let conv = out.conversation.clone().expect("a fresh conversation id");
+    let i = out.spec.args.iter().position(|a| a == "--session-id").expect("--session-id");
+    assert_eq!(out.spec.args[i + 1], conv);
+    let mut args = out.spec.args.clone();
+    args.drain(i..i + 2);
+    args
+}
+
+#[test]
+fn claude_resume() {
+    let f = fixture("agents-claude-resume");
+    let acct = account(&f, "claude");
+    let cfg = Configuration::empty("default", "default");
+    let mut inp = input(&f, Some(&acct), &cfg);
+
+    // Fresh: a random v4 UUID, passed with --session-id.
+    let a = assemble(&Claude, &inp, &f.env).unwrap();
+    let b = assemble(&Claude, &inp, &f.env).unwrap();
+    let id = a.conversation.clone().unwrap();
+    assert_ne!(Some(id.clone()), b.conversation, "a new id per fresh start");
+    assert_eq!(id.len(), 36);
+    assert_eq!(&id[14..15], "4", "version 4: {id}");
+    assert!(claude::is_session_id(&id));
+    assert!(a.spec.args.windows(2).any(|w| w == ["--session-id", id.as_str()]));
+
+    // Stored, but the CLI kept no transcript (in this account): a new conversation.
+    inp.conversation = Some(&id);
+    let out = assemble(&Claude, &inp, &f.env).unwrap();
+    assert!(!out.spec.args.contains(&"--resume".to_owned()));
+    assert_ne!(out.conversation.as_deref(), Some(id.as_str()));
+
+    // With the transcript under the account's projects/<cwd folder>/: resumed.
+    let project = acct.dir.join("projects").join("C--some-cwd");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{id}.jsonl")), "{}
+").unwrap();
+    let out = assemble(&Claude, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation.as_deref(), Some(id.as_str()));
+    assert!(out.spec.args.windows(2).any(|w| w == ["--resume", id.as_str()]));
+    assert!(!out.spec.args.contains(&"--session-id".to_owned()));
+
+    // Not a session id (hook input is untrusted): never an argument.
+    for bad in ["../x", "--help", "0000", ""] {
+        inp.conversation = Some(bad);
+        let out = assemble(&Claude, &inp, &f.env).unwrap();
+        assert!(!out.spec.args.iter().any(|a| a == bad || a == "--resume"), "{bad}");
+    }
+
+    // A server started from a Claude Code tool shell: its session markers are not inherited,
+    // user settings are.
+    for k in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "AI_AGENT"] {
+        assert!(out.spec.env_remove.iter().any(|r| r == k), "{k}");
+    }
+    assert!(!out.spec.env_remove.iter().any(|r| r == "CLAUDE_CONFIG_DIR"));
+
+    // Providers without resume get neither flags nor an id.
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation, None);
+    assert!(out.spec.env_remove.is_empty());
+}
+
 #[test]
 fn claude_spec() {
     let f = fixture("agents-claude");
@@ -262,7 +327,7 @@ fn claude_spec() {
     let plugin = scratch.join("plugin");
     assert_eq!(out.spec.program, f.bin.join(exe("claude")));
     assert_eq!(
-        out.spec.args,
+        without_session_id(&out),
         vec![
             "-n".to_owned(),
             "My session".into(),
@@ -317,7 +382,7 @@ fn claude_spec() {
     // Without account, skills, MCP and instructions: just the name flag.
     let empty = Configuration::empty("default", "default");
     let out = assemble(&Claude, &input(&f, None, &empty), &f.env).unwrap();
-    assert_eq!(out.spec.args, ["-n", "My session"]);
+    assert_eq!(without_session_id(&out), ["-n", "My session"]);
     assert_eq!(env_of(&out.spec, "CLAUDE_CONFIG_DIR"), None);
     assert!(!scratch.exists(), "stale generated files are removed");
 }
@@ -891,6 +956,16 @@ fn claude_hooks() {
     assert_eq!(p("SubagentStart", serde_json::json!({})), None, "no id: cannot pair");
     assert_eq!(p("SubagentStop", serde_json::json!({"agent_id": ""})), None);
     assert_eq!(Claude.parse_hook("Stop", b"not json"), Some(HookEvent::Stopped));
+    let id = "0f8e2a4c-1b3d-4e5f-8a7b-9c0d1e2f3a4b";
+    assert_eq!(
+        p("SessionStart", serde_json::json!({"session_id": id, "source": "clear"})),
+        Some(HookEvent::SessionStart { conversation: Some(id.into()) })
+    );
+    assert_eq!(
+        p("SessionStart", serde_json::json!({"session_id": "../../x"})),
+        Some(HookEvent::SessionStart { conversation: None }),
+        "not a session id"
+    );
     assert_eq!(Claude.parse_hook("Nope", b"{}"), None);
 
     assert_eq!(Claude.hook_reply("PreToolUse", &HookDecision::NoOpinion), HookReply::default());
