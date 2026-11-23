@@ -274,6 +274,8 @@ impl App {
             opaque(self.page_view()).into()
         };
         let base = row![self.rail(), stack![work, page].width(Fill).height(Fill),].height(Fill);
+        // Desk's app footer under everything (only the self-update control here).
+        let base = column![base, self.app_footer()].height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
         let overlay = self.modal_layer(false);
         let mut root = stack![base, overlay].boxed();
@@ -2812,6 +2814,7 @@ impl App {
             Modal::SkillEdit(f) => self.skill_modal_card(f),
             Modal::AddProfile => self.add_profile_card(),
             Modal::NewChild(f) => self.child_card(f),
+            Modal::SelfUpdate => self.update_card(),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

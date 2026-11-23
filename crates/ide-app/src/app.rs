@@ -550,6 +550,8 @@ pub enum Modal {
     AddProfile,
     /// 하위 세션 만들기 (`family_ui.rs`).
     NewChild(crate::family_ui::ChildForm),
+    /// ide 빌드 후 재시작: confirm (`self_update.rs`).
+    SelfUpdate,
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -929,6 +931,8 @@ pub enum Message {
     SessionAct(crate::session_menu::SessionAct),
     /// Session families (`family_ui.rs`).
     Family(crate::family_ui::FamilyMsg),
+    /// Self-update from the footer (`self_update.rs`).
+    Update(crate::self_update::UpdateMsg),
     /// Close the session menu, then handle the message (세션 설정, 삭제).
     SessionMenuThen(Box<Message>),
     ItemDrag(crate::item_menu::DragMsg),
@@ -1116,6 +1120,12 @@ pub struct App {
     pub rail_hover: bool,
     /// The session row under the pointer (shows its pin / delete buttons).
     pub session_hover: Option<String>,
+    /// Self-update (`self_update.rs`): possible here, the last run's status, the run this app
+    /// started or applied (it quits when that run swaps), a start error.
+    pub update_available: bool,
+    pub update_status: Option<crate::self_update::Status>,
+    pub update_run: Option<String>,
+    pub update_error: Option<String>,
     /// Sessions whose agent finished a turn while another session was shown (Desk's 새 답변);
     /// cleared when the session is selected.
     pub new_answers: std::collections::HashSet<String>,
@@ -1188,6 +1198,10 @@ impl App {
     ) -> (Self, Task<Message>) {
         let mut app = Self::load(data_dir, runtime, remote_override);
         app.script = Script::from_env(&app.data_dir);
+        // Self-update: a run that started this app learns it came up.
+        app.update_available = crate::self_update::available();
+        crate::self_update::confirm_started(&app.data_dir);
+        app.update_status = crate::self_update::read_status(&app.data_dir);
         app.connect();
         // The app window (a daemon opens none by itself, frameless like the detail window);
         // closing it is handled by the app.
@@ -1249,6 +1263,10 @@ impl App {
             rail_hover: false,
             session_hover: None,
             new_answers: Default::default(),
+            update_available: false,
+            update_status: None,
+            update_run: None,
+            update_error: None,
             banner: None,
             script: None,
             modal_web_unsafe: false,
@@ -3614,6 +3632,7 @@ impl App {
             }
             Message::SessionAct(a) => self.on_session_act(a),
             Message::Family(m) => self.on_family(m),
+            Message::Update(m) => self.on_update(m),
             Message::SessionMenuThen(m) => {
                 self.session_menu = None;
                 self.update_inner(*m)
@@ -4280,6 +4299,12 @@ impl App {
         }
         if self.connected() {
             subs.push(iced::time::every(crate::branch_badge::EVERY).map(|_| Message::BadgeTick));
+        }
+        if self.update_polling() {
+            subs.push(
+                iced::time::every(crate::self_update::POLL)
+                    .map(|_| Message::Update(crate::self_update::UpdateMsg::Tick)),
+            );
         }
         if self.script.as_ref().is_some_and(|s| !s.done()) {
             subs.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));

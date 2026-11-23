@@ -35,6 +35,9 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
   (`DejaVu Sans Mono` / `monospace`).
 - [ ] **Session menu "작업 폴더 열기".** `session_menu::open_folder` runs `xdg-open <folder>`.
   Check: right-click a session, open its folder in the desktop's file manager.
+- [ ] **Self-update (빌드 후 재시작).** Windows only (`self_update::available` is false elsewhere;
+  `scripts/ide-update.ps1`). Assumption: a shell script doing the same steps works on Linux / macOS
+  (a running binary can be replaced there directly). Check: port the script, show the footer button.
 
 ## macOS: to do
 
@@ -156,6 +159,7 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: footer self-update (`self_update.rs`) is Windows-only; off on Linux / macOS.
 - 2026-11-23: session right-click menu opens the working folder with `open` (macOS) /
   `xdg-open` (Linux) (`session_menu.rs`); unbuilt on macOS / Linux.
 - 2026-11-23: Explore cut / copy / paste via the OS file clipboard, delete to the Trash

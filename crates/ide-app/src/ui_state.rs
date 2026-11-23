@@ -133,6 +133,8 @@ pub struct UiState {
     /// Parent sessions whose children are folded in the session list.
     #[serde(deserialize_with = "lenient")]
     pub folded_families: BTreeSet<String>,
+    /// The self-update run whose result was dismissed (`self_update.rs`).
+    pub update_seen: Option<String>,
     /// The detail area lives in a window of its own (Hermes Desk's `region-detached:detail`):
     /// kept while that window is hidden (its own close button, the detail toggle, quitting)
     /// and across restarts; cleared only by "앱으로 합치기".
@@ -237,6 +239,7 @@ impl Default for UiState {
             folded_groups: BTreeSet::new(),
             archive_open: BTreeSet::new(),
             folded_families: BTreeSet::new(),
+            update_seen: None,
             detail_detached: false,
             detail_pinned: false,
             detail_window: None,

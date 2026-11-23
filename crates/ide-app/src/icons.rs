@@ -49,9 +49,11 @@ pub enum Icon {
     ChevronsUp,
     /// Tabler's filled player-play (no stroke).
     PlayerPlayFilled,
+    // App footer (self_update.rs).
+    Hammer,
 }
 
-const SOURCES: [&str; 34] = [
+const SOURCES: [&str; 35] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -86,6 +88,7 @@ const SOURCES: [&str; 34] = [
     include_str!("../assets/icons/chevrons-down.svg"),
     include_str!("../assets/icons/chevrons-up.svg"),
     include_str!("../assets/icons/player-play-filled.svg"),
+    include_str!("../assets/icons/hammer.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -136,6 +139,6 @@ mod tests {
             assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::PlayerPlayFilled as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Hammer as usize + 1);
     }
 }

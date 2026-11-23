@@ -46,7 +46,8 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 ## Conventions
 - `ide-core` stays UI-free and unit-tested; put logic there, not in widgets. Only `ide-server` uses
   it: the app (`ide-app`) is a client and never spawns agents, runs git or touches project files;
-  everything goes through `ide_client::Client`.
+  everything goes through `ide_client::Client`. One exception: the footer's 빌드 후 재시작
+  (`self_update.rs`, `docs/self-update.md`) starts the update script that pulls and rebuilds ide itself.
 - Never enable the `cef` crate's default `sandbox` feature.
 - No `unsafe` outside `ide-web`'s texture import and FFI glue; comment every `unsafe` block.
 - Tests and test scripts must inject input inside the app (iced events, writing to the PTY). Never
