@@ -188,6 +188,12 @@ pub struct Session {
     pub created_at: u64,
     /// Last activity, Unix seconds.
     pub last_active: u64,
+    /// Pinned to the top of its group in the session list (Desk's `pinned`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// In its group's 보관함 at the end of the session list (Desk's `archived`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
     /// Legacy `profile` field (read only, for migration).
     #[serde(default, rename = "profile", skip_serializing)]
     pub legacy_profile: Option<String>,
@@ -228,6 +234,8 @@ impl Session {
             bases: Default::default(),
             created_at: now,
             last_active: now,
+            pinned: false,
+            archived: false,
             legacy_profile: None,
             legacy_agent: None,
             legacy_repo_path: None,
@@ -344,6 +352,27 @@ impl SessionStore {
     pub fn set_title(&mut self, id: &SessionId, title: impl Into<String>) -> Result<()> {
         let title = title.into();
         self.modify(id, |s| s.title = title)
+    }
+
+    /// Pin / unpin and archive / unarchive (`None` leaves a flag as it is). As Desk, archiving
+    /// unpins and an archived session cannot be pinned.
+    pub fn set_flags(
+        &mut self,
+        id: &SessionId,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<()> {
+        self.modify(id, |s| {
+            if let Some(a) = archived {
+                s.archived = a;
+            }
+            if let Some(p) = pinned {
+                s.pinned = p;
+            }
+            if s.archived {
+                s.pinned = false;
+            }
+        })
     }
 
     /// Sessions using an account.
@@ -505,6 +534,34 @@ mod tests {
         let json = std::fs::read_to_string(paths.sessions_file()).unwrap();
         assert!(json.contains("\"provider\": \"shell\""), "{json}");
         assert!(!json.contains("\"profile\""), "{json}");
+    }
+
+    #[test]
+    fn pin_and_archive() {
+        let t = TempDir::new("sess-flags");
+        let paths = Paths::new(&t.0);
+        let mut store = SessionStore::open(&paths).unwrap();
+        let a = sample_session("claude", t.0.join("wa"));
+        store.upsert(a.clone()).unwrap();
+        let flags = |s: &SessionStore| {
+            let x = s.get(&a.id).unwrap();
+            (x.pinned, x.archived)
+        };
+
+        store.set_flags(&a.id, Some(true), None).unwrap();
+        assert_eq!(flags(&store), (true, false));
+        // Archiving unpins; an archived session stays unpinned.
+        store.set_flags(&a.id, None, Some(true)).unwrap();
+        assert_eq!(flags(&store), (false, true));
+        store.set_flags(&a.id, Some(true), None).unwrap();
+        assert_eq!(flags(&store), (false, true));
+        assert_eq!(flags(&SessionStore::open(&paths).unwrap()), (false, true));
+
+        store.set_flags(&a.id, None, Some(false)).unwrap();
+        assert_eq!(flags(&store), (false, false));
+        // Unset flags are not written.
+        let json = std::fs::read_to_string(paths.sessions_file()).unwrap();
+        assert!(!json.contains("pinned") && !json.contains("archived"), "{json}");
     }
 
     #[test]

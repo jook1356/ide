@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 10;
+pub const PROTO_VERSION: u32 = 11;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -165,6 +165,12 @@ pub struct SessionInfo {
     pub term_title: String,
     /// End offset of the terminal output (bytes produced so far).
     pub term_end: u64,
+    /// Pinned to the top of its group in the session list.
+    #[serde(default)]
+    pub pinned: bool,
+    /// In its group's 보관함 (archived).
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// `session.create` arguments.
@@ -428,6 +434,13 @@ pub enum Request {
     SessionRename {
         id: String,
         title: String,
+    },
+    /// Pin / unpin and archive / unarchive (`None` = unchanged); archiving unpins, an archived
+    /// session cannot be pinned. Answers `Session`.
+    SessionSetFlags {
+        id: String,
+        pinned: Option<bool>,
+        archived: Option<bool>,
     },
     /// Open (or replace) this connection's terminal stream for `session`.
     TermAttach {
@@ -941,6 +954,7 @@ impl Request {
             Request::UTermRerun { .. } => "uterm.rerun",
             Request::UTermRemove { .. } => "uterm.remove",
             Request::SessionRename { .. } => "session.rename",
+            Request::SessionSetFlags { .. } => "session.set_flags",
             Request::TermAttach { .. } => "term.attach",
             Request::TermDetach { .. } => "term.detach",
             Request::TermWrite { .. } => "term.write",

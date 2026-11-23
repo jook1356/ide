@@ -577,6 +577,8 @@ impl UserCtx {
             state: host.as_ref().map_or(SessionState::Stopped, |h| h.state()),
             term_title: host.as_ref().map(|h| h.title()).unwrap_or_default(),
             term_end: host.as_ref().map_or(0, |h| h.end()),
+            pinned: s.pinned,
+            archived: s.archived,
         }
     }
 
@@ -1259,6 +1261,21 @@ impl UserCtx {
                     .lock()
                     .unwrap()
                     .set_title(&s.id, title.clone())
+                    .map_err(core)?;
+                self.notify(Notify::SessionsChanged);
+                let s = self.resolve_session(&id)?;
+                Ok(Response::Session(self.info(&s)))
+            }
+            Request::SessionSetFlags {
+                id,
+                pinned,
+                archived,
+            } => {
+                let s = self.resolve_session(&id)?;
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .set_flags(&s.id, pinned, archived)
                     .map_err(core)?;
                 self.notify(Notify::SessionsChanged);
                 let s = self.resolve_session(&id)?;

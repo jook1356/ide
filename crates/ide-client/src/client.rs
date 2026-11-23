@@ -910,6 +910,23 @@ impl Client {
         )
     }
 
+    /// `session.set_flags`: pin / unpin and archive / unarchive (`None` = unchanged).
+    pub async fn set_session_flags(
+        &self,
+        id: &str,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<SessionInfo, ProtoError> {
+        expect_session(
+            self.call(Request::SessionSetFlags {
+                id: id.into(),
+                pinned,
+                archived,
+            })
+            .await,
+        )
+    }
+
     /// Attach a session's terminal: output from `from_offset` (`None` = everything the server
     /// still has, starting with a reset) arrives as [`ClientEvent::Term`]. The attachment is
     /// remembered: after a reconnect it resumes from the last delivered offset. If not
