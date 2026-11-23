@@ -222,7 +222,7 @@ async fn families() {
         tool: "Write".into(),
         paths: vec![Path::new(root).join("x.txt").display().to_string()],
     };
-    let writer = |id: &str| ctx.agent_hook(id, ide_proto::AgentHookEvent::SessionStart);
+    let writer = |id: &str| ctx.agent_hook(id, ide_proto::AgentHookEvent::SessionStart { conversation: None });
     assert_eq!(writer(&p.id), None);
     assert_eq!(ctx.agent_hook(&p.id, edit_in(&p.root)), None, "the owner writes");
     let refused = ctx.agent_hook(&s.id, edit_in(&p.root)).expect("refused");

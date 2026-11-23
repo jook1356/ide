@@ -188,7 +188,7 @@ impl BridgeState {
         let mut all = self.background.lock().unwrap();
         let bg = all.entry(session.to_owned()).or_default();
         Some(match event {
-            AgentHookEvent::SessionStart => {
+            AgentHookEvent::SessionStart { .. } => {
                 *bg = Background::default();
                 AgentActivity::Idle
             }
@@ -353,7 +353,7 @@ impl BridgeState {
 /// A provider's hook event on the wire.
 pub fn wire_event(e: HookEvent) -> AgentHookEvent {
     match e {
-        HookEvent::SessionStart => AgentHookEvent::SessionStart,
+        HookEvent::SessionStart { conversation } => AgentHookEvent::SessionStart { conversation },
         HookEvent::PromptSubmitted => AgentHookEvent::PromptSubmitted,
         HookEvent::Stopped => AgentHookEvent::Stopped,
         HookEvent::NeedsInput { permission } => AgentHookEvent::NeedsInput { permission },
@@ -969,7 +969,7 @@ mod tests {
 
         // A new conversation forgets work it never saw end.
         assert_eq!(h(start("c")), None);
-        assert_eq!(h(E::SessionStart), Some(Idle));
+        assert_eq!(h(E::SessionStart { conversation: None }), Some(Idle));
         assert_eq!(h(E::PromptSubmitted), Some(Working));
         assert_eq!(h(E::Stopped), Some(Idle));
     }

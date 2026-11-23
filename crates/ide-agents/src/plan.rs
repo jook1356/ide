@@ -28,6 +28,11 @@ pub struct LaunchPlan {
     pub args: Vec<String>,
     /// Env vars set on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Inherited env vars removed before `env` is applied ([`LaunchPlan::remove_env`]).
+    pub env_remove: Vec<String>,
+    /// The CLI's conversation id this launch starts or resumes, if the provider set one
+    /// ([`crate::AgentProvider::new_conversation`] / [`crate::AgentProvider::resume_conversation`]).
+    pub conversation: Option<String>,
     /// Text to append to the instructions (fallbacks such as skill lists).
     pub extra_instructions: Vec<String>,
     /// Configuration parts that could not be passed on.
@@ -47,6 +52,8 @@ impl LaunchPlan {
             program: program.to_owned(),
             args: Vec::new(),
             env: Vec::new(),
+            env_remove: Vec::new(),
+            conversation: None,
             extra_instructions: Vec::new(),
             notes: Vec::new(),
         }
@@ -119,6 +126,13 @@ impl LaunchPlan {
         match self.env.iter_mut().find(|(k, _)| k == key) {
             Some(slot) => slot.1 = value,
             None => self.env.push((key.to_owned(), value)),
+        }
+    }
+
+    /// Do not pass an inherited env var on (no-op if it is not set).
+    pub fn remove_env(&mut self, key: &str) {
+        if !self.env_remove.iter().any(|k| k == key) {
+            self.env_remove.push(key.to_owned());
         }
     }
 

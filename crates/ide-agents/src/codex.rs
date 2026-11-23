@@ -190,7 +190,7 @@ impl AgentProvider for Codex {
         let v: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
         match event {
-            "SessionStart" => Some(HookEvent::SessionStart),
+            "SessionStart" => Some(HookEvent::SessionStart { conversation: None }),
             "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
             "Stop" => Some(HookEvent::Stopped),
             "PermissionRequest" => Some(HookEvent::NeedsInput { permission: true }),

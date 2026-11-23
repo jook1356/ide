@@ -200,6 +200,15 @@ pub struct Session {
     /// A child that works in its parent's folder and worktrees (else its own worktrees).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
+    /// The agent CLI's own id of the conversation this session continues (opaque; written by
+    /// the provider at start and by its `SessionStart` hook, e.g. after `/clear`). The next
+    /// start resumes it when the provider can (`AgentProvider::resume_conversation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// The process was running when the server last went away (set at start, cleared when the
+    /// user stops it or it exits by itself): the next server start restarts it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autostart: bool,
     /// Legacy `profile` field (read only, for migration).
     #[serde(default, rename = "profile", skip_serializing)]
     pub legacy_profile: Option<String>,
@@ -244,6 +253,8 @@ impl Session {
             archived: false,
             parent: None,
             shared: false,
+            conversation: None,
+            autostart: false,
             legacy_profile: None,
             legacy_agent: None,
             legacy_repo_path: None,
@@ -354,6 +365,22 @@ impl SessionStore {
     /// Set `last_active` to now.
     pub fn touch(&mut self, id: &SessionId) -> Result<()> {
         self.modify(id, |s| s.last_active = now_unix())
+    }
+
+    /// Record the agent CLI's conversation id (no write if unchanged).
+    pub fn set_conversation(&mut self, id: &SessionId, conversation: Option<String>) -> Result<()> {
+        if self.get(id).is_some_and(|s| s.conversation == conversation) {
+            return Ok(());
+        }
+        self.modify(id, |s| s.conversation = conversation)
+    }
+
+    /// Mark whether the next server start restarts the session (no write if unchanged).
+    pub fn set_autostart(&mut self, id: &SessionId, on: bool) -> Result<()> {
+        if self.get(id).is_some_and(|s| s.autostart == on) {
+            return Ok(());
+        }
+        self.modify(id, |s| s.autostart = on)
     }
 
     /// Change a session's title.

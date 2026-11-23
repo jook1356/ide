@@ -231,6 +231,29 @@ pub trait AgentProvider: Send + Sync {
     /// overlay back). Default: nothing.
     fn after_exit(&self, _ctx: &SessionContext, _acct: Option<&AccountDir>) {}
 
+    // ---- Conversations (resume across restarts; only used when `Caps::resume`) ----
+
+    /// A fresh start: pick the CLI's conversation id up front if the CLI takes one (add the
+    /// flag to `plan`) and return it; the server stores it so the next start can resume it.
+    /// `None`: the CLI chooses (its `SessionStart` hook may still report the id, see
+    /// [`HookEvent::SessionStart`]). Default: `None`.
+    fn new_conversation(&self, _plan: &mut LaunchPlan) -> Option<String> {
+        None
+    }
+    /// Continue the stored conversation `id` (from [`AgentProvider::new_conversation`] or a
+    /// `SessionStart` hook): add the CLI's resume flags and return `true`, or `false` when it
+    /// cannot be resumed (e.g. the CLI kept no transcript of it); then the launch starts a
+    /// new conversation. `acct` is the account with its [`AgentProvider::account_home`].
+    /// Default: `false`.
+    fn resume_conversation(
+        &self,
+        _plan: &mut LaunchPlan,
+        _id: &str,
+        _acct: Option<&AccountDir>,
+    ) -> bool {
+        false
+    }
+
     // ---- Session assembly ----
 
     /// Materialize project-level files into the session folder (`ctx.root`), where the CLI
@@ -409,6 +432,8 @@ pub struct SessionInput<'a> {
     pub account: Option<&'a AccountDir>,
     /// The configuration.
     pub configuration: &'a Configuration,
+    /// The stored conversation to resume ([`Session::conversation`]), if any.
+    pub conversation: Option<&'a str>,
     /// The agent bridge (`None`: not connected, e.g. a server without a daemon socket).
     pub bridge: Option<Bridge>,
 }
@@ -450,6 +475,7 @@ impl<'a> SessionInput<'a> {
             },
             account,
             configuration,
+            conversation: session.conversation.as_deref(),
             bridge: None,
         }
     }
@@ -468,9 +494,12 @@ pub struct Assembled {
     pub spec: LaunchSpec,
     /// Configuration parts that were not passed on (log/show them).
     pub notes: Vec<String>,
+    /// The conversation this launch starts or resumes (store it on the session), if known.
+    pub conversation: Option<String>,
 }
 
-/// Build the launch spec of a session: account home -> begin -> (workspace sessions)
+/// Build the launch spec of a session: account home -> begin -> conversation (new or resumed,
+/// providers with `Caps::resume`) -> (workspace sessions)
 /// prepare_root -> skills (unless the root covered them) -> MCP (configuration servers + the
 /// bridge) -> instructions (configuration text + bridge text + guidance unless the root
 /// covered it + fallback text) -> outside dirs -> hooks -> finish. Regenerates the scratch dir. `TERM` and `COLORTERM` are always set.
@@ -501,6 +530,14 @@ pub fn assemble(
         None => None,
     };
     provider.begin(&mut plan, account.as_ref());
+    if provider.capabilities().resume {
+        plan.conversation = match input.conversation {
+            Some(id) if provider.resume_conversation(&mut plan, id, account.as_ref()) => {
+                Some(id.to_owned())
+            }
+            _ => provider.new_conversation(&mut plan),
+        };
+    }
     let cfg = input.configuration;
     let skills = skills::load(&cfg.skills, &mut plan.notes);
     // Files go into the session folder only when it is known: a legacy session migrated
@@ -567,8 +604,13 @@ pub fn assemble(
     plan.set_env("TERM", "xterm-256color");
     plan.set_env("COLORTERM", "truecolor");
     let notes = plan.notes.clone();
+    let conversation = plan.conversation.clone();
     let spec = provider.finish(plan, env)?;
-    Ok(Assembled { spec, notes })
+    Ok(Assembled {
+        spec,
+        notes,
+        conversation,
+    })
 }
 
 /// The spec of an account's login command (in `cwd`), or [`ide_core::Error::ProviderNoLogin`].
@@ -592,6 +634,7 @@ pub fn login_spec(
         args,
         cwd: cwd.to_path_buf(),
         env: env_vars,
+        env_remove: Vec::new(),
     })
 }
 

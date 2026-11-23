@@ -57,6 +57,9 @@ pub trait AgentProvider: Send + Sync {
     fn account_status(&self, acct: &AccountDir, env: &HostEnv) -> AccountStatus { Unknown }
     fn account_home(&self, acct: &AccountDir, ctx: &SessionContext) -> Result<PathBuf>; // default: acct.dir
     fn after_exit(&self, ctx: &SessionContext, acct: Option<&AccountDir>) {}   // default: nothing
+    // Conversations (only with Caps::resume, see "Resume and restart" below)
+    fn new_conversation(&self, plan) -> Option<String>;               // default: None
+    fn resume_conversation(&self, plan, id: &str, acct: Option<&AccountDir>) -> bool; // default: false
     // Session assembly (each step has a default)
     fn prepare_root(&self, plan, ctx: &SessionContext, config: &Configuration, skills: &[Skill])
         -> Result<RootPrepared>;                           // default: nothing (workspace only)
@@ -109,6 +112,8 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
 | Instructions | (v) `<scratch>/instructions.md` via `--append-system-prompt-file` | (v) `-c developer_instructions="..."` (single-line TOML string) | ignored | `flag` / `env` / `file` |
 | Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `ide-server hook` (`docs/agent-bridge.md`); background agents (`SubagentStart/Stop`) -> `HookEvent::Background*` (optional for a provider: report a start only with its end) | (d) account integration: ide's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
 | Session name | (v) `-n <title>` | — | — | — |
+| Resume | fresh `--session-id <uuid>`, next start `--resume <uuid>` when `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` (a) | — (not yet: `codex resume <id>` + hook id, unverified) | — | — |
+| Inherited env | removed: `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, ... (v 2.1.330, see below) | — | — | — |
 | Daemon | — | (v) `--no-daemon` always | — | — |
 
 Notes:
@@ -192,6 +197,30 @@ needs admin or developer mode on Windows. Codex original-repo skills therefore u
 documented fallback (`Caps.original_repo.skills = Fallback`) and `account_home` / `after_exit`
 keep their defaults. The trait methods stay so an overlay can be added inside `codex.rs` without
 touching the server.
+
+### Resume and restart
+A session keeps the CLI's own id of its conversation (`Session::conversation` in
+`sessions.json`, opaque to everything outside the provider) and whether its process was
+running when the server went away (`Session::autostart`).
+- `assemble()` (providers with `Caps::resume` only): a stored id goes to
+  `resume_conversation`; when it returns `false` (or nothing is stored) `new_conversation` may
+  pick one. `Assembled::conversation` is what the launch uses; the server stores it at start.
+- The CLI's `SessionStart` hook may report a different id (`HookEvent::SessionStart {
+  conversation }`: after `/clear`, or `/resume` of another conversation inside the TUI); the
+  server stores that one, so the next start continues what the user saw last.
+- `autostart` is set when a resumable session starts, cleared by `session.stop` (the user) and
+  when the process exits by itself (`Exited`); a server shutdown (close dialog, stop server,
+  crash) keeps it. When a user context opens (first client after a server start) the server
+  restarts those sessions (`session.autostart` audit record); a failed start clears the mark.
+- Claude: `resume_conversation` checks for the transcript first: `--resume` with an unknown id
+  ends the CLI. Ids from hooks are used only if they are UUIDs.
+- (v 2.1.330) A server started from a Claude Code tool shell (an agent that builds and runs
+  ide) inherits that Claude Code's session markers (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_CHILD_SESSION`, messaging socket, ...). A session's `claude` started with them
+  runs as a child session and writes no transcript (`projects/<cwd>/` stayed empty, `/resume`
+  listed nothing). Claude's `begin()` removes them (`LaunchPlan::remove_env` ->
+  `LaunchSpec::env_remove`, applied by the runner before `env`); user settings such as
+  `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_USE_BEDROCK` are kept.
 
 ### Declarative providers
 `<data>/providers/*.toml`, sample [`docs/providers/example.toml`](providers/example.toml):

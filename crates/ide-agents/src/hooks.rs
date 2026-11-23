@@ -18,8 +18,9 @@ use crate::Support;
 /// What the CLI reported, normalized.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookEvent {
-    /// The CLI started (or resumed / cleared) its conversation.
-    SessionStart,
+    /// The CLI started (or resumed / cleared) its conversation; `conversation` is the CLI's id
+    /// of it, if reported (stored on the session, resumed on the next start).
+    SessionStart { conversation: Option<String> },
     /// The user's prompt was submitted: a turn started.
     PromptSubmitted,
     /// The turn finished.
