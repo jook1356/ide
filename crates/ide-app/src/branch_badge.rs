@@ -235,7 +235,12 @@ impl App {
                 }
             },
         };
-        let pill = container(text(label).size(10).color(color))
+        let pill = container(
+            text(label)
+                .size(10)
+                .color(color)
+                .wrapping(text::Wrapping::None),
+        )
             .padding([1, 6])
             .style(move |_| container::Style {
                 background: Some(Color { a: 0.14, ..color }.into()),

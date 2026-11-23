@@ -33,7 +33,6 @@ const I_RESTART: &str = "↻";
 const I_EDIT: &str = "✎";
 const I_DELETE: &str = "✕";
 const I_DOT: &str = "●";
-const I_RING: &str = "○";
 
 /// Icon and colour of a provider (from the server's provider list).
 pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
@@ -45,16 +44,6 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
             }),
         ),
         None => ("●".into(), style::DIM),
-    }
-}
-
-fn status_glyph(state: RunState) -> (&'static str, Color) {
-    match state {
-        RunState::Stopped => (I_RING, style::FAINT),
-        RunState::Starting => (I_DOT, style::AMBER),
-        RunState::Running => (I_DOT, style::GREEN),
-        RunState::Exited(_) => (I_DOT, style::FAINT),
-        RunState::Failed => (I_DOT, style::RED),
     }
 }
 
@@ -829,12 +818,20 @@ impl App {
         let s = &live.info;
         let selected = self.selected.as_deref() == Some(s.id.as_str());
         let (glyph, gcolor) = provider_glyph(self, &s.provider);
-        let (dot, dcolor) = status_glyph(live.state);
 
-        let subtitle = if !s.term_title.is_empty() {
-            s.term_title.clone()
-        } else {
+        // The terminal title, unless it only repeats the session title (Claude Code gets the
+        // title as its session name and shows it back, after a status mark such as ✳ or a
+        // spinner).
+        let repeats = |t: &str| {
+            let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+            t == s.title.trim()
+        };
+        let subtitle = if s.term_title.is_empty() {
             i18n::status_label(live.state)
+        } else if repeats(&s.term_title) {
+            String::new()
+        } else {
+            s.term_title.clone()
         };
         let title = text(s.title.as_str())
             .color(if s.archived { style::DIM } else { style::TEXT })
@@ -855,8 +852,12 @@ impl App {
             Some(_) if !subtitle.is_empty() => format!("· {subtitle}"),
             _ => subtitle,
         };
-        // The branch badge (변경 없음, 커밋 있음, ...) sits right after the subtitle (provider name).
+        // Desk's order: the branch badge (변경 없음, 커밋 있음, ...) first, never wrapped; the
+        // phase and the text take what is left (cut with …).
         let mut sub = Row::<El<'a>>::new().spacing(4).align_y(Alignment::Center);
+        if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
+            sub = sub.push(b);
+        }
         if let Some((label, color)) = phase {
             sub = sub.push(
                 text(label)
@@ -866,41 +867,23 @@ impl App {
                     .boxed(),
             );
         }
-        let mut sub = sub.push(
+        let sub = sub.push(
             text(subtitle)
                 .size(11)
                 .color(style::DIM)
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End)
+                .width(Fill)
                 .boxed(),
         );
-        if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
-            sub = sub.push(b);
-        }
         // Desk: a pinned row shows a filled pin before the rest.
         let mut content = row![].spacing(6).align_y(Alignment::Center);
         if s.pinned {
             content = content.push(icons::icon(Icon::PinFilled, 12.0, style::ACCENT_TEXT));
         }
-        // The session holding a shared folder's write access (docs/session-family.md).
-        let title: El<'a> = if s.writer {
-            row![
-                title,
-                tip(
-                    text("✎").size(12).color(style::ACCENT_TEXT).boxed(),
-                    tr::family_writer()
-                ),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .boxed()
-        } else {
-            title.boxed()
-        };
         let mut content = content
             .push(text(glyph).size(14).color(gcolor).width(18).boxed())
-            .push(column![title, sub].width(Fill).boxed())
-            .push(text(dot).size(10).color(dcolor).boxed());
+            .push(column![title, sub].width(Fill).boxed());
         // Add child / pin / delete take room inside the row (pushing the title) only while
         // hovered.
         if self.session_hover.as_deref() == Some(s.id.as_str()) {
