@@ -216,6 +216,52 @@ async fn families() {
     .await;
     assert!(delivered, "the child's first prompt was delivered");
 
+    // The shared folder's write lease: the parent holds it; the shared child's edits inside
+    // the folder are refused until it asks for the access (the parent's shell is not working).
+    let edit_in = |root: &str| ide_proto::AgentHookEvent::PreEdit {
+        tool: "Write".into(),
+        paths: vec![Path::new(root).join("x.txt").display().to_string()],
+    };
+    let writer = |id: &str| ctx.agent_hook(id, ide_proto::AgentHookEvent::SessionStart);
+    assert_eq!(writer(&p.id), None);
+    assert_eq!(ctx.agent_hook(&p.id, edit_in(&p.root)), None, "the owner writes");
+    let refused = ctx.agent_hook(&s.id, edit_in(&p.root)).expect("refused");
+    assert!(refused.contains("ide_request_write_access"), "{refused}");
+    let outside = std::env::temp_dir().join("elsewhere.txt").display().to_string();
+    let elsewhere = ide_proto::AgentHookEvent::PreEdit {
+        tool: "Write".into(),
+        paths: vec![outside],
+    };
+    assert_eq!(ctx.agent_hook(&s.id, elsewhere), None, "edits outside the folder are not guarded");
+    assert_eq!(ctx.agent_hook(&a.id, edit_in(&a.root)), None, "a separate child has its own folder");
+    let is_writer = async |id: &str| c.sessions().await.unwrap().into_iter().find(|x| x.id == id).unwrap().writer;
+    assert!(is_writer(&p.id).await && !is_writer(&s.id).await);
+    let (mux_s, mut rx_s) = agent(&server, &s.id).await;
+    // An edit hook means the parent's turn runs: it ends before the child asks.
+    ctx.agent_hook(&p.id, ide_proto::AgentHookEvent::Stopped);
+    let (bad, v) = tool(&mux_s, &mut rx_s, 20, "ide_request_write_access", serde_json::json!({})).await;
+    assert!(!bad && v["result"].as_str().unwrap().starts_with("granted"), "{v}");
+    assert_eq!(ctx.agent_hook(&s.id, edit_in(&p.root)), None);
+    assert!(ctx.agent_hook(&p.id, edit_in(&p.root)).is_some(), "now the owner waits");
+    assert!(is_writer(&s.id).await && !is_writer(&p.id).await);
+    let (bad, v) = tool(&mux_s, &mut rx_s, 21, "ide_release_write_access", serde_json::json!({})).await;
+    assert!(!bad && v["result"].as_str().unwrap().starts_with("released"), "{v}");
+    assert_eq!(ctx.agent_hook(&p.id, edit_in(&p.root)), None);
+    // A busy holder keeps it.
+    ctx.agent_hook(&p.id, ide_proto::AgentHookEvent::Stopped);
+    let (bad, _) = tool(&mux_s, &mut rx_s, 22, "ide_request_write_access", serde_json::json!({})).await;
+    assert!(!bad);
+    ctx.agent_hook(&s.id, ide_proto::AgentHookEvent::PromptSubmitted);
+    let (bad, v) = tool(&mux, &mut rx, 23, "ide_request_write_access", serde_json::json!({})).await;
+    assert!(bad && v.as_str().unwrap().contains("is working"), "{v}");
+    ctx.agent_hook(&s.id, ide_proto::AgentHookEvent::Stopped);
+    let (bad, _) = tool(&mux, &mut rx, 24, "ide_request_write_access", serde_json::json!({})).await;
+    assert!(!bad, "the parent takes it back once the child is idle");
+    // A separate child's folder is not shared.
+    let (mux_a, mut rx_a) = agent(&server, &a.id).await;
+    let (bad, v) = tool(&mux_a, &mut rx_a, 25, "ide_request_write_access", serde_json::json!({})).await;
+    assert!(!bad && v["result"].as_str().unwrap().contains("not shared"), "{v}");
+
     // Children first, then the parent; a shared child's delete keeps the parent's folder.
     c.delete_session(&s.id, true).await.unwrap();
     assert!(pw.is_dir(), "the shared folder stays");

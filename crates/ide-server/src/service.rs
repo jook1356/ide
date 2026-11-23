@@ -508,6 +508,41 @@ impl UserCtx {
                     Err(e) => err(format!("merge failed: {e}")),
                 }
             }
+            crate::bridge::TOOL_REQUEST_WRITE | crate::bridge::TOOL_RELEASE_WRITE => {
+                if !self.shares_folder(&s) {
+                    return Some(ok(serde_json::json!({
+                        "result": "this folder is not shared: you may edit freely"
+                    })));
+                }
+                let owner = self.folder_owner(&s);
+                let holder = self.bridge.writer(owner.as_str());
+                if tool == crate::bridge::TOOL_RELEASE_WRITE {
+                    if holder != s.id.as_str() {
+                        return Some(ok(serde_json::json!({ "result": "you do not hold it" })));
+                    }
+                    self.bridge.set_writer(owner.as_str(), owner.as_str());
+                    self.notify(Notify::SessionsChanged);
+                    return Some(ok(serde_json::json!({ "result": "released to the folder's owner" })));
+                }
+                if holder == s.id.as_str() {
+                    return Some(ok(serde_json::json!({ "result": "you already hold it" })));
+                }
+                let busy = self.existing_host(&holder).is_some_and(|h| h.is_running())
+                    && matches!(
+                        self.bridge.activity(&holder),
+                        ide_proto::AgentActivity::Working | ide_proto::AgentActivity::NeedsInput
+                    );
+                if busy {
+                    return Some(err(format!(
+                        "session `{holder}` holds the write access and is working: ask it with \
+                         ide_send_to_session, or try again when it is idle"
+                    )));
+                }
+                self.bridge.set_writer(owner.as_str(), s.id.as_str());
+                self.audit("agent.write_access", &format!("{} from {holder}", s.id));
+                self.notify(Notify::SessionsChanged);
+                ok(serde_json::json!({ "result": "granted: you may edit files in the shared folder" }))
+            }
             TOOL_SYNC_PARENT => {
                 if s.parent.is_none() {
                     return Some(err("this session has no parent".into()));
@@ -585,7 +620,71 @@ impl UserCtx {
         if let Some(a) = crate::bridge::activity_after(&event) {
             self.set_activity(session, a);
         }
-        None
+        match &event {
+            ide_proto::AgentHookEvent::PreEdit { paths, .. } => self.edit_refusal(session, paths),
+            _ => None,
+        }
+    }
+
+    /// The session whose folder `s` works in (a shared child's owner, else itself).
+    pub(crate) fn folder_owner(&self, s: &Session) -> SessionId {
+        let sessions = self.sessions.lock().unwrap();
+        let mut cur = s.clone();
+        for _ in 0..=ide_core::family::MAX_DEPTH {
+            if !cur.shared {
+                break;
+            }
+            match cur.parent.as_ref().and_then(|p| sessions.get(p)) {
+                Some(p) => cur = p.clone(),
+                None => break,
+            }
+        }
+        cur.id
+    }
+
+    /// `s` works in a folder another session shares.
+    pub(crate) fn shares_folder(&self, s: &Session) -> bool {
+        s.is_workspace()
+            && self
+                .sessions
+                .lock()
+                .unwrap()
+                .list()
+                .iter()
+                .any(|x| x.id != s.id && ide_core::same_path(&x.root, &s.root))
+    }
+
+    /// The write lease of shared folders: an edit inside a shared folder by a session that does
+    /// not hold its write access is refused (`Some(reason)` for the agent).
+    fn edit_refusal(&self, session: &str, paths: &[String]) -> Option<String> {
+        let s = self.resolve_session(session).ok()?;
+        if !self.shares_folder(&s) {
+            return None;
+        }
+        let owner = self.folder_owner(&s);
+        let holder = self.bridge.writer(owner.as_str());
+        if holder == s.id.as_str() {
+            return None;
+        }
+        let inside = paths.is_empty()
+            || paths.iter().any(|p| {
+                let p = std::path::Path::new(p);
+                !p.is_absolute() || p.starts_with(&s.root)
+            });
+        if !inside {
+            return None;
+        }
+        let title = self
+            .resolve_session(&holder)
+            .map(|h| h.title)
+            .unwrap_or_default();
+        self.audit("agent.edit_refused", &format!("{session} holder={holder}"));
+        Some(format!(
+            "This folder is shared with other sessions and session \"{title}\" ({holder}) holds \
+             its write access. Ask for it with ide_request_write_access (granted when that \
+             session is not working), coordinate with ide_send_to_session, or do the work in a \
+             separate child session (ide_create_child_session)."
+        ))
     }
 
     fn set_activity(&self, session: &str, a: ide_proto::AgentActivity) {
@@ -880,6 +979,8 @@ impl UserCtx {
             },
             parent: s.parent.as_ref().map(|p| p.to_string()),
             shared: s.shared,
+            writer: self.shares_folder(s)
+                && self.bridge.writer(self.folder_owner(s).as_str()) == s.id.as_str(),
         }
     }
 

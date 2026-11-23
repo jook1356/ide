@@ -77,7 +77,21 @@ provider's prompt input), never through tests (no prompts to real CLIs).
 in with `session.send_prompt`'s input rules when the target is not working, not waiting for the
 user and its TUI is at its input (retried every screen tick, 0.7 s).
 
-## Later
+## Write lease of a shared folder
 
-- The shared workspace's write lease (hooks refuse edits of non-holders).
+A folder shared by a parent and its shared children has one writer at a time (the folder's
+owner, i.e. the parent, by default; `SessionInfo.writer`, ✎ in the list).
+
+- Enforced by hooks: a `PreToolUse` file edit (`AgentHookEvent::PreEdit`) by a member that does
+  not hold the access, of a path inside the folder (or without a path), is refused with a reason
+  that names the holder and the ways out. Edits outside the folder and separate children are not
+  guarded. Shell commands are not guarded (hooks cannot tell what a command writes); the
+  guidance asks members not to write through the shell without the access.
+- `ide_request_write_access`: granted at once when the holder is not working (not Working /
+  NeedsInput, or not running), else refused; `ide_release_write_access`: back to the owner. A
+  deleted holder hands it back too. In memory: a daemon restart gives it back to the owners.
+- Codex: its hooks are not registered yet (`docs/agent-bridge.md`), so its edits are not refused;
+  it gets the same guidance.
+
+## Later
 - Reading a related session's conversation (provider transcripts).

@@ -650,6 +650,7 @@ child-repos-label = Repositories (the parent’s)
 child-create = Create
 child-merge = Merge into the parent
 child-sync = Get the parent’s changes
+family-writer = Holds the write access of the shared folder
 family-fold = Fold child sessions
 family-unfold = Unfold child sessions
 merge-nothing = Nothing to merge.

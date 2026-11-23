@@ -44,10 +44,21 @@ pub const TOOL_CREATE_CHILD: &str = "ide_create_child_session";
 pub const TOOL_SEND: &str = "ide_send_to_session";
 pub const TOOL_MERGE_CHILD: &str = "ide_merge_child";
 pub const TOOL_SYNC_PARENT: &str = "ide_sync_from_parent";
+pub const TOOL_REQUEST_WRITE: &str = "ide_request_write_access";
+pub const TOOL_RELEASE_WRITE: &str = "ide_release_write_access";
 
 /// A tool of the session family.
 pub fn is_family_tool(tool: &str) -> bool {
-    [TOOL_LIST_RELATED, TOOL_CREATE_CHILD, TOOL_SEND, TOOL_MERGE_CHILD, TOOL_SYNC_PARENT].contains(&tool)
+    [
+        TOOL_LIST_RELATED,
+        TOOL_CREATE_CHILD,
+        TOOL_SEND,
+        TOOL_MERGE_CHILD,
+        TOOL_SYNC_PARENT,
+        TOOL_REQUEST_WRITE,
+        TOOL_RELEASE_WRITE,
+    ]
+    .contains(&tool)
 }
 
 /// How long a tool carried out by an app may take.
@@ -83,6 +94,9 @@ pub struct BridgeState {
     activity: Mutex<HashMap<String, AgentActivity>>,
     /// Sessions whose CLI reported through hooks since its process started.
     hooked: Mutex<std::collections::HashSet<String>>,
+    /// Write access of shared folders: folder owner's session id -> the holder's (missing =
+    /// the owner).
+    leases: Mutex<HashMap<String, String>>,
     /// Messages waiting to be typed into a session (`ide_send_to_session`, first prompts).
     queue: Mutex<HashMap<String, std::collections::VecDeque<String>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
@@ -142,6 +156,26 @@ impl BridgeState {
     pub fn reset(&self, session: &str) {
         self.activity.lock().unwrap().remove(session);
         self.hooked.lock().unwrap().remove(session);
+    }
+
+    /// Who holds the write access of `owner`'s folder.
+    pub fn writer(&self, owner: &str) -> String {
+        self.leases
+            .lock()
+            .unwrap()
+            .get(owner)
+            .cloned()
+            .unwrap_or_else(|| owner.to_owned())
+    }
+
+    /// Give the write access of `owner`'s folder to `holder`.
+    pub fn set_writer(&self, owner: &str, holder: &str) {
+        let mut l = self.leases.lock().unwrap();
+        if holder == owner {
+            l.remove(owner);
+        } else {
+            l.insert(owner.to_owned(), holder.to_owned());
+        }
     }
 
     /// Queue a message for `session`.
@@ -209,6 +243,8 @@ impl BridgeState {
     /// Forget a session's token (deleted session).
     pub fn forget(&self, session: &str) {
         self.tokens.lock().unwrap().remove(session);
+        // A deleted holder hands the access back to the folder's owner.
+        self.leases.lock().unwrap().retain(|_, h| h != session);
         self.queue.lock().unwrap().remove(session);
         self.reset(session);
     }
@@ -322,6 +358,23 @@ pub fn tools() -> Vec<AgentTool> {
                 .into(),
             input_schema: r#"{"type":"object","properties":{"child":{"type":"string","description":"The child session's id."},"squash":{"type":"boolean"}},"required":["child"],"additionalProperties":false}"#
                 .into(),
+        },
+        AgentTool {
+            name: TOOL_REQUEST_WRITE.into(),
+            description: "In a folder shared with other sessions, only the session holding its \
+                          write access may edit files (edits of the others are refused). Ask \
+                          for it here: granted at once when the holder is not working, else \
+                          refused (ask the holder with ide_send_to_session, or work in a \
+                          separate child session)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#.into(),
+        },
+        AgentTool {
+            name: TOOL_RELEASE_WRITE.into(),
+            description: "Give the shared folder's write access back to the folder's owner \
+                          when you are done editing."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#.into(),
         },
         AgentTool {
             name: TOOL_SYNC_PARENT.into(),

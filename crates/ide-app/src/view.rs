@@ -882,6 +882,21 @@ impl App {
         if s.pinned {
             content = content.push(icons::icon(Icon::PinFilled, 12.0, style::ACCENT_TEXT));
         }
+        // The session holding a shared folder's write access (docs/session-family.md).
+        let title: El<'a> = if s.writer {
+            row![
+                title,
+                tip(
+                    text("✎").size(12).color(style::ACCENT_TEXT).boxed(),
+                    tr::family_writer()
+                ),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .boxed()
+        } else {
+            title.boxed()
+        };
         let mut content = content
             .push(text(glyph).size(14).color(gcolor).width(18).boxed())
             .push(column![title, sub].width(Fill).boxed())

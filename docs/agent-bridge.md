@@ -74,8 +74,8 @@ provider's file:
   the user typing in the terminal while NeedsInput -> Working (the answer). The app shows the
   phase on the session row and Desk's 새 답변 for a turn that ended while another session was
   shown (cleared when selected).
-- Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call. No rule refuses anything
-  yet; the shared workspace's write lease (parent / child sessions) is the first.
+- Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call: the shared folder's write
+  lease (`docs/session-family.md`) refuses edits of members that do not hold it.
 - Codex: not registered. Its docs (developers.openai.com/codex/hooks) give hooks only in
   `hooks.json` / `config.toml` files (system, `$CODEX_HOME`, project), not as a command-line
   override, and every non-managed hook needs trust review (`/hooks`, hash-based);

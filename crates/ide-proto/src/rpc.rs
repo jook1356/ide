@@ -243,6 +243,9 @@ pub struct SessionInfo {
     /// A child working in its parent's folder and worktrees.
     #[serde(default)]
     pub shared: bool,
+    /// Holds the write access of a folder other sessions share (`docs/session-family.md`).
+    #[serde(default)]
+    pub writer: bool,
 }
 
 /// What merging one repo of a session family did (`session.merge_child` / `sync_parent`).

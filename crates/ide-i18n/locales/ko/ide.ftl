@@ -565,6 +565,7 @@ child-repos-label = 레포 (부모의 레포)
 child-create = 만들기
 child-merge = 부모에 합치기
 child-sync = 부모 변경 가져오기
+family-writer = 공유 폴더의 쓰기 권한을 갖고 있어요
 family-fold = 하위 세션 접기
 family-unfold = 하위 세션 펼치기
 merge-nothing = 합칠 것이 없어요.

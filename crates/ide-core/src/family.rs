@@ -252,9 +252,11 @@ pub fn family_guidance(s: &Session, parent: Option<&Session>, kids: &[&Session])
     if let Some(p) = parent {
         if s.shared {
             t.push_str(&format!(
-                "You are a child session of \"{}\" (`{}`) and share its folder and worktrees: \
-                 the parent may be editing the same files. Prefer reading, reviewing and \
-                 planning; coordinate edits with the parent (`ide_send_to_session`).\n",
+                "You are a child session of \"{}\" (`{}`) and share its folder and worktrees. \
+                 Only the session holding the folder's write access may edit files (the \
+                 parent, unless it was handed over): ask for it with \
+                 `ide_request_write_access`, give it back with `ide_release_write_access`, and \
+                 prefer reading, reviewing and planning otherwise.\n",
                 p.title, p.id
             ));
         } else {
@@ -286,6 +288,13 @@ pub fn family_guidance(s: &Session, parent: Option<&Session>, kids: &[&Session])
             "Merge a finished child with `ide_merge_child`; on conflicts, read both sides \
              (`git diff`, the child's commits) and ask the child before resolving.\n",
         );
+        if kids.iter().any(|c| c.shared) {
+            t.push_str(
+                "You hold this folder's write access by default; a shared child that needs to \
+                 edit asks for it when you are idle. Take it back with \
+                 `ide_request_write_access`.\n",
+            );
+        }
     }
     Some(t)
 }
