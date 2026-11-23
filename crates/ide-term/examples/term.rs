@@ -7,7 +7,7 @@
 //! PTY, answers terminal queries with its own hidden Term, and streams (offset, bytes) chunks into
 //! the `TermModel`; the widget's `on_input`/`on_resize` messages go back to it.
 //!
-//! Test scripts: `IDE_TERM_SCRIPT=shell|flood|flood-warm|select|ime` drives everything in-app (bytes
+//! Test scripts: `IDE_TERM_SCRIPT=shell|bar|flood|flood-warm|select|ime` drives everything in-app (bytes
 //! written to the PTY, synthetic iced events injected into the widget through `TermModel::inject`, iced
 //! `window::screenshot` evidence). No OS input is used. Output goes to `IDE_TERM_EVIDENCE`
 //! (default `./evidence-term`): `<script>.log` and `<script>_<step>.png`. The flood script runs
@@ -163,6 +163,19 @@ fn script(mode: &str) -> Vec<Step> {
             Shot("06_background_session"),
             Switch(0),
             Wait(500),
+            Write("exit\r".into()),
+            WaitExit(5000),
+            Exit,
+        ],
+        // Foreground quads over a background run: a progress bar (`█` cells on a coloured track, as
+        // Claude Code's usage meter draws it) and underline / strike on a background.
+        "bar" => vec![
+            WaitText(">", 15000),
+            Write("cls\r".into()),
+            Wait(500),
+            Write("powershell -NoProfile -c \"$e=[char]27; $b=[string][char]0x2588; Write-Host ($e+'[38;5;75;48;5;239m'+($b*10)+(' '*30)+$e+'[0m 25% used'); Write-Host ($e+'[4;48;5;239munderline on bg'+$e+'[0m '+$e+'[9;48;5;239mstrike on bg'+$e+'[0m')\"\r".into()),
+            Wait(4000), // the echoed command already contains the marker text
+            Shot("01_bar"),
             Write("exit\r".into()),
             WaitExit(5000),
             Exit,
