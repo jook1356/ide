@@ -266,6 +266,29 @@ impl TermHost {
         self.end_tx.send_replace(end);
     }
 
+    /// The visible screen as text, one string per row (trailing blanks trimmed), for screen
+    /// rules (`ide_agents::screen`).
+    pub fn screen_text(&self) -> Vec<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::cell::Flags;
+        let core = self.core.lock().unwrap();
+        let grid = core.term.grid();
+        let (rows, cols) = (grid.screen_lines(), grid.columns());
+        (0..rows)
+            .map(|r| {
+                let row = &grid[Line(r as i32)];
+                let mut line: String = (0..cols)
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                    .map(|cell| cell.c)
+                    .collect();
+                line.truncate(line.trim_end().len());
+                line
+            })
+            .collect()
+    }
+
     /// Write to the process' input.
     pub fn write(&self, bytes: Vec<u8>) -> Result<(), ProtoError> {
         match self.input.lock().unwrap().as_ref() {

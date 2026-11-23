@@ -3,7 +3,7 @@
 //! which stays in the widget tree. Modal dialogs on top.
 
 use iced::widget::{
-    Column, button, center, checkbox, column, container, mouse_area, opaque, pick_list, popover,
+    Column, Row, button, center, checkbox, column, container, mouse_area, opaque, pick_list, popover,
     row, scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
@@ -841,16 +841,38 @@ impl App {
             .wrapping(text::Wrapping::None)
             .ellipsis(text::Ellipsis::End)
             .width(Fill);
+        // Desk's phase (답변 중 / 응답 필요 / 새 답변) leads the second line.
+        let phase = match s.activity {
+            ide_client::AgentActivity::Working => Some((tr::activity_working(), style::ACCENT_TEXT)),
+            ide_client::AgentActivity::NeedsInput => {
+                Some((tr::activity_needs_input(), style::AMBER))
+            }
+            _ if self.new_answers.contains(&s.id) => Some((tr::activity_new_answer(), style::GREEN)),
+            _ => None,
+        };
+        let subtitle = match phase {
+            Some(_) if !subtitle.is_empty() => format!("· {subtitle}"),
+            _ => subtitle,
+        };
         // The branch badge (변경 없음, 커밋 있음, ...) sits right after the subtitle (provider name).
-        let mut sub = row![
+        let mut sub = Row::<El<'a>>::new().spacing(4).align_y(Alignment::Center);
+        if let Some((label, color)) = phase {
+            sub = sub.push(
+                text(label)
+                    .size(11)
+                    .color(color)
+                    .wrapping(text::Wrapping::None)
+                    .boxed(),
+            );
+        }
+        let mut sub = sub.push(
             text(subtitle)
                 .size(11)
                 .color(style::DIM)
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End)
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
+                .boxed(),
+        );
         if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
             sub = sub.push(b);
         }

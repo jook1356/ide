@@ -393,6 +393,10 @@ async fn serve_agent(
         match req {
             Request::Ping => send(id, Ok(Response::Pong)),
             Request::AgentTools => send(id, Ok(Response::AgentTools(crate::bridge::tools()))),
+            Request::AgentHook { event } => {
+                let deny = ctx.agent_hook(&agent.session, event);
+                send(id, Ok(Response::AgentHookDecision(deny)));
+            }
             Request::AgentCall { tool, args } => {
                 let (ctx, mux, session) = (ctx.clone(), mux.clone(), agent.session.clone());
                 tokio::spawn(async move {

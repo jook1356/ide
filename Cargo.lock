@@ -1958,6 +1958,7 @@ name = "ide-agents"
 version = "0.1.0"
 dependencies = [
  "ide-core",
+ "regex",
  "serde",
  "serde_json",
  "toml",

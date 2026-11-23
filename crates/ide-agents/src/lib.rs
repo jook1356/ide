@@ -36,6 +36,8 @@ mod codex;
 pub mod declarative;
 mod detect;
 pub mod fallback;
+pub mod hooks;
+pub mod screen;
 mod plan;
 mod prompt;
 mod registry;
@@ -52,6 +54,7 @@ pub use claude::Claude;
 pub use codex::Codex;
 pub use declarative::{DeclarativeProvider, DeclarativeSpec};
 pub use detect::{Detection, parse_version, version_at_least};
+pub use hooks::{HookCaps, HookDecision, HookEvent, HookReply, HookTargets, ToolUse};
 pub use plan::LaunchPlan;
 pub use prompt::{
     PASTE_SUBMIT_DELAY_MS, PromptInput, PromptRefusal, PromptWrite, clean_prompt, prompt_writes,
@@ -155,10 +158,6 @@ pub enum AccountStatus {
     /// Not determinable (no status command, CLI missing, timeout, unexpected output).
     Unknown,
 }
-
-/// Where status hooks should report to (phase "hooks"; no provider uses it yet).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HookTargets {}
 
 /// An agent CLI. Every assembly step has a default (fallback) implementation; providers
 /// override what their CLI supports natively.
@@ -270,9 +269,28 @@ pub trait AgentProvider: Send + Sync {
         fallback::unsupported(plan, "instructions", usize::from(!text.is_empty()));
         Ok(())
     }
-    /// Status hooks. Default: nothing.
+    /// Hooks: register `hooks.program` with the CLI (`docs/agent-bridge.md`). Called only
+    /// with a program. Default: nothing.
     fn apply_hooks(&self, _plan: &mut LaunchPlan, _hooks: &HookTargets) -> Result<()> {
         Ok(())
+    }
+    /// What this provider's hooks can do. Default: nothing.
+    fn hook_caps(&self) -> HookCaps {
+        HookCaps::NONE
+    }
+    /// The CLI's hook input (`event`: the name [`AgentProvider::apply_hooks`] registered,
+    /// `input`: what the CLI wrote to stdin) as an event; `None` = not one the IDE uses.
+    fn parse_hook(&self, _event: &str, _input: &[u8]) -> Option<HookEvent> {
+        None
+    }
+    /// Rules that read what the CLI is doing from its terminal screen and title
+    /// ([`screen`]). Default: none.
+    fn screen_manifest(&self) -> Option<&'static screen::ScreenManifest> {
+        None
+    }
+    /// The CLI's hook output for a decision. Default: print nothing, exit 0 (no opinion).
+    fn hook_reply(&self, _event: &str, _decision: &HookDecision) -> HookReply {
+        HookReply::default()
     }
     /// Turn the plan into a spec: resolve the program, wrap batch files. Default:
     /// [`fallback::finish`].
@@ -349,6 +367,8 @@ pub struct Bridge {
     pub env: Vec<(String, String)>,
     /// Base instructions appended to the configuration's.
     pub instructions: String,
+    /// Where the CLI's hooks report to.
+    pub hooks: HookTargets,
 }
 
 /// Inputs of [`assemble`].
@@ -514,7 +534,9 @@ pub fn assemble(
     if !dirs.is_empty() {
         provider.apply_dirs(&mut plan, &dirs)?;
     }
-    provider.apply_hooks(&mut plan, &HookTargets::default())?;
+    if let Some(h) = input.bridge.as_ref().map(|b| &b.hooks).filter(|h| h.program.is_some()) {
+        provider.apply_hooks(&mut plan, h)?;
+    }
     plan.set_env("TERM", "xterm-256color");
     plan.set_env("COLORTERM", "truecolor");
     let notes = plan.notes.clone();

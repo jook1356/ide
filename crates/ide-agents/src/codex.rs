@@ -24,6 +24,10 @@ use crate::{
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Codex;
 
+/// Codex's screen rules (`screens/codex.toml`): its status without hooks.
+static SCREEN: std::sync::LazyLock<crate::screen::ScreenManifest> =
+    std::sync::LazyLock::new(|| crate::screen::bundled(include_str!("../screens/codex.toml")));
+
 /// The `-c` override value for one MCP server (an inline TOML table).
 pub(crate) fn mcp_override(s: &McpServer) -> String {
     let args: Vec<String> = s.args.iter().map(|a| toml_string(a)).collect();
@@ -88,6 +92,10 @@ impl AgentProvider for Codex {
                 instructions: Support::Native,
             },
         }
+    }
+
+    fn screen_manifest(&self) -> Option<&'static crate::screen::ScreenManifest> {
+        Some(&SCREEN)
     }
 
     fn account_env(&self, acct: &AccountDir) -> Vec<(String, String)> {

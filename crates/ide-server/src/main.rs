@@ -1,6 +1,6 @@
 //! `ide-server --stdio` | `--stdio --no-daemon` | `--daemon [--idle-exit SECS]` | `mcp` |
-//! `--version`. `mcp` is the agent bridge's MCP server (run by a session's agent CLI, see
-//! `docs/agent-bridge.md`).
+//! `hook --provider <id> <event>` | `--version`. `mcp` is the agent bridge's MCP server and
+//! `hook` its hook program, both run by a session's agent CLI (`docs/agent-bridge.md`).
 //! The daemon exits after `--idle-exit` / `IDE_SERVER_IDLE_EXIT_SECS` seconds (default 600,
 //! 0 = never) without clients and running sessions.
 
@@ -13,7 +13,7 @@ use ide_server::{Server, ServerConfig, daemon, socket_name};
 const DEFAULT_IDLE_EXIT_SECS: u64 = 600;
 
 const USAGE: &str =
-    "usage: ide-server --stdio [--no-daemon] | --daemon [--idle-exit SECS] | mcp | --version";
+    "usage: ide-server --stdio [--no-daemon] | --daemon [--idle-exit SECS] | mcp | hook --provider ID EVENT | --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +37,15 @@ fn main() {
         };
         std::process::exit(code);
     }
+    if args.first().map(String::as_str) == Some("hook") {
+        // stdout is the agent CLI's hook output: nothing else may be printed.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let code = rt.block_on(ide_server::bridge::run_hook(&args));
+        std::process::exit(code);
+    }
     // Daemon idle exit (no clients, no running sessions): default 10 minutes; 0 = never.
     let idle_exit = args
         .iter()
@@ -58,7 +67,8 @@ fn main() {
         Mode::Relay
     } else {
         eprintln!("{USAGE}");
-        std::process::exit(2);
+        // Not 2: agent CLIs read exit code 2 of a hook program as "block".
+        std::process::exit(1);
     };
 
     let mut config = match ServerConfig::from_env() {

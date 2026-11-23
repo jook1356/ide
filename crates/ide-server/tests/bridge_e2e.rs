@@ -421,9 +421,153 @@ async fn mcp_stdio_against_a_daemon() {
         .unwrap();
     assert!(status.success());
 
+    // `ide-server hook` (the real binary) as Claude Code runs it: stdin = the hook input,
+    // the session env; no opinion = nothing printed, exit 0; the daemon notifies the activity.
+    let mut events = c.events().unwrap();
+    let hook = async |event: &str, input: &str, with_env: bool| -> (i32, String) {
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.args(["hook", "--provider", "claude", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        for k in [SESSION_ENV, TOKEN_ENV, SOCKET_ENV] {
+            cmd.env_remove(k);
+        }
+        if with_env {
+            for (k, v) in ide["env"].as_object().unwrap() {
+                cmd.env(k, v.as_str().unwrap());
+            }
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).await.unwrap();
+        drop(stdin);
+        let out = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+            .await
+            .expect("hook exits in time")
+            .unwrap();
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    assert_eq!(hook("UserPromptSubmit", r#"{"prompt":"x"}"#, true).await, (0, String::new()));
+    let working = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::Activity { session, activity }) = e
+                && session == s.id
+            {
+                return activity;
+            }
+        }
+        panic!("events ended");
+    })
+    .await
+    .expect("activity notified");
+    assert_eq!(working, ide_proto::AgentActivity::Working);
+    let edit = r#"{"tool_name":"Write","tool_input":{"file_path":"C:/x/a.rs"}}"#;
+    assert_eq!(hook("PreToolUse", edit, true).await, (0, String::new()));
+    // Without the session env (or with nothing the IDE uses): no opinion, never an error.
+    assert_eq!(hook("PreToolUse", edit, false).await, (0, String::new()));
+    assert_eq!(hook("Nope", "{}", true).await, (0, String::new()));
+    // Usage errors exit 1, not 2 (a CLI reads a hook's exit code 2 as "block").
+    let usage = tokio::process::Command::new(exe).output().await.unwrap();
+    assert_eq!(usage.status.code(), Some(1));
+
     c.delete_session(&s.id, true).await.unwrap();
     c.shutdown_server().await.unwrap();
     drop(c);
     let _ = wait_until(Duration::from_secs(10), || !data.join("ide-server.pid").exists()).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hooks through an agent connection: the activity follows the turn (prompt -> working,
+/// permission prompt -> needs input, the user's answer typed in the terminal -> working,
+/// stop -> idle), apps are notified, `SessionInfo.activity` shows it while the process runs;
+/// no rule refuses anything yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hooks_drive_the_activity() {
+    use ide_proto::{AgentActivity, AgentHookEvent};
+    let dir = tmp_dir("bridge-hooks");
+    let repo = dir.join("repo");
+    init_repo(&repo);
+    let server = bridged_server(&dir.join("data"), &dir.join("bin"));
+    let app = Client::connect(memory(&server), opts()).await.unwrap();
+    let mut events = app.events().unwrap();
+    let repo_id = app
+        .register_repo(&repo.display().to_string())
+        .await
+        .unwrap()
+        .id;
+    let mut ns = new_session("shell", Some(repo_id), Vec::new());
+    ns.start = true;
+    let (s, _) = app.create_session(ns).await.unwrap();
+    let ctx = server.authorize(server.user()).unwrap();
+    let token = env_of(
+        &ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap().env,
+        TOKEN_ENV,
+    )
+    .unwrap();
+    let (mux, mut rx, r) = agent_conn(&server, &s.id, &token).await;
+    assert!(r.is_ok());
+    let mut id = 10;
+    let mut hook = async |event: AgentHookEvent| {
+        id += 1;
+        match agent_req(&mux, &mut rx, id, Request::AgentHook { event }).await {
+            Ok(Response::AgentHookDecision(d)) => d,
+            other => panic!("{other:?}"),
+        }
+    };
+    let mut next_activity = async || {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(e) = events.next().await {
+                if let ClientEvent::Notify(Notify::Activity { activity, .. }) = e {
+                    return activity;
+                }
+            }
+            panic!("events ended");
+        })
+        .await
+        .expect("activity notified")
+    };
+    let info = async || {
+        app.sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == s.id)
+            .unwrap()
+            .activity
+    };
+
+    assert_eq!(info().await, AgentActivity::Unknown, "nothing reported yet");
+    assert_eq!(hook(AgentHookEvent::SessionStart).await, None);
+    assert_eq!(next_activity().await, AgentActivity::Idle);
+    assert_eq!(hook(AgentHookEvent::PromptSubmitted).await, None);
+    assert_eq!(next_activity().await, AgentActivity::Working);
+    let edit = AgentHookEvent::PreEdit {
+        tool: "Write".into(),
+        paths: vec!["a.rs".into()],
+    };
+    assert_eq!(hook(edit).await, None, "no rule refuses edits yet");
+    assert_eq!(hook(AgentHookEvent::NeedsInput { permission: true }).await, None);
+    assert_eq!(next_activity().await, AgentActivity::NeedsInput);
+    assert_eq!(info().await, AgentActivity::NeedsInput);
+    // The user answers in the terminal.
+    app.write(&s.id, b"1".to_vec()).await.unwrap();
+    assert_eq!(next_activity().await, AgentActivity::Working);
+    assert_eq!(hook(AgentHookEvent::Stopped).await, None);
+    assert_eq!(next_activity().await, AgentActivity::Idle);
+    assert_eq!(info().await, AgentActivity::Idle);
+    // A stopped process reports nothing.
+    app.stop_session(&s.id).await.unwrap();
+    let mut unknown = false;
+    for _ in 0..50 {
+        if info().await == AgentActivity::Unknown {
+            unknown = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(unknown, "activity resets when the process ends");
+    app.delete_session(&s.id, true).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

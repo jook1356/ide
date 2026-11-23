@@ -19,9 +19,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ide_agents::Bridge;
+use ide_agents::{Bridge, HookDecision, HookEvent, HookTargets, ToolUse};
 use ide_core::McpServer;
-use ide_proto::{AgentTool, AgentToolResult, Notify, ProtoError, SessionInfo};
+use ide_proto::{
+    AgentActivity, AgentHookEvent, AgentTool, AgentToolResult, Notify, ProtoError, SessionInfo,
+};
 use tokio::sync::oneshot;
 
 /// Name of the bridge's MCP server (reserved: a configuration server of this name is left out).
@@ -63,6 +65,10 @@ pub struct BridgeConfig {
 pub struct BridgeState {
     config: Option<BridgeConfig>,
     tokens: Mutex<HashMap<String, String>>,
+    /// What each session's agent is doing (hooks / screen), until its process ends.
+    activity: Mutex<HashMap<String, AgentActivity>>,
+    /// Sessions whose CLI reported through hooks since its process started.
+    hooked: Mutex<std::collections::HashSet<String>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     seq: AtomicU64,
 }
@@ -100,7 +106,47 @@ impl BridgeState {
             },
             env,
             instructions: INSTRUCTIONS.to_owned(),
+            hooks: HookTargets {
+                program: Some(c.exe.clone()),
+            },
         })
+    }
+
+    /// A session's agent activity.
+    pub fn activity(&self, session: &str) -> AgentActivity {
+        self.activity
+            .lock()
+            .unwrap()
+            .get(session)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// A new process of `session`: nothing reported yet.
+    pub fn reset(&self, session: &str) {
+        self.activity.lock().unwrap().remove(session);
+        self.hooked.lock().unwrap().remove(session);
+    }
+
+    /// A hook of `session`'s CLI arrived.
+    pub fn mark_hooked(&self, session: &str) {
+        self.hooked.lock().unwrap().insert(session.to_owned());
+    }
+
+    /// The activity the screen shows, to apply or not: without hooks the screen decides;
+    /// with hooks it only adds a visible dialog (hooks report it late or not at all) and its
+    /// end.
+    pub fn screen_says(&self, session: &str, seen: AgentActivity) -> bool {
+        !self.hooked.lock().unwrap().contains(session)
+            || seen == AgentActivity::NeedsInput
+            || self.activity(session) == AgentActivity::NeedsInput
+    }
+
+    /// Set a session's agent activity; `true` when it changed.
+    pub fn set_activity(&self, session: &str, a: AgentActivity) -> bool {
+        let mut m = self.activity.lock().unwrap();
+        let old = m.insert(session.to_owned(), a).unwrap_or_default();
+        old != a
     }
 
     /// Does `token` belong to `session`?
@@ -117,6 +163,7 @@ impl BridgeState {
     /// Forget a session's token (deleted session).
     pub fn forget(&self, session: &str) {
         self.tokens.lock().unwrap().remove(session);
+        self.reset(session);
     }
 
     /// Register an app call: its request id and the receiver of the answer.
@@ -136,6 +183,33 @@ impl BridgeState {
         if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
             let _ = tx.send(result);
         }
+    }
+}
+
+/// The activity a hook event means (`None`: unchanged).
+pub fn activity_after(event: &AgentHookEvent) -> Option<AgentActivity> {
+    Some(match event {
+        AgentHookEvent::SessionStart | AgentHookEvent::Stopped => AgentActivity::Idle,
+        AgentHookEvent::PromptSubmitted
+        | AgentHookEvent::PreEdit { .. }
+        | AgentHookEvent::PreShell { .. }
+        | AgentHookEvent::PreTool { .. } => AgentActivity::Working,
+        AgentHookEvent::NeedsInput { .. } => AgentActivity::NeedsInput,
+    })
+}
+
+/// A provider's hook event on the wire.
+pub fn wire_event(e: HookEvent) -> AgentHookEvent {
+    match e {
+        HookEvent::SessionStart => AgentHookEvent::SessionStart,
+        HookEvent::PromptSubmitted => AgentHookEvent::PromptSubmitted,
+        HookEvent::Stopped => AgentHookEvent::Stopped,
+        HookEvent::NeedsInput { permission } => AgentHookEvent::NeedsInput { permission },
+        HookEvent::PreTool(ToolUse::Edit { tool, paths }) => AgentHookEvent::PreEdit { tool, paths },
+        HookEvent::PreTool(ToolUse::Shell { tool, command }) => {
+            AgentHookEvent::PreShell { tool, command }
+        }
+        HookEvent::PreTool(ToolUse::Other { tool }) => AgentHookEvent::PreTool { tool },
     }
 }
 
@@ -260,6 +334,108 @@ pub async fn call(
         }
         _ => err(format!("unknown tool `{tool}`")),
     }
+}
+
+// ---------------------------------------------------------------- screen detection
+
+/// How often running agent sessions' screens are read (only those whose output or title
+/// changed since).
+const SCREEN_TICK: Duration = Duration::from_millis(700);
+
+/// Read the screens of a user's running agent sessions in the background (until the user
+/// context goes away). Needs a tokio runtime (none: nothing is watched).
+pub fn spawn_screen_watch(ctx: std::sync::Weak<crate::service::UserCtx>) {
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    rt.spawn(async move {
+        let mut seen: HashMap<String, (u64, String)> = HashMap::new();
+        let mut tick = tokio::time::interval(SCREEN_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let Some(c) = ctx.upgrade() else {
+                return;
+            };
+            seen = tokio::task::spawn_blocking(move || {
+                c.screen_tick(&mut seen);
+                seen
+            })
+            .await
+            .unwrap_or_default();
+        }
+    });
+}
+
+/// A screen state as an activity.
+pub fn screen_activity(s: ide_agents::screen::ScreenState) -> AgentActivity {
+    match s {
+        ide_agents::screen::ScreenState::Idle => AgentActivity::Idle,
+        ide_agents::screen::ScreenState::Working => AgentActivity::Working,
+        ide_agents::screen::ScreenState::Blocked => AgentActivity::NeedsInput,
+    }
+}
+
+// ---------------------------------------------------------------- `ide-server hook`
+
+/// How long a hook waits for the daemon (a hook blocks the agent's tool call).
+const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `ide-server hook --provider <id> <event>`: run by the agent CLI for one hook (stdin: the
+/// CLI's hook input). The provider turns it into an event, the daemon answers, the provider
+/// turns the answer into the CLI's output. Any failure is "no opinion" (exit 0, nothing
+/// printed): a hook must never break the agent. Returns the exit code.
+pub async fn run_hook(args: &[String]) -> i32 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let provider_id = args
+        .iter()
+        .position(|a| a == "--provider")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_default();
+    let event = args
+        .iter()
+        .skip(1)
+        .rfind(|a| !a.starts_with("--") && **a != provider_id)
+        .cloned()
+        .unwrap_or_default();
+    let mut input = Vec::new();
+    let _ = tokio::io::stdin()
+        .take(4 * 1024 * 1024)
+        .read_to_end(&mut input)
+        .await;
+    let providers = match ide_core::Paths::from_env() {
+        Ok(p) => ide_agents::Providers::load(&p.providers_dir()),
+        Err(_) => ide_agents::Providers::load(std::path::Path::new("")),
+    };
+    let Some(provider) = providers.get(&provider_id) else {
+        return 0;
+    };
+    let Some(ev) = provider.parse_hook(&event, &input) else {
+        return 0;
+    };
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let decision = match (var(SESSION_ENV), var(TOKEN_ENV), var(SOCKET_ENV)) {
+        (Some(s), Some(t), Some(k)) => {
+            let ask = async {
+                let link = AgentLink::connect(&k, &s, &t).await;
+                link.hook(wire_event(ev)).await
+            };
+            match tokio::time::timeout(HOOK_TIMEOUT, ask).await {
+                Ok(Ok(Some(reason))) => HookDecision::Deny { reason },
+                _ => HookDecision::NoOpinion,
+            }
+        }
+        _ => HookDecision::NoOpinion,
+    };
+    let reply = provider.hook_reply(&event, &decision);
+    if !reply.stdout.is_empty() {
+        let mut out = tokio::io::stdout();
+        let _ = out.write_all(reply.stdout.as_bytes()).await;
+        let _ = out.flush().await;
+    }
+    reply.exit_code
 }
 
 // ---------------------------------------------------------------- `ide-server mcp`
@@ -444,6 +620,13 @@ impl AgentLink {
         }
     }
 
+    async fn hook(&self, event: AgentHookEvent) -> Result<Option<String>, String> {
+        match self.request(ide_proto::Request::AgentHook { event }).await? {
+            ide_proto::Response::AgentHookDecision(d) => Ok(d),
+            _ => Err("unexpected answer".into()),
+        }
+    }
+
     async fn call(&self, tool: &str, args: &str) -> Result<AgentToolResult, String> {
         let req = ide_proto::Request::AgentCall {
             tool: tool.to_owned(),
@@ -453,5 +636,56 @@ impl AgentLink {
             ide_proto::Response::AgentResult(r) => Ok(r),
             _ => Err("unexpected answer".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_agents::AgentProvider;
+
+    /// The screen as the server's terminal model sees it (escape sequences applied), read by
+    /// the providers' screen rules.
+    #[test]
+    fn screen_of_a_terminal() {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let host = crate::pty::TermHost::new("s", 60, 8, tx);
+        // A Claude-like screen: a status line drawn in colour, the input box below.
+        host.ingest(
+            "\u{1b}[2J\u{1b}[H⏺ Reading files\r\n\r\n\u{1b}[38;5;174m✻\u{1b}[0m Thinking… (3s · esc to interrupt)\r\n\r\n────────\r\n> \r\n────────".as_bytes(),
+        );
+        let lines = host.screen_text();
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[2], "✻ Thinking… (3s · esc to interrupt)");
+        assert_eq!(lines[7], "");
+        let claude = ide_agents::Claude;
+        let m = claude.screen_manifest().unwrap();
+        let input = ide_agents::screen::ScreenInput { lines: &lines, title: "" };
+        assert_eq!(
+            m.detect(&input).map(screen_activity),
+            Some(AgentActivity::Working)
+        );
+        // The turn ends: the status line is replaced.
+        host.ingest("\u{1b}[3;1H\u{1b}[2K⏺ Done.".as_bytes());
+        let lines = host.screen_text();
+        let input = ide_agents::screen::ScreenInput { lines: &lines, title: "✳ Claude Code" };
+        assert_eq!(m.detect(&input).map(screen_activity), Some(AgentActivity::Idle));
+    }
+
+    /// Without hooks the screen decides; with hooks it only adds a visible dialog and its end.
+    #[test]
+    fn hooks_and_screen() {
+        let b = BridgeState::new(None);
+        assert!(b.screen_says("s", AgentActivity::Working));
+        assert!(b.screen_says("s", AgentActivity::Idle));
+        b.mark_hooked("s");
+        b.set_activity("s", AgentActivity::Working);
+        assert!(!b.screen_says("s", AgentActivity::Idle), "hooks keep the turn");
+        assert!(b.screen_says("s", AgentActivity::NeedsInput), "a dialog shows at once");
+        b.set_activity("s", AgentActivity::NeedsInput);
+        assert!(b.screen_says("s", AgentActivity::Working), "the dialog went away");
+        b.reset("s");
+        assert_eq!(b.activity("s"), AgentActivity::Unknown);
+        assert!(b.screen_says("s", AgentActivity::Idle), "a new process: no hooks yet");
     }
 }

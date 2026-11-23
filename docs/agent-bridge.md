@@ -1,8 +1,9 @@
 # Agent bridge
 
-Status: foundation (protocol 12). Sessions' agents reach the IDE through an MCP server;
-two tools prove both paths (daemon-answered and app-answered). Features built on it (child /
-parent sessions, task queue, terminals, browser, previews, mods) and status hooks come later.
+Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
+tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
+hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
+workspace's write lease, task queue, terminals, browser, previews, mods) come next.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why
@@ -49,7 +50,73 @@ agent CLI (claude / codex, in the session's PTY)
   result}`. No app connected = an immediate error for the agent. An app refuses tools it does
   not know, so an older app does not leave the agent waiting.
 
-## Protocol (12)
+## Hooks (protocol 13)
+
+The IDE learns what an agent is doing (and can refuse a tool call) from the CLI's hooks.
+Provider-agnostic types are in `ide-agents/src/hooks.rs`; everything CLI-specific stays in the
+provider's file:
+
+| Step | Trait method | Claude Code (`claude.rs`) |
+|---|---|---|
+| register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<ide-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
+| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (`Edit|Write|MultiEdit|NotebookEdit`) -> PreTool(Edit {paths}) |
+| answer | `hook_reply(event, decision) -> HookReply` | deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":...}}`, exit 0; no opinion: nothing, exit 0 (never "allow": that would skip Claude's permission prompts) (d) |
+| caps | `hook_caps()` | status, edit guard: native; shell guard: unsupported |
+
+- The hook program is `ide-server hook --provider <id> <event>`: the provider parses stdin,
+  the event goes to the daemon over an agent connection (`agent.hook`, env of the agent
+  process: same session id / token / socket as the MCP server), the provider prints the answer.
+  It never breaks the agent: no env, no daemon, a timeout (5 s) or an unknown event = no
+  opinion. `ide-server` usage errors exit 1, never 2 (CLIs read 2 as "block").
+- Activity (`SessionInfo.activity`, `Notify::Activity`; also set by screen detection): Unknown until the process reports
+  (reset on every start, Unknown while not running); SessionStart / Stop -> Idle; prompt / tool
+  use -> Working (Desk's 답변 중); permission prompt / question -> NeedsInput (Desk's 응답 필요);
+  the user typing in the terminal while NeedsInput -> Working (the answer). The app shows the
+  phase on the session row and Desk's 새 답변 for a turn that ended while another session was
+  shown (cleared when selected).
+- Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call. No rule refuses anything
+  yet; the shared workspace's write lease (parent / child sessions) is the first.
+- Codex: not registered. Its docs (developers.openai.com/codex/hooks) give hooks only in
+  `hooks.json` / `config.toml` files (system, `$CODEX_HOME`, project), not as a command-line
+  override, and every non-managed hook needs trust review (`/hooks`, hash-based);
+  `--dangerously-bypass-hook-trust` would also run the user's own untrusted hooks. Writing the
+  account home is not allowed. To do: verify whether `-c hooks...` works and how trust applies
+  to it, then implement `apply_hooks` / `parse_hook` (`apply_patch` is the edit tool) /
+  `hook_reply` in `codex.rs`.
+- (a) Not yet checked against the real Claude Code: that `--settings` hooks load next to the
+  user's settings, that the exec form (`args`) runs on the supported versions, and that the
+  events fire as documented. Opening a session in the app shows it (SessionStart -> the row's
+  activity; a prompt -> 답변 중).
+
+## Screen detection
+
+What a CLI is doing, read from its terminal (`ide-agents/src/screen.rs`), like herdr's agent
+detection (github.com/herdrdev/herdr, Apache-2.0: the approach, the rule model and the UI texts
+the rules look for; code and rules are this project's). It needs no hooks, so it gives Codex
+its status, and it shows Claude Code's permission prompts at once (its `Notification` hook
+fires only after a few seconds).
+
+- Rules per provider: `crates/ide-agents/screens/<provider>.toml`, returned by
+  `AgentProvider::screen_manifest()`. A rule has a state (`idle` / `working` / `blocked` /
+  `unknown` = keep the previous state), a priority (the highest matching rule wins, the
+  earlier one on a tie), a region and gates: `contains` (all needles, case-insensitive),
+  `regex` (all match the region), `line_regex` (each matches some line), `all` / `any` /
+  `not` of nested gates. No match: idle.
+- Regions: `title` (OSC title), `whole`, `bottom(N)`, `bottom_non_empty(N)`,
+  `top_non_empty(N)`, `after_last_prompt`, `before_current_prompt`, `without_current_prompt`
+  (a prompt line is `>` / `›` alone or followed by a space, also in a `│` box, or `❯`; the
+  current one has no response line `•` / `■` / `✗` / `✓` / `⏺` after it), `after_last_rule`
+  (`───`), `prompt_box` (between the second rule from the bottom and the next),
+  `above_prompt_box`.
+- Server: `TermHost::screen_text()` (the server-side terminal model's visible rows);
+  `bridge::spawn_screen_watch` reads running agent sessions (not login terminals) every
+  0.7 s when their output or title changed. Without hooks since the process started, the
+  screen decides the activity; with hooks it only adds a visible dialog (-> NeedsInput) and
+  its end (NeedsInput -> what the screen shows).
+- (a) The rules are not yet checked against the real CLIs' screens here (tests use screens
+  written after the UI texts); a CLI update can change them: fix the manifest.
+
+## Protocol (12, 13)
 
 | Request / event | Who | Payload |
 |---|---|---|
@@ -58,6 +125,8 @@ agent CLI (claude / codex, in the session's PTY)
 | `agent.call` | agent | `{tool, args (JSON text)}` -> `AgentResult {text, is_error}` |
 | `Notify::AgentRequest` | daemon -> apps | `{request, session, tool, args}` |
 | `agent.reply` | app | `{request, result: Ok(text) / Err(text)}` -> `Unit` |
+| `agent.hook` (13) | agent | `{event: AgentHookEvent}` -> `AgentHookDecision(Option<reason>)` |
+| `Notify::Activity` (13) | daemon -> apps | `{session, activity}`; also `SessionInfo.activity` |
 
 Tool names shared by server and app: `ide_proto::AGENT_TOOL_*`.
 
@@ -91,9 +160,7 @@ this session; use the `ide_*` tools instead of guessing.
 
 ## Next
 
-1. Hooks (`HookTargets`): Claude `--settings` hooks / Codex hooks -> `ide-server hook <event>`
-   over the same agent connection: busy ("답변 중") / idle / needs-input state, write guard,
-   approvals.
+1. Codex hooks (see Hooks); the write lease of shared workspaces on `agent.hook`.
 2. Pushing to the agent: queued prompts / steering through the PTY (`session.send_prompt`).
 3. Feature tools on this transport: related sessions (create child, send, read), run_task,
    terminals, browser (CEF), previews, mods.

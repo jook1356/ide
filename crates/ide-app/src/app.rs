@@ -13,7 +13,7 @@ use std::time::Duration;
 use iced::widget::{operation, text_editor};
 use iced::{Event, Point, Size, Subscription, Task, event, keyboard, mouse, window};
 use ide_client::{
-    AccountInfo, AccountState, BrowseListing, Client, ClientEvent, ClientOptions,
+    AccountInfo, AccountState, AgentActivity, BrowseListing, Client, ClientEvent, ClientOptions,
     ConfigurationInfo, DefTarget, FileMatch, LocalChild, McpServerInfo, NewSession, Notify,
     ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, SessionInfo, SessionKind, SessionState,
     Ssh, Switchable, Transport, Welcome,
@@ -1106,6 +1106,9 @@ pub struct App {
     pub rail_hover: bool,
     /// The session row under the pointer (shows its pin / delete buttons).
     pub session_hover: Option<String>,
+    /// Sessions whose agent finished a turn while another session was shown (Desk's 새 답변);
+    /// cleared when the session is selected.
+    pub new_answers: std::collections::HashSet<String>,
     /// Problems outside a modal (failed RPCs, ...), shown in the sidebar.
     pub banner: Option<String>,
     pub script: Option<Script>,
@@ -1235,6 +1238,7 @@ impl App {
             settings,
             rail_hover: false,
             session_hover: None,
+            new_answers: Default::default(),
             banner: None,
             script: None,
             modal_web_unsafe: false,
@@ -1706,6 +1710,17 @@ impl App {
                 }
                 self.ensure_attached()
             }
+            Notify::Activity { session, activity } => {
+                let shown = self.selected.as_deref() == Some(session.as_str());
+                if let Some(l) = self.live_mut(&session) {
+                    let was = l.info.activity;
+                    l.info.activity = activity;
+                    if was == AgentActivity::Working && activity == AgentActivity::Idle && !shown {
+                        self.new_answers.insert(session);
+                    }
+                }
+                Task::none()
+            }
             Notify::AgentRequest {
                 request,
                 session,
@@ -1888,6 +1903,7 @@ impl App {
                 if self.live(&id).is_none() {
                     return Task::none();
                 }
+                self.new_answers.remove(&id);
                 self.selected = Some(id);
                 self.save_ui();
                 self.after_select()

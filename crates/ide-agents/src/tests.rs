@@ -802,3 +802,93 @@ fn real_cli_checks() {
     assert!(help.contains("--no-daemon"));
     assert_eq!(Codex.account_status(&acct, &real), AccountStatus::LoggedOut);
 }
+
+/// Claude hooks: `--settings <scratch>/settings.json` with exec-form entries (the hook program
+/// plus `hook --provider claude <event>`), only with a hook program; hook input -> events;
+/// a deny -> Claude's PreToolUse JSON, anything else -> silent exit 0.
+#[test]
+fn claude_hooks() {
+    let f = fixture("agents-claude-hooks");
+    let cfg = Configuration::empty("plain", "Plain");
+    let program = f.bin.join(exe("ide-server"));
+    let mut inp = input(&f, None, &cfg);
+    let out = assemble(&Claude, &inp, &f.env).unwrap();
+    assert!(!out.spec.args.contains(&"--settings".to_owned()), "no bridge, no hooks");
+    inp.bridge = Some(Bridge {
+        server: McpServer {
+            name: "ide".into(),
+            command: s(&program),
+            args: vec!["mcp".into()],
+            env: Vec::new(),
+        },
+        env: vec![("IDE_SESSION_ID".into(), "s1".into())],
+        instructions: "## ide".into(),
+        hooks: HookTargets {
+            program: Some(program.clone()),
+        },
+    });
+    let out = assemble(&Claude, &inp, &f.env).unwrap();
+    let settings = inp.ctx.scratch.join("settings.json");
+    let i = out.spec.args.iter().position(|a| a == "--settings").expect("--settings");
+    assert_eq!(out.spec.args[i + 1], s(&settings));
+    assert_eq!(env_of(&out.spec, "IDE_SESSION_ID"), Some("s1"));
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    for event in ["SessionStart", "UserPromptSubmit", "Stop", "Notification", "PreToolUse"] {
+        let h = &v["hooks"][event][0]["hooks"][0];
+        assert_eq!(h["type"], "command", "{event}");
+        assert_eq!(h["command"], s(&program), "{event}");
+        assert_eq!(h["args"], serde_json::json!(["hook", "--provider", "claude", event]));
+    }
+    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+    assert_eq!(
+        v["hooks"]["Notification"][0]["matcher"],
+        "permission_prompt|elicitation_dialog"
+    );
+
+    let p = |e: &str, j: serde_json::Value| Claude.parse_hook(e, j.to_string().as_bytes());
+    assert_eq!(p("Stop", serde_json::json!({})), Some(HookEvent::Stopped));
+    assert_eq!(p("UserPromptSubmit", serde_json::json!({"prompt": "x"})), Some(HookEvent::PromptSubmitted));
+    assert_eq!(
+        p("Notification", serde_json::json!({"notification_type": "permission_prompt"})),
+        Some(HookEvent::NeedsInput { permission: true })
+    );
+    assert_eq!(p("Notification", serde_json::json!({"notification_type": "idle_prompt"})), None);
+    assert_eq!(
+        p("PreToolUse", serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "C:/w/a.rs"}})),
+        Some(HookEvent::PreTool(ToolUse::Edit {
+            tool: "Write".into(),
+            paths: vec!["C:/w/a.rs".into()]
+        }))
+    );
+    assert_eq!(
+        p("PreToolUse", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}})),
+        Some(HookEvent::PreTool(ToolUse::Shell {
+            tool: "Bash".into(),
+            command: "ls".into()
+        }))
+    );
+    assert_eq!(Claude.parse_hook("Stop", b"not json"), Some(HookEvent::Stopped));
+    assert_eq!(Claude.parse_hook("Nope", b"{}"), None);
+
+    assert_eq!(Claude.hook_reply("PreToolUse", &HookDecision::NoOpinion), HookReply::default());
+    let r = Claude.hook_reply(
+        "PreToolUse",
+        &HookDecision::Deny {
+            reason: "P writes here".into(),
+        },
+    );
+    assert_eq!(r.exit_code, 0);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "P writes here");
+    // A deny only means something for PreToolUse.
+    assert_eq!(Claude.hook_reply("Stop", &HookDecision::Deny { reason: "x".into() }), HookReply::default());
+    // Codex: no hooks yet (registration unverified), so nothing is registered.
+    assert_eq!(Codex.hook_caps(), HookCaps::NONE);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert!(
+        !out.spec.args.iter().any(|a| a.starts_with("hooks") || a == "--settings"),
+        "{:?}",
+        out.spec.args
+    );
+}

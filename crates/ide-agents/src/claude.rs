@@ -10,15 +10,34 @@
 //! | Instructions | `<scratch>/instructions.md` via `--append-system-prompt-file` |
 //! | Outside dirs | `--add-dir` (legacy worktrees, the repositories' git dirs) |
 //! | Session name | `-n <title>` |
+//! | Hooks | `<scratch>/settings.json` (`{"hooks": ...}`) via `--settings`; exec form (`command` = the hook program, `args`), no shell (d) |
 
 use ide_core::{McpServer, Result};
 
 use crate::detect::{PROBE_TIMEOUT, run_capture};
 use crate::fallback::{add_dirs, copy_skills, mcp_json};
 use crate::{
-    AccountDir, AccountStatus, AgentProvider, Caps, HostEnv, LaunchPlan, ModeSupport, RootPrepared,
-    SessionContext, Skill, Support,
+    AccountDir, AccountStatus, AgentProvider, Caps, HookCaps, HookDecision, HookEvent, HookReply,
+    HookTargets, HostEnv, LaunchPlan, ModeSupport, RootPrepared, SessionContext, Skill, Support,
+    ToolUse,
 };
+
+/// Claude Code's screen rules (`screens/claude.toml`).
+static SCREEN: std::sync::LazyLock<crate::screen::ScreenManifest> =
+    std::sync::LazyLock::new(|| crate::screen::bundled(include_str!("../screens/claude.toml")));
+
+/// Claude Code's file-editing tools (their `tool_input.file_path` / `notebook_path`).
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// The hook program entry of one event (exec form: no shell, so paths need no quoting (d)).
+fn hook_entry(program: &str, event: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "command",
+        "command": program,
+        "args": HookTargets::args("claude", event),
+        "timeout": 10,
+    })
+}
 
 /// Claude Code.
 #[derive(Debug, Default, Clone, Copy)]
@@ -64,7 +83,7 @@ impl AgentProvider for Claude {
             skills: Support::Native,
             mcp: Support::Native,
             instructions: Support::Native,
-            hooks: Support::Unsupported,
+            hooks: Support::Native,
             resume: false,
             session_name: true,
             original_repo: ModeSupport {
@@ -169,5 +188,100 @@ impl AgentProvider for Claude {
         plan.arg("--append-system-prompt-file")
             .arg(path.display().to_string());
         Ok(())
+    }
+
+    fn screen_manifest(&self) -> Option<&'static crate::screen::ScreenManifest> {
+        Some(&SCREEN)
+    }
+
+    fn hook_caps(&self) -> HookCaps {
+        HookCaps {
+            status: Support::Native,
+            guard_edits: Support::Native,
+            guard_shell: Support::Unsupported,
+        }
+    }
+
+    fn apply_hooks(&self, plan: &mut LaunchPlan, hooks: &HookTargets) -> Result<()> {
+        let Some(program) = &hooks.program else {
+            return Ok(());
+        };
+        let p = program.display().to_string();
+        let group = |event: &str, matcher: Option<&str>| {
+            let mut g = serde_json::json!({ "hooks": [hook_entry(&p, event)] });
+            if let Some(m) = matcher {
+                g["matcher"] = m.into();
+            }
+            serde_json::json!([g])
+        };
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": group("SessionStart", None),
+                "UserPromptSubmit": group("UserPromptSubmit", None),
+                "Stop": group("Stop", None),
+                // Waiting for the user: a tool permission or an MCP question (not idle_prompt:
+                // the turn already ended with Stop).
+                "Notification": group("Notification", Some("permission_prompt|elicitation_dialog")),
+                // File edits only (every hook run is a process start; shells are not guarded).
+                "PreToolUse": group("PreToolUse", Some(&EDIT_TOOLS.join("|"))),
+            }
+        });
+        let json = serde_json::to_string_pretty(&settings).expect("json");
+        let path = plan.write_file("settings.json", json.as_bytes())?;
+        plan.arg("--settings").arg(path.display().to_string());
+        Ok(())
+    }
+
+    fn parse_hook(&self, event: &str, input: &[u8]) -> Option<HookEvent> {
+        let v: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+        match event {
+            "SessionStart" => Some(HookEvent::SessionStart),
+            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
+            "Stop" => Some(HookEvent::Stopped),
+            "Notification" => match s("notification_type") {
+                "permission_prompt" => Some(HookEvent::NeedsInput { permission: true }),
+                "elicitation_dialog" => Some(HookEvent::NeedsInput { permission: false }),
+                _ => None,
+            },
+            "PreToolUse" => {
+                let tool = s("tool_name").to_owned();
+                let ti = v.get("tool_input").cloned().unwrap_or_default();
+                let field = |k: &str| ti.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+                Some(HookEvent::PreTool(if EDIT_TOOLS.contains(&tool.as_str()) {
+                    let paths = field("file_path")
+                        .or_else(|| field("notebook_path"))
+                        .into_iter()
+                        .collect();
+                    ToolUse::Edit { tool, paths }
+                } else if tool == "Bash" {
+                    ToolUse::Shell {
+                        tool,
+                        command: field("command").unwrap_or_default(),
+                    }
+                } else {
+                    ToolUse::Other { tool }
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    fn hook_reply(&self, event: &str, decision: &HookDecision) -> HookReply {
+        match (event, decision) {
+            ("PreToolUse", HookDecision::Deny { reason }) => HookReply {
+                stdout: serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                })
+                .to_string(),
+                exit_code: 0,
+            },
+            // Silent exit 0: no decision, the normal permission flow continues (d).
+            _ => HookReply::default(),
+        }
     }
 }

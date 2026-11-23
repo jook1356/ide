@@ -161,6 +161,7 @@ impl Server {
             self.config.bridge.clone(),
         )?);
         users.insert(user.id.clone(), ctx.clone());
+        crate::bridge::spawn_screen_watch(Arc::downgrade(&ctx));
         Ok(ctx)
     }
 
@@ -384,6 +385,72 @@ impl UserCtx {
         let apps = self.subscriber_count() > 0;
         let info = || self.resolve_session(session).map(|s| self.info(&s));
         crate::bridge::call(&self.bridge, session, tool, args, info, apps, |n| self.notify(n)).await
+    }
+
+    /// Agent bridge: a hook of `session`'s agent CLI. Updates the session's activity; the
+    /// answer is `Some(reason)` to refuse a tool call (no rule refuses anything yet).
+    pub fn agent_hook(&self, session: &str, event: ide_proto::AgentHookEvent) -> Option<String> {
+        self.bridge.mark_hooked(session);
+        if let Some(a) = crate::bridge::activity_after(&event) {
+            self.set_activity(session, a);
+        }
+        None
+    }
+
+    fn set_activity(&self, session: &str, a: ide_proto::AgentActivity) {
+        if self.bridge.set_activity(session, a) {
+            self.notify(Notify::Activity {
+                session: session.to_owned(),
+                activity: a,
+            });
+        }
+    }
+
+    /// Screen detection (`bridge::spawn_screen_watch`): read the screens of running agent
+    /// sessions whose provider has screen rules and update their activity. `seen` keeps each
+    /// session's last (output end, title): unchanged screens are not read again.
+    pub fn screen_tick(&self, seen: &mut HashMap<String, (u64, String)>) {
+        let hosts: Vec<(String, Arc<TermHost>)> = self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.state() == SessionState::Running)
+            .map(|(k, h)| (k.clone(), h.clone()))
+            .collect();
+        seen.retain(|k, _| hosts.iter().any(|(id, _)| id == k));
+        for (id, host) in hosts {
+            let key = (host.end(), host.title());
+            if seen.get(&id) == Some(&key) {
+                continue;
+            }
+            seen.insert(id.clone(), key.clone());
+            let Ok(s) = self.resolve_session(&id) else {
+                continue;
+            };
+            if s.kind != SessionKind::Agent {
+                continue;
+            }
+            let Some(m) = self
+                .providers
+                .get(&s.provider)
+                .and_then(|p| p.screen_manifest())
+            else {
+                continue;
+            };
+            let lines = host.screen_text();
+            let input = ide_agents::screen::ScreenInput {
+                lines: &lines,
+                title: &key.1,
+            };
+            let Some(state) = m.detect(&input) else {
+                continue;
+            };
+            let a = crate::bridge::screen_activity(state);
+            if self.bridge.screen_says(&id, a) {
+                self.set_activity(&id, a);
+            }
+        }
     }
 
     /// Agent bridge: an app's answer to a `Notify::AgentRequest`.
@@ -613,6 +680,10 @@ impl UserCtx {
             term_end: host.as_ref().map_or(0, |h| h.end()),
             pinned: s.pinned,
             archived: s.archived,
+            activity: match host.as_ref().map(|h| h.state()) {
+                Some(SessionState::Running) => self.bridge.activity(s.id.as_str()),
+                _ => ide_proto::AgentActivity::Unknown,
+            },
         }
     }
 
@@ -1206,7 +1277,12 @@ impl UserCtx {
         let s = self.resolve_session(session)?;
         self.existing_host(s.id.as_str())
             .ok_or_else(|| ProtoError::new("session-not-running").arg("id", session))?
-            .write(bytes)
+            .write(bytes)?;
+        // The user answered a permission prompt / question: the turn goes on.
+        if self.bridge.activity(s.id.as_str()) == ide_proto::AgentActivity::NeedsInput {
+            self.set_activity(s.id.as_str(), ide_proto::AgentActivity::Working);
+        }
+        Ok(())
     }
 
     /// Terminal resize.
@@ -1858,6 +1934,8 @@ impl UserCtx {
             self.after_exit(s);
         }
         let spec = self.launch_spec(s)?;
+        // A new process: nothing reported yet.
+        self.bridge.reset(s.id.as_str());
         let host = self.host(s);
         host.start(|cols, rows| {
             self.runner

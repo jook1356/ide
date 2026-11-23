@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 12;
+pub const PROTO_VERSION: u32 = 13;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -61,6 +61,35 @@ pub const AGENT_TOOL_SESSION: &str = "ide_session";
 /// Agent bridge tool carried out by an app (`Notify::AgentRequest`): show `{"message"}` in the
 /// session's panel.
 pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
+
+/// What a session's agent is doing, from its CLI's hooks (`Unknown`: no hooks, or not
+/// reported yet since the process started).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentActivity {
+    #[default]
+    Unknown,
+    /// Waiting for a prompt.
+    Idle,
+    /// Working on a turn (Desk's 답변 중).
+    Working,
+    /// Waiting for the user: a permission or a question (Desk's 응답 필요).
+    NeedsInput,
+}
+
+/// A hook of a session's agent CLI, normalized (`ide-server hook`; see `docs/agent-bridge.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentHookEvent {
+    SessionStart,
+    PromptSubmitted,
+    Stopped,
+    NeedsInput { permission: bool },
+    /// About to edit these files.
+    PreEdit { tool: String, paths: Vec<String> },
+    /// About to run a shell command.
+    PreShell { tool: String, command: String },
+    /// About to use another tool.
+    PreTool { tool: String },
+}
 
 /// A tool the agent bridge offers (MCP `tools/list`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +234,9 @@ pub struct SessionInfo {
     /// In its group's 보관함 (archived).
     #[serde(default)]
     pub archived: bool,
+    /// What its agent is doing (hooks).
+    #[serde(default)]
+    pub activity: AgentActivity,
 }
 
 /// `session.create` arguments.
@@ -482,6 +514,10 @@ pub enum Request {
     AgentCall {
         tool: String,
         args: String,
+    },
+    /// Agent bridge connections only: a hook of the agent CLI (`AgentHookDecision`).
+    AgentHook {
+        event: AgentHookEvent,
     },
     /// App connections: the answer to a `Notify::AgentRequest` (`Ok`: the tool's text).
     AgentReply {
@@ -1004,6 +1040,7 @@ impl Request {
             Request::AgentTools => "agent.tools",
             Request::AgentCall { .. } => "agent.call",
             Request::AgentReply { .. } => "agent.reply",
+            Request::AgentHook { .. } => "agent.hook",
             Request::TermAttach { .. } => "term.attach",
             Request::TermDetach { .. } => "term.detach",
             Request::TermWrite { .. } => "term.write",
@@ -1199,12 +1236,19 @@ pub enum Response {
     Prompt(String),
     AgentTools(Vec<AgentTool>),
     AgentResult(AgentToolResult),
+    /// `None`: no opinion; `Some(reason)`: refuse the tool call.
+    AgentHookDecision(Option<String>),
 }
 
 /// Server -> client event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub enum Notify {
+    /// A session's agent activity changed (hooks).
+    Activity {
+        session: String,
+        activity: AgentActivity,
+    },
     /// A session's agent called a bridge tool the app carries out (e.g. showing something):
     /// answer with `Request::AgentReply` (the first answer wins; unanswered calls time out).
     AgentRequest {
