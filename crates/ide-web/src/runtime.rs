@@ -36,6 +36,12 @@ wrap_app! {
                 command_line.append_switch(Some(&switch.into()));
             }
         }
+
+        fn on_register_custom_schemes(&self, registrar: Option<&mut cef::SchemeRegistrar>) {
+            if let Some(r) = registrar {
+                crate::scheme::on_register(r);
+            }
+        }
     }
 }
 
@@ -167,6 +173,7 @@ pub fn initialize(settings: RuntimeSettings) -> Result<WebRuntime> {
             root.display()
         );
     }
+    crate::scheme::install_factories();
     tracing::info!(force_cpu, root = %root.display(), "CEF initialised");
     Ok(WebRuntime {
         inner: std::sync::Arc::new(RuntimeInner {

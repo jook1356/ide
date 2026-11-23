@@ -34,6 +34,7 @@ mod gpu;
 mod input;
 mod owner;
 mod runtime;
+mod scheme;
 pub mod testing;
 mod view;
 mod widget;
@@ -41,6 +42,10 @@ mod widget;
 pub use caption::enable_snap_layout;
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use owner::{set_window_owner, window_owner};
+pub use scheme::{
+    Responder, SchemeHandler, SchemeRequest, SchemeResponse, register_custom_schemes,
+    set_scheme_handler,
+};
 pub use runtime::{RuntimeSettings, WebRuntime, initialize, maybe_run_subprocess};
 pub use view::{FrameDump, RenderStats, ViewOptions, WebView};
 pub use widget::{DEFAULT_DIM, WebViewWidget, web_view};
