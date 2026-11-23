@@ -4,7 +4,7 @@
 //! the agent's terminal, keyed by the terminal's id (`<session>:t<n>`). They show in 열린
 //! 항목's Terminal group and in the detail pane; the server keeps them while it runs.
 
-use iced::widget::{Column, button, column, container, popover, row, space, text, text_input};
+use iced::widget::{Column, button, column, container, row, space, text, text_input};
 use iced::{Alignment, Color, Element, Fill, Task, Widget as _};
 use ide_client::{PortInfo, ProtoError, SessionState, ShellInfo, TermChunk, UserTerm};
 use ide_term::{TermModel, TerminalView};
@@ -755,11 +755,12 @@ impl App {
                 .style(style::modal_card)
         });
         tip(
-            popover(trigger, popup)
-                .position(iced::widget::popover::Position::Bottom)
-                .gap(4)
-                .on_close(Message::UTerm(UTermMsg::NewMenu(false)))
-                .boxed(),
+            crate::side_popover::side_popover(
+                trigger,
+                popup,
+                4.0,
+                Message::UTerm(UTermMsg::NewMenu(false)),
+            ),
             tr::new_item_tip(),
         )
     }

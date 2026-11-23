@@ -39,6 +39,7 @@ mod script;
 mod scripts_view;
 mod session_menu;
 mod session_sort;
+mod side_popover;
 mod profiles_view;
 mod skills_ui;
 mod style;
