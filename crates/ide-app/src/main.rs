@@ -85,6 +85,8 @@ fn main() -> anyhow::Result<()> {
     let remote = std::env::var(REMOTE_ENV).ok().filter(|v| !v.is_empty());
     let runtime = ide_web::initialize(ide_web::RuntimeSettings::new(data.join("web")))?;
 
+    // The UI font (Settings) is iced's default font, fixed for the run.
+    ide_views::theme::init_ui_font(&ui_state::UiState::load(&data).fonts.ui);
     let rt = runtime.clone();
     let boot_data = data.clone();
     // A daemon (several windows): the app window is opened by `App::boot`, the detail area's
@@ -99,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     .subscription(app::App::subscription)
     .settings(iced::Settings {
         backend: ide_web::backend(),
+        font: ide_views::theme::ui(),
         ..iced::Settings::default()
     })
     .run();

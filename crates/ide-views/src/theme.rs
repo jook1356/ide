@@ -2,6 +2,7 @@
 //! `style.rs`; diff / syntax colours follow Hermes Desk's GitHub-dark look).
 
 use iced::widget::{button, container, text_input};
+use iced::font::Family;
 use iced::{Background, Border, Color, Font, Shadow, Theme, color};
 
 pub const BG: Color = color!(0x1e1f22);
@@ -68,15 +69,83 @@ pub const FILLER_BG: Color = over(color!(0x808080), 0.05, BG);
 pub const STAT_ADD: Color = color!(0x38d9a9);
 pub const STAT_DEL: Color = color!(0xff8787);
 
-pub const MONO: Font = Font::MONOSPACE;
-pub const BOLD: Font = Font {
-    weight: iced::font::Weight::Bold,
-    ..Font::DEFAULT
-};
-pub const MONO_BOLD: Font = Font {
-    weight: iced::font::Weight::Semibold,
-    ..Font::MONOSPACE
-};
+// ------------------------------------------------------------------ fonts
+//
+// The user picks the UI font and the code font in Settings (`ide-app`'s `ui.json`); empty = the
+// defaults below. The UI font is read once at start (iced's renderer default font, used by every
+// text without `.font(..)`, is fixed when the app starts); the code font applies at once.
+
+/// Default code family. On Windows this names Consolas instead of the generic monospace family:
+/// with the generic family, cosmic-text falls back for Hangul to the first *monospaced* face that
+/// has it (GungsuhChe / BatangChe / GulimChe, serif-looking bitmap-era faces), while a named family
+/// uses the script fallback (Malgun Gothic), the same face the UI text and the terminal use.
+#[cfg(windows)]
+const DEFAULT_CODE_FAMILY: Family = Family::Name("Consolas");
+#[cfg(not(windows))]
+const DEFAULT_CODE_FAMILY: Family = Family::Monospace;
+
+static UI_FAMILY: std::sync::OnceLock<Family> = std::sync::OnceLock::new();
+static CODE_FAMILY: std::sync::RwLock<Family> = std::sync::RwLock::new(DEFAULT_CODE_FAMILY);
+
+/// A font family by name; blank = `default`.
+fn family_or(name: &str, default: Family) -> Family {
+    match name.trim() {
+        "" => default,
+        n => Family::name(n),
+    }
+}
+
+/// Set the UI font family (blank = the system default). Takes effect only before the first call
+/// of [`ui`] / [`bold`]: call it once at start.
+pub fn init_ui_font(name: &str) {
+    let _ = UI_FAMILY.set(family_or(name, Font::DEFAULT.family));
+}
+
+/// Set the code font family (blank = the default); later [`mono`] / [`mono_bold`] calls use it.
+pub fn set_code_font(name: &str) {
+    let f = family_or(name, DEFAULT_CODE_FAMILY);
+    *CODE_FAMILY.write().unwrap_or_else(|e| e.into_inner()) = f;
+}
+
+fn ui_family() -> Family {
+    *UI_FAMILY.get_or_init(|| Font::DEFAULT.family)
+}
+
+fn code_family() -> Family {
+    *CODE_FAMILY.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// UI text font (the app's default font).
+pub fn ui() -> Font {
+    Font {
+        family: ui_family(),
+        ..Font::DEFAULT
+    }
+}
+
+/// Bold UI text.
+pub fn bold() -> Font {
+    Font {
+        weight: iced::font::Weight::Bold,
+        ..ui()
+    }
+}
+
+/// Code font (editor, diff, hashes, paths).
+pub fn mono() -> Font {
+    Font {
+        family: code_family(),
+        ..Font::MONOSPACE
+    }
+}
+
+/// Semibold code font.
+pub fn mono_bold() -> Font {
+    Font {
+        weight: iced::font::Weight::Semibold,
+        ..mono()
+    }
+}
 
 /// Code text size and line height (px) in the editor and the diff.
 pub const CODE_SIZE: f32 = 12.0;

@@ -503,7 +503,7 @@ fn rail_row<'a>(
 fn group_heading<'a>(label: String, count: usize, color: Color, wide: bool) -> El<'a> {
     let inner: El<'a> = if wide {
         row![
-            text(label).size(11).font(style::BOLD).color(style::DIM),
+            text(label).size(11).font(style::bold()).color(style::DIM),
             text(count.to_string()).size(11).color(style::FAINT),
         ]
         .spacing(6)

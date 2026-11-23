@@ -532,7 +532,7 @@ impl CodeView {
             .size(12)
             .padding([4, 8])
             .width(Length::Fixed(200.0))
-            .font(theme::MONO)
+            .font(theme::mono())
             .style(theme::input);
         let has = !f.matches.is_empty();
         let card = container(
@@ -574,7 +574,7 @@ impl CodeView {
             .size(12)
             .padding([4, 8])
             .width(Length::Fixed(220.0))
-            .font(theme::MONO)
+            .font(theme::mono())
             .style(theme::input);
         let card = container(input).padding(5).style(theme::card);
         Some(
