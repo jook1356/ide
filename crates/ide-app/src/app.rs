@@ -545,6 +545,8 @@ pub enum Modal {
     SkillEdit(crate::skills_ui::SkillEditForm),
     /// Profiles page: "프로필 추가" (the name).
     AddProfile,
+    /// 하위 세션 만들기 (`family_ui.rs`).
+    NewChild(crate::family_ui::ChildForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -919,6 +921,8 @@ pub enum Message {
     /// Open (`Some`) or close a session row's right-click menu.
     SessionMenu(Option<crate::session_menu::SessionMenu>),
     SessionAct(crate::session_menu::SessionAct),
+    /// Session families (`family_ui.rs`).
+    Family(crate::family_ui::FamilyMsg),
     /// Close the session menu, then handle the message (세션 설정, 삭제).
     SessionMenuThen(Box<Message>),
     ItemDrag(crate::item_menu::DragMsg),
@@ -2326,6 +2330,7 @@ impl App {
                     Some(Modal::StopServer(f)) => f.busy,
                     Some(Modal::Close(f)) => f.busy,
                     Some(Modal::SessionRepos(f)) => f.busy,
+                    Some(Modal::NewChild(f)) => f.busy,
                     Some(Modal::Changes(f)) => f.busy,
                     Some(Modal::Footer(f)) => f.busy(),
                     _ => false,
@@ -3497,6 +3502,7 @@ impl App {
                 Task::none()
             }
             Message::SessionAct(a) => self.on_session_act(a),
+            Message::Family(m) => self.on_family(m),
             Message::SessionMenuThen(m) => {
                 self.session_menu = None;
                 self.update_inner(*m)
@@ -3892,7 +3898,7 @@ impl App {
         )
     }
 
-    fn on_created(
+    pub(crate) fn on_created(
         &mut self,
         result: Result<(SessionInfo, Vec<RepoFailureInfo>, Vec<String>), ProtoError>,
     ) -> Task<Message> {

@@ -38,6 +38,18 @@ pub use ide_proto::AGENT_TOOL_SESSION as TOOL_SESSION;
 /// `ide_show_message`: show a short message in the session's panel (answered by an app).
 pub use ide_proto::AGENT_TOOL_SHOW_MESSAGE as TOOL_SHOW_MESSAGE;
 
+/// Session family tools (`docs/session-family.md`), answered by the daemon.
+pub const TOOL_LIST_RELATED: &str = "ide_list_related_sessions";
+pub const TOOL_CREATE_CHILD: &str = "ide_create_child_session";
+pub const TOOL_SEND: &str = "ide_send_to_session";
+pub const TOOL_MERGE_CHILD: &str = "ide_merge_child";
+pub const TOOL_SYNC_PARENT: &str = "ide_sync_from_parent";
+
+/// A tool of the session family.
+pub fn is_family_tool(tool: &str) -> bool {
+    [TOOL_LIST_RELATED, TOOL_CREATE_CHILD, TOOL_SEND, TOOL_MERGE_CHILD, TOOL_SYNC_PARENT].contains(&tool)
+}
+
 /// How long a tool carried out by an app may take.
 const APP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -48,7 +60,9 @@ You are running inside ide, the IDE that manages this session: its terminal, its
 repositories / worktrees and the panels around it. The `ide` MCP server connects you to the \
 IDE. Use its tools (names start with `ide_`) instead of guessing about this session or the \
 IDE: `ide_session` describes this session (folder, repositories, branches, base branches); \
-`ide_show_message` shows a short note to the user in the IDE.";
+`ide_show_message` shows a short note to the user in the IDE. Child sessions \
+(`ide_create_child_session`) take parallel work; talk to related sessions with \
+`ide_send_to_session`.";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -69,6 +83,8 @@ pub struct BridgeState {
     activity: Mutex<HashMap<String, AgentActivity>>,
     /// Sessions whose CLI reported through hooks since its process started.
     hooked: Mutex<std::collections::HashSet<String>>,
+    /// Messages waiting to be typed into a session (`ide_send_to_session`, first prompts).
+    queue: Mutex<HashMap<String, std::collections::VecDeque<String>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     seq: AtomicU64,
 }
@@ -128,6 +144,36 @@ impl BridgeState {
         self.hooked.lock().unwrap().remove(session);
     }
 
+    /// Queue a message for `session`.
+    pub fn enqueue(&self, session: &str, msg: String) {
+        self.queue
+            .lock()
+            .unwrap()
+            .entry(session.to_owned())
+            .or_default()
+            .push_back(msg);
+    }
+
+    /// The next queued message of `session`.
+    pub fn dequeue(&self, session: &str) -> Option<String> {
+        self.queue.lock().unwrap().get_mut(session)?.pop_front()
+    }
+
+    /// Put a message back at the front (it could not be typed yet).
+    pub fn requeue(&self, session: &str, msg: String) {
+        self.queue
+            .lock()
+            .unwrap()
+            .entry(session.to_owned())
+            .or_default()
+            .push_front(msg);
+    }
+
+    /// Messages queued for `session`.
+    pub fn pending(&self, session: &str) -> usize {
+        self.queue.lock().unwrap().get(session).map_or(0, |q| q.len())
+    }
+
     /// A hook of `session`'s CLI arrived.
     pub fn mark_hooked(&self, session: &str) {
         self.hooked.lock().unwrap().insert(session.to_owned());
@@ -163,6 +209,7 @@ impl BridgeState {
     /// Forget a session's token (deleted session).
     pub fn forget(&self, session: &str) {
         self.tokens.lock().unwrap().remove(session);
+        self.queue.lock().unwrap().remove(session);
         self.reset(session);
     }
 
@@ -233,6 +280,55 @@ pub fn tools() -> Vec<AgentTool> {
                 .into(),
             input_schema: r#"{"type":"object","properties":{"message":{"type":"string","description":"The text to show (one or two sentences)."}},"required":["message"],"additionalProperties":false}"#
                 .into(),
+        },
+        AgentTool {
+            name: TOOL_LIST_RELATED.into(),
+            description: "List this session's related sessions: its parent, its children and its \
+                          siblings, with id, title, relation, whether it shares the parent's \
+                          folder, whether it runs, what its agent is doing, and its repositories \
+                          (branch, folder)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#.into(),
+        },
+        AgentTool {
+            name: TOOL_CREATE_CHILD.into(),
+            description: "Create and start a child session of this session (same agent). \
+                          `shared: true` works in this session's folder and worktrees (for \
+                          reviews, research, questions); otherwise the child gets its own \
+                          worktrees of `repos` (default: all of this session's), each branched \
+                          from this session's branch, to work in parallel; merge it back later \
+                          with ide_merge_child. `prompt` is typed into the child when its agent \
+                          is ready. Children go at most two levels below the first session."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"title":{"type":"string"},"shared":{"type":"boolean"},"repos":{"type":"array","items":{"type":"string"},"description":"Repository names of this session."},"prompt":{"type":"string","description":"The child's first task."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_SEND.into(),
+            description: "Send a message to a related session (parent, child or sibling; see \
+                          ide_list_related_sessions). It is typed into that session's agent at \
+                          once when it is idle, else queued until its current turn ends. The \
+                          message is marked as coming from this session."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"The session id."},"message":{"type":"string"}},"required":["session","message"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_MERGE_CHILD.into(),
+            description: "Merge a child session's committed work into this session's worktrees \
+                          (per repository: merged, up to date, conflicts left in progress for \
+                          you to resolve and commit, or failed with nothing changed). `squash` \
+                          makes one commit per repository. Uncommitted work is not merged."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"child":{"type":"string","description":"The child session's id."},"squash":{"type":"boolean"}},"required":["child"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_SYNC_PARENT.into(),
+            description: "Merge the parent session's newer commits into this child session's \
+                          worktrees (same results as ide_merge_child)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#.into(),
         },
     ]
 }

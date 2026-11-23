@@ -138,6 +138,32 @@ impl App {
             false,
         ));
         items.push(rule());
+        // Session family (docs/session-family.md).
+        let family = |m: crate::family_ui::FamilyMsg| {
+            online.then(|| Message::SessionMenuThen(Box::new(Message::Family(m))))
+        };
+        if self.can_have_child(sid) {
+            items.push(entry(
+                tr::child_create_menu(),
+                family(crate::family_ui::FamilyMsg::Open(sid.to_owned())),
+                false,
+            ));
+        }
+        if s.parent.is_some() && !s.shared {
+            items.push(entry(
+                tr::child_merge(),
+                family(crate::family_ui::FamilyMsg::Merge(sid.to_owned())),
+                false,
+            ));
+            items.push(entry(
+                tr::child_sync(),
+                family(crate::family_ui::FamilyMsg::Sync(sid.to_owned())),
+                false,
+            ));
+        }
+        if self.can_have_child(sid) || (s.parent.is_some() && !s.shared) {
+            items.push(rule());
+        }
         items.extend([
             entry(
                 tr::session_open_folder(),

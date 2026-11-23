@@ -10,7 +10,7 @@ use ide_proto::{
     AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat, PathMatches,
     GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
-    BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
+    BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoMerge, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
     SearchMatch, SearchSummary, SessionInfo, Stream, TermChunk, TextEncoding, TextSearch, ScriptGroup, UserTerm, Welcome, PortInfo, ShellInfo,
 };
 // --- local git actions (Changes / History footer)
@@ -914,6 +914,60 @@ impl Client {
     /// (`Ok`: the tool's text for the agent, `Err`: why it failed).
     pub async fn agent_reply(&self, request: u64, result: Result<String, String>) -> Result<(), ProtoError> {
         expect_unit(self.call(Request::AgentReply { request, result }).await)
+    }
+
+    /// `session.create_child`: a child of `parent` (shared folder, or own worktrees of `repos`
+    /// branched from the parent's; empty = all of the parent's).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_child_session(
+        &self,
+        parent: &str,
+        shared: bool,
+        repos: Vec<String>,
+        title: &str,
+        start: bool,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(SessionInfo, Vec<RepoFailureInfo>), ProtoError> {
+        match self
+            .call(Request::SessionCreateChild {
+                parent: parent.into(),
+                shared,
+                repos,
+                title: title.into(),
+                start,
+                cols,
+                rows,
+            })
+            .await?
+        {
+            Response::SessionCreated {
+                session, failures, ..
+            } => Ok((session, failures)),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a session")),
+        }
+    }
+
+    /// `session.merge_child`: the child's branches into its parent's worktrees.
+    pub async fn merge_child(&self, id: &str, squash: bool) -> Result<Vec<RepoMerge>, ProtoError> {
+        match self
+            .call(Request::SessionMergeChild {
+                id: id.into(),
+                squash,
+            })
+            .await?
+        {
+            Response::Merges(m) => Ok(m),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected merges")),
+        }
+    }
+
+    /// `session.sync_parent`: the parent's branches into the child's worktrees.
+    pub async fn sync_parent(&self, id: &str) -> Result<Vec<RepoMerge>, ProtoError> {
+        match self.call(Request::SessionSyncParent { id: id.into() }).await? {
+            Response::Merges(m) => Ok(m),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected merges")),
+        }
     }
 
     /// `session.set_flags`: pin / unpin and archive / unarchive (`None` = unchanged).

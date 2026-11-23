@@ -538,15 +538,16 @@ impl App {
                 list = list.push(group_divider(key.clone(), name, members.len(), folded));
             }
             if !folded {
-                for l in members {
-                    list = list.push(self.session_row(l));
+                // Children under their parent (docs/session-family.md).
+                for (l, depth) in self.family_order(members) {
+                    list = list.push(self.session_row(l, depth));
                 }
                 if !archived.is_empty() {
                     let open = self.ui.archive_open.contains(&key);
                     list = list.push(archive_toggle(key, archived.len(), open));
                     if open {
-                        for l in archived {
-                            list = list.push(self.session_row(l));
+                        for (l, depth) in self.family_order(archived) {
+                            list = list.push(self.session_row(l, depth));
                         }
                     }
                 }
@@ -824,7 +825,7 @@ impl App {
         }
     }
 
-    fn session_row<'a>(&'a self, live: &'a Live) -> El<'a> {
+    fn session_row<'a>(&'a self, live: &'a Live, depth: usize) -> El<'a> {
         let s = &live.info;
         let selected = self.selected.as_deref() == Some(s.id.as_str());
         let (glyph, gcolor) = provider_glyph(self, &s.provider);
@@ -885,10 +886,37 @@ impl App {
             .push(text(glyph).size(14).color(gcolor).width(18).boxed())
             .push(column![title, sub].width(Fill).boxed())
             .push(text(dot).size(10).color(dcolor).boxed());
-        // Pin / delete take room inside the row (pushing the title) only while hovered.
+        // Add child / pin / delete take room inside the row (pushing the title) only while
+        // hovered.
         if self.session_hover.as_deref() == Some(s.id.as_str()) {
             content = content.push(self.session_actions(live));
         }
+        // Desk: a parent's fold toggle with its child count, always at the row's right end.
+        let kids = self.family_children(&s.id);
+        if kids > 0 {
+            let folded = self.ui.folded_families.contains(&s.id);
+            content = content.push(tip(
+                button(
+                    row![
+                        icons::icon(
+                            if folded { Icon::ChevronRight } else { Icon::ChevronDown },
+                            11.0,
+                            style::DIM
+                        ),
+                        text(kids.to_string()).size(11).color(style::DIM),
+                    ]
+                    .spacing(2)
+                    .align_y(Alignment::Center),
+                )
+                .padding([2, 4])
+                .style(style::icon)
+                .on_press(Message::Family(crate::family_ui::FamilyMsg::ToggleFold(s.id.clone())))
+                .boxed(),
+                if folded { tr::family_unfold() } else { tr::family_fold() },
+            ));
+        }
+        // Children are indented per level.
+        let content = row![space().width((depth * 14) as f32), content].align_y(Alignment::Center);
         let main = button(content)
             .padding([4, 6])
             .width(Fill)
@@ -924,8 +952,23 @@ impl App {
                 label,
             )
         };
+        let add: El<'a> = if self.can_have_child(&s.id) {
+            tip(
+                button(icons::icon(Icon::Plus, 14.0, style::DIM))
+                    .padding([3, 5])
+                    .style(style::icon)
+                    .on_press_maybe(self.when_connected(Message::Family(
+                        crate::family_ui::FamilyMsg::Open(s.id.clone()),
+                    )))
+                    .boxed(),
+                tr::child_create_menu(),
+            )
+        } else {
+            space().width(0).boxed()
+        };
         // Renaming is in 세션 설정; run / stop is in the terminal's footer.
         row![
+            add,
             pin,
             icon_button(
                 I_DELETE,
@@ -2708,6 +2751,7 @@ impl App {
             Modal::Footer(f) => self.footer_modal_card(f),
             Modal::SkillEdit(f) => self.skill_modal_card(f),
             Modal::AddProfile => self.add_profile_card(),
+            Modal::NewChild(f) => self.child_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

@@ -31,6 +31,7 @@ mod history;
 mod i18n;
 mod icons;
 mod agent_bridge;
+mod family_ui;
 mod item_menu;
 mod uterm;
 mod script;

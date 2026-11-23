@@ -194,6 +194,12 @@ pub struct Session {
     /// In its group's 보관함 at the end of the session list (Desk's `archived`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// The parent session (`docs/session-family.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
+    /// A child that works in its parent's folder and worktrees (else its own worktrees).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// Legacy `profile` field (read only, for migration).
     #[serde(default, rename = "profile", skip_serializing)]
     pub legacy_profile: Option<String>,
@@ -236,6 +242,8 @@ impl Session {
             last_active: now,
             pinned: false,
             archived: false,
+            parent: None,
+            shared: false,
             legacy_profile: None,
             legacy_agent: None,
             legacy_repo_path: None,

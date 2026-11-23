@@ -324,6 +324,9 @@ pub struct SessionContext {
     pub scratch: PathBuf,
     /// Session guidance (workspace sessions; Desk's `HERMES.md` text).
     pub guidance: Option<String>,
+    /// The cwd belongs to another session (a shared child works in its parent's folder): no
+    /// files are written into it; the guidance goes into the instructions.
+    pub shared_root: bool,
 }
 
 impl SessionContext {
@@ -421,6 +424,7 @@ impl<'a> SessionInput<'a> {
                 repos,
                 scratch: paths.session_agent_dir(session.id.as_str()),
                 guidance,
+                shared_root: session.shared,
             },
             account,
             configuration,
@@ -479,7 +483,8 @@ pub fn assemble(
     let skills = skills::load(&cfg.skills, &mut plan.notes);
     // Files go into the session folder only when it is known: a legacy session migrated
     // without one has an empty root, which would mean the server's working directory.
-    let prepared = if ctx.mode == SessionMode::Workspace && ctx.root.is_absolute() {
+    let prepared = if ctx.mode == SessionMode::Workspace && ctx.root.is_absolute() && !ctx.shared_root
+    {
         provider.prepare_root(&mut plan, ctx, cfg, &skills)?
     } else {
         RootPrepared::default()

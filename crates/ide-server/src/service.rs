@@ -378,9 +378,200 @@ impl UserCtx {
         self.bridge.check(session, token)
     }
 
+    /// The family tools of the agent bridge (`docs/session-family.md`), answered here;
+    /// `None` = not a family tool. Blocking (git, the session store).
+    fn family_tool(&self, session: &str, tool: &str, args: &serde_json::Value) -> Option<ide_proto::AgentToolResult> {
+        use crate::bridge::{TOOL_CREATE_CHILD, TOOL_LIST_RELATED, TOOL_MERGE_CHILD, TOOL_SEND, TOOL_SYNC_PARENT};
+        let ok = |v: serde_json::Value| ide_proto::AgentToolResult {
+            text: serde_json::to_string_pretty(&v).expect("json"),
+            is_error: false,
+        };
+        let err = |t: String| ide_proto::AgentToolResult { text: t, is_error: true };
+        let s = match self.resolve_session(session) {
+            Ok(s) => s,
+            Err(e) => return Some(err(format!("session not available: {e}"))),
+        };
+        let all = self.sessions.lock().unwrap().list().to_vec();
+        let text = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+        Some(match tool {
+            TOOL_LIST_RELATED => {
+                let repos = self.repos.lock().unwrap().clone();
+                let rows: Vec<serde_json::Value> = ide_core::family::related(&all, &s)
+                    .iter()
+                    .map(|x| {
+                        let relation = if s.parent.as_ref() == Some(&x.id) {
+                            "parent"
+                        } else if x.parent.as_ref() == Some(&s.id) {
+                            "child"
+                        } else {
+                            "sibling"
+                        };
+                        let info = self.info(x);
+                        serde_json::json!({
+                            "id": x.id.to_string(),
+                            "title": x.title,
+                            "relation": relation,
+                            "shared_folder": x.shared,
+                            "running": info.state == SessionState::Running,
+                            "activity": format!("{:?}", info.activity),
+                            "repositories": x.worktrees.iter().map(|w| serde_json::json!({
+                                "name": repos.get(&w.repo).map_or_else(|| w.name.clone(), |r| r.name.clone()),
+                                "branch": w.branch,
+                                "folder": w.path,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                ok(serde_json::json!({ "sessions": rows }))
+            }
+            TOOL_CREATE_CHILD => {
+                let shared = args.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
+                let repos = self.repos.lock().unwrap().clone();
+                let mut ids = Vec::new();
+                for want in args
+                    .get("repos")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                {
+                    let found = s.worktrees.iter().find(|w| {
+                        w.name.eq_ignore_ascii_case(want)
+                            || repos.get(&w.repo).is_some_and(|r| r.name.eq_ignore_ascii_case(want))
+                    });
+                    match found {
+                        Some(w) => ids.push(w.repo.to_string()),
+                        None => return Some(err(format!("this session has no repository `{want}`"))),
+                    }
+                }
+                match self.session_create_child(session, shared, &ids, &text("title"), true, (0, 0)) {
+                    Ok(Response::SessionCreated { session: c, failures, .. }) => {
+                        let prompt = text("prompt");
+                        if !prompt.is_empty() {
+                            self.bridge.enqueue(&c.id, prompt.clone());
+                            self.deliver_pending(&c.id);
+                        }
+                        ok(serde_json::json!({
+                            "id": c.id,
+                            "title": c.title,
+                            "shared_folder": c.shared,
+                            "folder": c.root,
+                            "repositories": c.repos.iter().map(|r| serde_json::json!({
+                                "name": r.name, "branch": r.branch, "base": r.base, "folder": r.path,
+                            })).collect::<Vec<_>>(),
+                            "failed_repositories": failures.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+                            "first_prompt": if prompt.is_empty() { "none" } else { "queued until it is ready" },
+                        }))
+                    }
+                    Ok(_) => err("unexpected answer".into()),
+                    Err(e) => err(format!("could not create the child session: {e}")),
+                }
+            }
+            TOOL_SEND => {
+                let to = text("session");
+                let message = text("message");
+                if message.is_empty() {
+                    return Some(err("`message` is required".into()));
+                }
+                let Some(target) = ide_core::family::related(&all, &s)
+                    .into_iter()
+                    .find(|x| x.id.as_str() == to)
+                    .cloned()
+                else {
+                    return Some(err(format!(
+                        "`{to}` is not a related session (see ide_list_related_sessions)"
+                    )));
+                };
+                if self.existing_host(target.id.as_str()).is_none_or(|h| !h.is_running()) {
+                    return Some(err(format!("session `{to}` is not running")));
+                }
+                let full = format!(
+                    "[ide] Message from session \"{}\" ({}):\n{message}",
+                    s.title, s.id
+                );
+                self.bridge.enqueue(target.id.as_str(), full);
+                self.deliver_pending(target.id.as_str());
+                let queued = self.bridge.pending(target.id.as_str()) > 0;
+                ok(serde_json::json!({
+                    "delivered": !queued,
+                    "note": if queued { "queued: delivered when its current turn ends" } else { "typed into its terminal" },
+                }))
+            }
+            TOOL_MERGE_CHILD => {
+                let child = text("child");
+                let squash = args.get("squash").and_then(|v| v.as_bool()).unwrap_or(false);
+                if !all.iter().any(|x| x.id.as_str() == child && x.parent.as_ref() == Some(&s.id)) {
+                    return Some(err(format!("`{child}` is not a child of this session")));
+                }
+                match self.merge_child(&child, squash) {
+                    Ok(r) => ok(serde_json::json!({ "merges": merges_json(&r) })),
+                    Err(e) => err(format!("merge failed: {e}")),
+                }
+            }
+            TOOL_SYNC_PARENT => {
+                if s.parent.is_none() {
+                    return Some(err("this session has no parent".into()));
+                }
+                match self.sync_parent(session) {
+                    Ok(r) => ok(serde_json::json!({ "merges": merges_json(&r) })),
+                    Err(e) => err(format!("sync failed: {e}")),
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Messages queued for `session` (tests, diagnostics).
+    pub fn queued(&self, session: &str) -> usize {
+        self.bridge.pending(session)
+    }
+
+    /// Type the next queued message into `session` when it can take one (not working / not
+    /// waiting for the user, its TUI at its input); otherwise it stays queued.
+    pub(crate) fn deliver_pending(&self, session: &str) {
+        use ide_proto::AgentActivity;
+        if matches!(
+            self.bridge.activity(session),
+            AgentActivity::Working | AgentActivity::NeedsInput
+        ) {
+            return;
+        }
+        let Some(msg) = self.bridge.dequeue(session) else {
+            return;
+        };
+        match self.send_prompt(session, &msg) {
+            Ok(()) => {
+                // Typed in: the turn starts (hooks / the screen confirm it).
+                self.set_activity(session, AgentActivity::Working);
+            }
+            Err(e) if e.id == "prompt-not-ready" => self.bridge.requeue(session, msg),
+            Err(e) => tracing::warn!("session {session}: a queued message was dropped: {e}"),
+        }
+    }
+
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
     /// asks the connected apps).
-    pub async fn agent_call(&self, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+    pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        if crate::bridge::is_family_tool(tool) {
+            let parsed: serde_json::Value = match serde_json::from_str(if args.trim().is_empty() { "{}" } else { args }) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ide_proto::AgentToolResult {
+                        text: format!("invalid arguments: {e}"),
+                        is_error: true,
+                    };
+                }
+            };
+            let (me, session, tool) = (self.clone(), session.to_owned(), tool.to_owned());
+            return tokio::task::spawn_blocking(move || me.family_tool(&session, &tool, &parsed))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| ide_proto::AgentToolResult {
+                    text: "the tool failed".into(),
+                    is_error: true,
+                });
+        }
         // Apps subscribe to the notifications; agent connections do not.
         let apps = self.subscriber_count() > 0;
         let info = || self.resolve_session(session).map(|s| self.info(&s));
@@ -420,6 +611,9 @@ impl UserCtx {
             .collect();
         seen.retain(|k, _| hosts.iter().any(|(id, _)| id == k));
         for (id, host) in hosts {
+            if self.bridge.pending(&id) > 0 {
+                self.deliver_pending(&id);
+            }
             let key = (host.end(), host.title());
             if seen.get(&id) == Some(&key) {
                 continue;
@@ -684,6 +878,8 @@ impl UserCtx {
                 Some(SessionState::Running) => self.bridge.activity(s.id.as_str()),
                 _ => ide_proto::AgentActivity::Unknown,
             },
+            parent: s.parent.as_ref().map(|p| p.to_string()),
+            shared: s.shared,
         }
     }
 
@@ -865,18 +1061,28 @@ impl UserCtx {
                 let rid = self.parse_repo(&repo)?;
                 let r = self.repos.lock().unwrap().require(&rid).map_err(core)?.clone();
                 let mut updated = s.clone();
-                let plan = ide_core::attach_repo(&mut updated, &r, base.as_deref()).map_err(core)?;
-                let _ = self.repos.lock().unwrap().record_plan(
-                    &rid,
-                    plan.rule_resolved.as_deref(),
-                    plan.fixed_upgrade.as_deref(),
-                );
+                if let Some(pid) = &s.parent {
+                    // A child: only its parent's repos, branched from the parent's.
+                    let parent = self.resolve_session(pid.as_str())?;
+                    let repos = self.repos.lock().unwrap().clone();
+                    ide_core::family::attach_child_repo(&mut updated, &parent, &repos, &rid)
+                        .map_err(core)?;
+                } else {
+                    let plan =
+                        ide_core::attach_repo(&mut updated, &r, base.as_deref()).map_err(core)?;
+                    let _ = self.repos.lock().unwrap().record_plan(
+                        &rid,
+                        plan.rule_resolved.as_deref(),
+                        plan.fixed_upgrade.as_deref(),
+                    );
+                }
                 self.sessions
                     .lock()
                     .unwrap()
                     .upsert(updated.clone())
                     .map_err(core)?;
                 self.refresh_root(&updated);
+                self.sync_shared_children(&updated);
                 self.audit("session.attach_repo", &format!("{id} {repo}"));
                 self.notify(Notify::SessionsChanged);
                 self.notify(Notify::ReposChanged);
@@ -886,6 +1092,19 @@ impl UserCtx {
                 let s = self.resolve_session(&id)?;
                 let rid = self.parse_repo(&repo)?;
                 let r = self.repos.lock().unwrap().get(&rid).cloned();
+                if s.shared {
+                    return Err(core(ide_core::Error::SharedChildRepos));
+                }
+                let used = {
+                    let sessions = self.sessions.lock().unwrap();
+                    ide_core::family::children_using(sessions.list(), &s.id, &rid)
+                };
+                if used > 0 {
+                    return Err(core(ide_core::Error::RepoUsedByChildren {
+                        name: r.as_ref().map_or_else(|| repo.clone(), |r| r.name.clone()),
+                        count: used,
+                    }));
+                }
                 self.watchers.remove_key(&crate::watch::key(&id, &repo));
                 let mut updated = s.clone();
                 ide_core::detach_repo(&self.paths, &mut updated, &rid, r.as_ref()).map_err(core)?;
@@ -895,6 +1114,7 @@ impl UserCtx {
                     .upsert(updated.clone())
                     .map_err(core)?;
                 self.refresh_root(&updated);
+                self.sync_shared_children(&updated);
                 self.audit("session.detach_repo", &format!("{id} {repo}"));
                 self.notify(Notify::SessionsChanged);
                 self.notify(Notify::ReposChanged);
@@ -910,6 +1130,187 @@ impl UserCtx {
         if s.is_workspace() && let Err(e) = self.launch_spec(s) {
             tracing::warn!("session {}: regenerating its files failed: {e:?}", s.id);
         }
+    }
+
+    /// Shared children work in their parent's worktrees: keep their lists the parent's.
+    fn sync_shared_children(&self, parent: &Session) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let ids: Vec<SessionId> = ide_core::family::children(sessions.list(), &parent.id)
+            .iter()
+            .filter(|c| c.shared)
+            .map(|c| c.id.clone())
+            .collect();
+        for id in ids {
+            let _ = sessions.update(&id, |c| {
+                c.worktrees = parent.worktrees.clone();
+                c.bases = parent.bases.clone();
+            });
+        }
+    }
+
+    /// `session.create_child` (`docs/session-family.md`): the parent's agent, shared or own
+    /// worktrees branched from the parent's.
+    pub fn session_create_child(
+        &self,
+        parent: &str,
+        shared: bool,
+        repos: &[String],
+        title: &str,
+        start: bool,
+        (cols, rows): (u16, u16),
+    ) -> Result<Response, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        let ps = self.resolve_session(parent)?;
+        let p = self.provider(&ps.provider)?;
+        let repo_ids = repos
+            .iter()
+            .map(|r| self.parse_repo(r))
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshot = self.repos.lock().unwrap().clone();
+        let all = self.sessions.lock().unwrap().list().to_vec();
+        let req = ide_core::family::NewChild {
+            target: ps.target(),
+            title: title.to_owned(),
+            shared,
+            repos: repo_ids,
+        };
+        let (session, failures) =
+            ide_core::family::create_child(&self.paths, &snapshot, &all, &ps, &req, |_| {
+                p.program_path(&self.launch_env).map(drop)
+            })
+            .map_err(core)?;
+        self.sessions
+            .lock()
+            .unwrap()
+            .upsert(session.clone())
+            .map_err(core)?;
+        self.host_sized(
+            session.id.as_str(),
+            if cols == 0 { DEFAULT_COLS } else { cols },
+            if rows == 0 { DEFAULT_ROWS } else { rows },
+        );
+        self.audit(
+            "session.create_child",
+            &format!(
+                "{} parent={} shared={shared} repos={}",
+                session.id,
+                ps.id,
+                session
+                    .worktrees
+                    .iter()
+                    .map(|w| w.repo.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+        self.notify(Notify::SessionsChanged);
+        self.notify(Notify::ReposChanged);
+        if start {
+            self.start(&session)?;
+        } else {
+            self.refresh_root(&session);
+        }
+        // The parent's guidance lists its children.
+        self.refresh_root(&ps);
+        Ok(Response::SessionCreated {
+            base_changes: Vec::new(),
+            session: self.info(&session),
+            failures: failures
+                .iter()
+                .map(|f| RepoFailureInfo {
+                    repo: f.repo.to_string(),
+                    name: f.name.clone(),
+                    error: core_error(&f.error),
+                })
+                .collect(),
+        })
+    }
+
+    /// A child and its parent (`bad-request` for a session without a parent).
+    fn child_and_parent(&self, id: &str) -> Result<(Session, Session), ProtoError> {
+        let c = self.resolve_session(id)?;
+        let pid = c
+            .parent
+            .clone()
+            .ok_or_else(|| ProtoError::new("bad-request").arg("detail", "not a child session"))?;
+        let p = self.resolve_session(pid.as_str())?;
+        Ok((c, p))
+    }
+
+    /// Merge `(repo, worktree, branch)` triples; the worktrees are `notify_session`'s.
+    fn merges(
+        &self,
+        pairs: Vec<(RepoId, PathBuf, String)>,
+        squash: bool,
+        message: &str,
+        notify_session: &str,
+    ) -> Vec<ide_proto::RepoMerge> {
+        use ide_core::family::MergeOutcome;
+        use ide_proto::MergeResult;
+        let repos = self.repos.lock().unwrap().clone();
+        pairs
+            .into_iter()
+            .map(|(rid, dir, branch)| {
+                let result = match ide_core::family::merge_branch(&dir, &branch, squash, message) {
+                    MergeOutcome::Merged => MergeResult::Merged,
+                    MergeOutcome::UpToDate => MergeResult::UpToDate,
+                    MergeOutcome::Conflicts(files) => MergeResult::Conflicts { files },
+                    MergeOutcome::Failed(error) => MergeResult::Failed { error },
+                };
+                self.notify(Notify::GitChanged {
+                    session: notify_session.to_owned(),
+                    repo: rid.to_string(),
+                });
+                ide_proto::RepoMerge {
+                    repo: rid.to_string(),
+                    name: repos
+                        .get(&rid)
+                        .map_or_else(|| rid.to_string(), |r| r.name.clone()),
+                    result,
+                }
+            })
+            .collect()
+    }
+
+    /// `session.merge_child`: each of the child's branches into the parent's worktree of that
+    /// repo (a shared child has nothing to merge).
+    pub fn merge_child(&self, id: &str, squash: bool) -> Result<Vec<ide_proto::RepoMerge>, ProtoError> {
+        let (c, p) = self.child_and_parent(id)?;
+        if c.shared {
+            return Ok(Vec::new());
+        }
+        let pairs = c
+            .worktrees
+            .iter()
+            .filter_map(|w| {
+                p.worktree(&w.repo)
+                    .map(|pw| (w.repo.clone(), pw.path.clone(), w.branch.clone()))
+            })
+            .collect();
+        let message = format!("Merge child session \"{}\"", c.title);
+        let r = self.merges(pairs, squash, &message, p.id.as_str());
+        self.audit("session.merge_child", &format!("{} into {} squash={squash}", c.id, p.id));
+        Ok(r)
+    }
+
+    /// `session.sync_parent`: the parent's branches into the child's worktrees.
+    pub fn sync_parent(&self, id: &str) -> Result<Vec<ide_proto::RepoMerge>, ProtoError> {
+        let (c, p) = self.child_and_parent(id)?;
+        if c.shared {
+            return Ok(Vec::new());
+        }
+        let pairs = c
+            .worktrees
+            .iter()
+            .filter_map(|w| {
+                p.worktree(&w.repo)
+                    .map(|pw| (w.repo.clone(), w.path.clone(), pw.branch.clone()))
+            })
+            .collect();
+        let message = format!("Sync from parent session \"{}\"", p.title);
+        let r = self.merges(pairs, false, &message, c.id.as_str());
+        self.audit("session.sync_parent", &format!("{} from {}", c.id, p.id));
+        Ok(r)
     }
 
     /// Detection of a provider (cached; `refresh` re-runs `--version`).
@@ -1307,6 +1708,19 @@ impl UserCtx {
                 ))
             }
             Request::SessionCreate(req) => self.session_create(req),
+            Request::SessionCreateChild {
+                parent,
+                shared,
+                repos,
+                title,
+                start,
+                cols,
+                rows,
+            } => self.session_create_child(&parent, shared, &repos, &title, start, (cols, rows)),
+            Request::SessionMergeChild { id, squash } => {
+                Ok(Response::Merges(self.merge_child(&id, squash)?))
+            }
+            Request::SessionSyncParent { id } => Ok(Response::Merges(self.sync_parent(&id)?)),
             Request::ScriptsList { session, repo } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 Ok(Response::Scripts(scripts::discover(j.root())))
@@ -1345,6 +1759,15 @@ impl UserCtx {
                 remove_worktree,
             } => {
                 let s = self.resolve_session(&id)?;
+                let kids = {
+                    let sessions = self.sessions.lock().unwrap();
+                    ide_core::family::children(sessions.list(), &s.id).len()
+                };
+                if kids > 0 {
+                    return Err(core(ide_core::Error::SessionHasChildren { count: kids }));
+                }
+                // A shared child's folder and worktrees are its parent's: never removed here.
+                let remove_worktree = remove_worktree && !s.shared;
                 self.stop(&s);
                 self.uterm_remove_session(s.id.as_str());
                 // Watchers hold the worktree folders open: stop them before deleting.
@@ -1357,6 +1780,10 @@ impl UserCtx {
                 self.sessions.lock().unwrap().remove(&s.id).map_err(core)?;
                 self.hosts.lock().unwrap().remove(s.id.as_str());
                 self.bridge.forget(s.id.as_str());
+                // The parent's guidance lists its children.
+                if let Some(p) = s.parent.as_ref().and_then(|p| self.resolve_session(p.as_str()).ok()) {
+                    self.refresh_root(&p);
+                }
                 self.notify(Notify::ReposChanged);
                 self.audit(
                     "session.delete",
@@ -1906,8 +2333,18 @@ impl UserCtx {
             let _ = store.skills(&s.configuration);
             store.require(&s.configuration).map_err(core)?.clone()
         };
+        let family = {
+            let sessions = self.sessions.lock().unwrap();
+            let all = sessions.list();
+            let parent = s.parent.as_ref().and_then(|p| all.iter().find(|x| &x.id == p));
+            let kids = ide_core::family::children(all, &s.id);
+            ide_core::family::family_guidance(s, parent, &kids)
+        };
         let repos = self.repos.lock().unwrap();
-        let guidance = ide_core::session_guidance(s, &repos);
+        let guidance = match (ide_core::session_guidance(s, &repos), family) {
+            (Some(g), Some(f)) => Some(format!("{g}\n\n{f}")),
+            (g, f) => g.or(f),
+        };
         let input = SessionInput::for_session(
             &self.paths,
             s,
@@ -2041,6 +2478,21 @@ impl UserCtx {
     }
 }
 
+/// Merge results as JSON for the agent.
+fn merges_json(r: &[ide_proto::RepoMerge]) -> Vec<serde_json::Value> {
+    r.iter()
+        .map(|m| {
+            let (result, detail) = match &m.result {
+                ide_proto::MergeResult::Merged => ("merged", serde_json::Value::Null),
+                ide_proto::MergeResult::UpToDate => ("up to date", serde_json::Value::Null),
+                ide_proto::MergeResult::Conflicts { files } => ("conflicts (merge left in progress: resolve, then commit)", serde_json::json!(files)),
+                ide_proto::MergeResult::Failed { error } => ("failed (nothing changed)", serde_json::json!(error)),
+            };
+            serde_json::json!({ "repository": m.name, "result": result, "detail": detail })
+        })
+        .collect()
+}
+
 /// The user's home dir (`USERPROFILE` / `HOME`), always a browse root.
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
@@ -2124,6 +2576,13 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
         }
         ErrorMessage::RepoNotAttached { name } => p.arg("name", name),
         ErrorMessage::NotAWorkspaceSession { id } => p.arg("id", id),
+        ErrorMessage::FamilyNeedsWorkspace { id } => p.arg("id", id),
+        ErrorMessage::FamilyTooDeep | ErrorMessage::SharedChildRepos => p,
+        ErrorMessage::RepoNotInParent { name } => p.arg("name", name),
+        ErrorMessage::SessionHasChildren { count } => p.arg("count", count.to_string()),
+        ErrorMessage::RepoUsedByChildren { name, count } => {
+            p.arg("name", name).arg("count", count.to_string())
+        }
         ErrorMessage::NotAGitFolder { path }
         | ErrorMessage::FolderNotFound { path }
         | ErrorMessage::CorruptGitDir { path } => p.arg("path", path.display().to_string()),

@@ -38,6 +38,7 @@ pub mod account;
 pub mod base;
 pub mod configuration;
 pub mod error;
+pub mod family;
 pub mod launch;
 pub mod migrate;
 pub mod ops;

@@ -255,6 +255,41 @@ pub enum Error {
     #[error("session {0} has no workspace")]
     NotAWorkspaceSession(String),
 
+    /// Children need a workspace parent (`docs/session-family.md`).
+    #[error("session {0} has no workspace: it cannot have child sessions")]
+    FamilyNeedsWorkspace(String),
+
+    /// A child would be deeper than two levels below its root session.
+    #[error("child sessions go at most two levels deep")]
+    FamilyTooDeep,
+
+    /// A separate child picked a repository its parent does not have.
+    #[error("the parent session has no repository {name:?}")]
+    RepoNotInParent {
+        /// Repository name (or id).
+        name: String,
+    },
+
+    /// A session with child sessions cannot be deleted.
+    #[error("the session has {count} child session(s)")]
+    SessionHasChildren {
+        /// Children.
+        count: usize,
+    },
+
+    /// A parent cannot detach a repository its separate children work in.
+    #[error("{count} child session(s) use repository {name:?}")]
+    RepoUsedByChildren {
+        /// Repository name.
+        name: String,
+        /// Children using it.
+        count: usize,
+    },
+
+    /// A shared child works in its parent's workspace: change the parent's repositories.
+    #[error("a shared child session uses its parent's repositories")]
+    SharedChildRepos,
+
     /// A plain folder (no git repository): registering needs `init` (Desk `NotGitRepoError`).
     #[error("{0} is not a git repository (register with init to git-initialise it)")]
     NotAGitFolder(PathBuf),
@@ -415,6 +450,21 @@ pub enum ErrorMessage<'a> {
     NotAWorkspaceSession {
         id: &'a str,
     },
+    FamilyNeedsWorkspace {
+        id: &'a str,
+    },
+    FamilyTooDeep,
+    RepoNotInParent {
+        name: &'a str,
+    },
+    SessionHasChildren {
+        count: usize,
+    },
+    RepoUsedByChildren {
+        name: &'a str,
+        count: usize,
+    },
+    SharedChildRepos,
     NotAGitFolder {
         path: &'a Path,
     },
@@ -487,6 +537,12 @@ impl ErrorMessage<'_> {
             ErrorMessage::RepoInUse { .. } => "repo-in-use",
             ErrorMessage::RepoNotAttached { .. } => "repo-not-attached",
             ErrorMessage::NotAWorkspaceSession { .. } => "not-a-workspace-session",
+            ErrorMessage::FamilyNeedsWorkspace { .. } => "family-needs-workspace",
+            ErrorMessage::FamilyTooDeep => "family-too-deep",
+            ErrorMessage::RepoNotInParent { .. } => "repo-not-in-parent",
+            ErrorMessage::SessionHasChildren { .. } => "session-has-children",
+            ErrorMessage::RepoUsedByChildren { .. } => "repo-used-by-children",
+            ErrorMessage::SharedChildRepos => "shared-child-repos",
             ErrorMessage::NotAGitFolder { .. } => "not-a-git-folder",
             ErrorMessage::FolderNotFound { .. } => "folder-not-found",
             ErrorMessage::CorruptGitDir { .. } => "corrupt-git-dir",
@@ -583,6 +639,17 @@ impl Error {
             },
             Error::RepoNotAttached { name } => ErrorMessage::RepoNotAttached { name },
             Error::NotAWorkspaceSession(id) => ErrorMessage::NotAWorkspaceSession { id },
+            Error::FamilyNeedsWorkspace(id) => ErrorMessage::FamilyNeedsWorkspace { id },
+            Error::FamilyTooDeep => ErrorMessage::FamilyTooDeep,
+            Error::RepoNotInParent { name } => ErrorMessage::RepoNotInParent { name },
+            Error::SessionHasChildren { count } => {
+                ErrorMessage::SessionHasChildren { count: *count }
+            }
+            Error::RepoUsedByChildren { name, count } => ErrorMessage::RepoUsedByChildren {
+                name,
+                count: *count,
+            },
+            Error::SharedChildRepos => ErrorMessage::SharedChildRepos,
             Error::NotAGitFolder(path) => ErrorMessage::NotAGitFolder { path },
             Error::FolderNotFound(path) => ErrorMessage::FolderNotFound { path },
             Error::CorruptGitDir(path) => ErrorMessage::CorruptGitDir { path },

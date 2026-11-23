@@ -1,0 +1,228 @@
+//! Session families (`docs/session-family.md`) through the client and the agent bridge, with
+//! shell sessions and real git: separate and shared children, the depth limit, the delete /
+//! detach / attach rules, merging a child and syncing from the parent, and the family tools
+//! of an agent connection (list, create with a first prompt, send, merge, sync).
+//!
+//! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::*;
+use ide_client::{Client, ClientOptions, MergeResult, NewSession};
+use ide_core::Paths;
+use ide_proto::{
+    AgentHello, Hello, Mux, MuxConfig, PROTO_VERSION, Request, Response, Role, RpcMessage,
+    RpcReceiver,
+};
+use ide_server::bridge::{BridgeConfig, TOKEN_ENV};
+use ide_server::{Server, ServerConfig};
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn commit(dir: &Path, file: &str, text: &str) {
+    std::fs::write(dir.join(file), text).unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", file]);
+}
+
+fn bridged(data: &Path) -> Arc<Server> {
+    let mut cfg = ServerConfig::for_paths(Paths::new(data));
+    cfg.bridge = Some(BridgeConfig {
+        exe: PathBuf::from("ide-server-fake"),
+        socket: "family-test".into(),
+    });
+    Server::new(cfg)
+}
+
+fn opts() -> ClientOptions {
+    ClientOptions {
+        reconnect: false,
+        ..ClientOptions::default()
+    }
+}
+
+async fn agent(server: &Arc<Server>, session: &str) -> (Mux, RpcReceiver) {
+    let ctx = server.authorize(server.user()).unwrap();
+    let spec = ctx.launch_spec(&ctx.resolve_session(session).unwrap()).unwrap();
+    let token = spec.env.iter().find(|(k, _)| k == TOKEN_ENV).unwrap().1.clone();
+    let (a, b) = ide_proto::memory_pair();
+    let s = server.clone();
+    let user = s.user().clone();
+    tokio::spawn(async move { s.serve(b, user).await });
+    let (mux, mut rx) = Mux::new(a, MuxConfig::new(Role::Client));
+    let hello = Request::Hello(Hello {
+        proto_version: PROTO_VERSION,
+        client_version: "test-agent".into(),
+        resume: None,
+        agent: Some(AgentHello {
+            session: session.into(),
+            token,
+        }),
+    });
+    mux.send_rpc(&RpcMessage::Request { id: 1, req: hello }.encode()).unwrap();
+    let _ = rx.recv().await.unwrap();
+    (mux, rx)
+}
+
+/// One tool call: (is_error, parsed JSON or the text as a JSON string).
+async fn tool(mux: &Mux, rx: &mut RpcReceiver, id: u64, name: &str, args: serde_json::Value) -> (bool, serde_json::Value) {
+    let req = Request::AgentCall {
+        tool: name.into(),
+        args: args.to_string(),
+    };
+    mux.send_rpc(&RpcMessage::Request { id, req }.encode()).unwrap();
+    loop {
+        if let RpcMessage::Response { id: got, result } = RpcMessage::decode(&rx.recv().await.unwrap()).unwrap()
+            && got == id
+        {
+            let Ok(Response::AgentResult(r)) = result else {
+                panic!("{result:?}")
+            };
+            let v = serde_json::from_str(&r.text).unwrap_or(serde_json::Value::String(r.text));
+            return (r.is_error, v);
+        }
+    }
+}
+
+fn shell_session(repos: Vec<String>, start: bool) -> NewSession {
+    NewSession {
+        provider: "shell".into(),
+        account: None,
+        configuration: "default".into(),
+        repos,
+        original_repo: None,
+        refresh_base: false,
+        bases: Default::default(),
+        title: "P".into(),
+        start,
+        cols: 80,
+        rows: 24,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn families() {
+    let dir = tmp_dir("family");
+    let (r1, r2) = (dir.join("r1"), dir.join("r2"));
+    init_repo(&r1);
+    init_repo(&r2);
+    let server = bridged(&dir.join("data"));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
+    let id2 = c.register_repo(&r2.display().to_string()).await.unwrap().id;
+    let (p, _) = c.create_session(shell_session(vec![id1.clone()], true)).await.unwrap();
+    let pw = PathBuf::from(&p.repos[0].path);
+    commit(&pw, "p.txt", "parent\n");
+
+    // A separate child: only the parent's repos; its worktree starts at the parent's branch.
+    let e = c
+        .create_child_session(&p.id, false, vec![id2.clone()], "", false, 80, 24)
+        .await
+        .unwrap_err();
+    assert_eq!(e.id, "repo-not-in-parent");
+    let (a, f) = c.create_child_session(&p.id, false, Vec::new(), "A", false, 80, 24).await.unwrap();
+    assert!(f.is_empty());
+    assert_eq!((a.parent.as_deref(), a.shared), (Some(p.id.as_str()), false));
+    assert_eq!(a.repos[0].base, p.repos[0].branch);
+    let aw = PathBuf::from(&a.repos[0].path);
+    assert!(aw.join("p.txt").is_file() && aw != pw);
+    // A shared child: the parent's folder and worktrees.
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", true, 80, 24).await.unwrap();
+    assert_eq!((s.root.as_str(), s.repos[0].path.as_str()), (p.root.as_str(), p.repos[0].path.as_str()));
+
+    // Rules.
+    assert_eq!(c.delete_session(&p.id, true).await.unwrap_err().id, "session-has-children");
+    assert_eq!(c.detach_repo(&p.id, &id1).await.unwrap_err().id, "repo-used-by-children");
+    assert_eq!(c.attach_repo(&s.id, &id2).await.unwrap_err().id, "shared-child-repos");
+    assert_eq!(c.attach_repo(&a.id, &id2).await.unwrap_err().id, "repo-not-in-parent");
+    // The parent attaches a repo: its shared child follows; the separate child may take it.
+    c.attach_repo(&p.id, &id2).await.unwrap();
+    let all = c.sessions().await.unwrap();
+    let s_now = all.iter().find(|x| x.id == s.id).unwrap();
+    assert_eq!(s_now.repos.len(), 2, "the shared child follows the parent");
+    let a2 = c.attach_repo(&a.id, &id2).await.unwrap();
+    let p_now = all.iter().find(|x| x.id == p.id).unwrap();
+    let p_r2 = p_now.repos.iter().find(|r| r.repo == id2).unwrap();
+    assert_eq!(a2.repos.iter().find(|r| r.repo == id2).unwrap().base, p_r2.branch);
+
+    // Depth: P -> A -> G; no deeper.
+    let (g, _) = c.create_child_session(&a.id, false, Vec::new(), "G", false, 80, 24).await.unwrap();
+    assert_eq!(
+        c.create_child_session(&g.id, false, Vec::new(), "", false, 80, 24).await.unwrap_err().id,
+        "family-too-deep"
+    );
+
+    // Merge a child, sync from the parent.
+    commit(&aw, "a.txt", "child\n");
+    let m = c.merge_child(&a.id, false).await.unwrap();
+    let m1 = m.iter().find(|x| x.repo == id1).unwrap();
+    assert_eq!(m1.result, MergeResult::Merged);
+    assert!(pw.join("a.txt").is_file());
+    assert_eq!(c.merge_child(&a.id, false).await.unwrap()[0].result, MergeResult::UpToDate);
+    commit(&pw, "p2.txt", "more\n");
+    let m = c.sync_parent(&a.id).await.unwrap();
+    assert_eq!(m.iter().find(|x| x.repo == id1).unwrap().result, MergeResult::Merged);
+    assert!(aw.join("p2.txt").is_file());
+    assert!(c.merge_child(&s.id, false).await.unwrap().is_empty(), "a shared child has nothing to merge");
+    assert_eq!(c.merge_child(&p.id, false).await.unwrap_err().id, "bad-request");
+
+    // The agent bridge's family tools (the parent's agent).
+    let (mux, mut rx) = agent(&server, &p.id).await;
+    let (bad, v) = tool(&mux, &mut rx, 10, "ide_list_related_sessions", serde_json::json!({})).await;
+    assert!(!bad, "{v}");
+    let mut kids: Vec<&str> = v["sessions"].as_array().unwrap().iter().map(|x| x["title"].as_str().unwrap()).collect();
+    kids.sort();
+    assert_eq!(kids, ["A", "S"]);
+    // A running related session gets the message at once (the shared child's shell).
+    let (bad, v) = tool(&mux, &mut rx, 11, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "echo hi"})).await;
+    assert!(!bad && v["delivered"] == true, "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 12, "ide_send_to_session", serde_json::json!({"session": g.id, "message": "x"})).await;
+    assert!(bad && v.as_str().unwrap().contains("not a related session"), "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 13, "ide_merge_child", serde_json::json!({"child": g.id})).await;
+    assert!(bad && v.as_str().unwrap().contains("not a child"), "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 14, "ide_merge_child", serde_json::json!({"child": a.id, "squash": true})).await;
+    assert!(!bad, "{v}");
+    assert_eq!(v["merges"][0]["result"], "up to date");
+    let (bad, v) = tool(&mux, &mut rx, 15, "ide_sync_from_parent", serde_json::json!({})).await;
+    assert!(bad && v.as_str().unwrap().contains("no parent"), "{v}");
+    let (bad, v) = tool(
+        &mux,
+        &mut rx,
+        16,
+        "ide_create_child_session",
+        serde_json::json!({"title": "B", "repos": ["r1"], "prompt": "echo first"}),
+    )
+    .await;
+    assert!(!bad, "{v}");
+    assert_eq!(v["repositories"].as_array().unwrap().len(), 1);
+    let b_id = v["id"].as_str().unwrap().to_owned();
+    let (bad, v) = tool(&mux, &mut rx, 17, "ide_create_child_session", serde_json::json!({"repos": ["nope"]})).await;
+    assert!(bad && v.as_str().unwrap().contains("no repository"), "{v}");
+    // The first prompt is typed in once the child's shell runs (a shell has no activity).
+    let ctx = server.authorize(server.user()).unwrap();
+    let delivered = wait_until(Duration::from_secs(10), || {
+        let mut seen = std::collections::HashMap::new();
+        ctx.screen_tick(&mut seen);
+        ctx.queued(&b_id) == 0
+    })
+    .await;
+    assert!(delivered, "the child's first prompt was delivered");
+
+    // Children first, then the parent; a shared child's delete keeps the parent's folder.
+    c.delete_session(&s.id, true).await.unwrap();
+    assert!(pw.is_dir(), "the shared folder stays");
+    for id in [&g.id, &a.id, &b_id] {
+        c.delete_session(id, true).await.unwrap();
+    }
+    c.delete_session(&p.id, true).await.unwrap();
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}

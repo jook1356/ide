@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 13;
+pub const PROTO_VERSION: u32 = 14;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -237,6 +237,31 @@ pub struct SessionInfo {
     /// What its agent is doing (hooks).
     #[serde(default)]
     pub activity: AgentActivity,
+    /// Its parent session (`docs/session-family.md`).
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// A child working in its parent's folder and worktrees.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// What merging one repo of a session family did (`session.merge_child` / `sync_parent`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoMerge {
+    pub repo: String,
+    pub name: String,
+    pub result: MergeResult,
+}
+
+/// The result of one merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeResult {
+    Merged,
+    UpToDate,
+    /// Stopped at conflicts in these files (left in progress to resolve).
+    Conflicts { files: Vec<String> },
+    /// Refused / failed; nothing changed.
+    Failed { error: String },
 }
 
 /// `session.create` arguments.
@@ -507,6 +532,27 @@ pub enum Request {
         id: String,
         pinned: Option<bool>,
         archived: Option<bool>,
+    },
+    /// A child of `parent` (`SessionCreated`): `shared` = in the parent's folder and worktrees,
+    /// else own worktrees of `repos` (the parent's; empty = all) branched from the parent's.
+    /// The parent's agent (provider, account, configuration).
+    SessionCreateChild {
+        parent: String,
+        shared: bool,
+        repos: Vec<String>,
+        title: String,
+        start: bool,
+        cols: u16,
+        rows: u16,
+    },
+    /// Merge child `id`'s branches into its parent's worktrees (`Merges`).
+    SessionMergeChild {
+        id: String,
+        squash: bool,
+    },
+    /// Merge the parent's branches into child `id`'s worktrees (`Merges`).
+    SessionSyncParent {
+        id: String,
     },
     /// Agent bridge connections only: the tools of the bridge (`AgentTools`).
     AgentTools,
@@ -1037,6 +1083,9 @@ impl Request {
             Request::UTermRemove { .. } => "uterm.remove",
             Request::SessionRename { .. } => "session.rename",
             Request::SessionSetFlags { .. } => "session.set_flags",
+            Request::SessionCreateChild { .. } => "session.create_child",
+            Request::SessionMergeChild { .. } => "session.merge_child",
+            Request::SessionSyncParent { .. } => "session.sync_parent",
             Request::AgentTools => "agent.tools",
             Request::AgentCall { .. } => "agent.call",
             Request::AgentReply { .. } => "agent.reply",
@@ -1238,6 +1287,7 @@ pub enum Response {
     AgentResult(AgentToolResult),
     /// `None`: no opinion; `Some(reason)`: refuse the tool call.
     AgentHookDecision(Option<String>),
+    Merges(Vec<RepoMerge>),
 }
 
 /// Server -> client event.

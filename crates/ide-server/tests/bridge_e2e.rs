@@ -264,7 +264,18 @@ async fn agent_connection_tools_and_app_round_trip() {
         other => panic!("{other:?}"),
     };
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["ide_session", "ide_show_message"]);
+    assert_eq!(
+        names,
+        [
+            "ide_session",
+            "ide_show_message",
+            "ide_list_related_sessions",
+            "ide_create_child_session",
+            "ide_send_to_session",
+            "ide_merge_child",
+            "ide_sync_from_parent",
+        ]
+    );
     for t in &tools {
         let schema: serde_json::Value = serde_json::from_str(&t.input_schema).unwrap();
         assert_eq!(schema["type"], "object");

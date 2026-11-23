@@ -39,7 +39,7 @@ pub use mux::{
     StreamSender,
 };
 pub use rpc::{
-    AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AgentActivity, AgentHello, AgentHookEvent, AgentTool, AgentToolResult, Attached, Hello, NewSession, Notify, PROTO_VERSION, ATTACH_CHUNK, ATTACH_MAX, RepoFailureInfo, Request, Response,
+    AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AgentActivity, MergeResult, RepoMerge, AgentHello, AgentHookEvent, AgentTool, AgentToolResult, Attached, Hello, NewSession, Notify, PROTO_VERSION, ATTACH_CHUNK, ATTACH_MAX, RepoFailureInfo, Request, Response,
     ResumeToken, RpcMessage, PortInfo, ScriptGroup, ScriptItem, SessionInfo, ShellInfo, SessionState, UserInfo, UserTerm, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};

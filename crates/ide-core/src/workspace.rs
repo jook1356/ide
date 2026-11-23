@@ -240,6 +240,45 @@ pub fn add_worktree(
     Ok(base)
 }
 
+/// Add a worktree of `r` to `s` (a separate child session) on its branch `ide/<id>` started at
+/// the parent's branch `parent_branch`, which becomes this repo's base (a local branch).
+pub fn add_child_worktree(s: &mut Session, r: &RegisteredRepo, parent_branch: &str) -> Result<()> {
+    if s.worktree(&r.id).is_some() {
+        return Ok(());
+    }
+    let repo = Repo::open(&r.path)?;
+    let branch = s.id.branch();
+    let existed = branch_exists(&repo, &branch);
+    let name = free_name(s, &r.name);
+    let path = s.root.join(&name);
+    let mut args: Vec<std::ffi::OsString> = vec!["worktree".into(), "add".into()];
+    if existed {
+        args.push(path.clone().into_os_string());
+        args.push(branch.clone().into());
+    } else {
+        args.extend(["--no-track".into(), "-b".into(), branch.clone().into()]);
+        args.push(path.clone().into_os_string());
+        args.push(parent_branch.into());
+    }
+    if let Err(e) = repo.git(&args) {
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = repo.prune_worktrees();
+        if !existed {
+            let _ = repo.git(["branch", "-D", "--", &branch]);
+        }
+        return Err(e);
+    }
+    s.worktrees.push(SessionWorktree {
+        repo: r.id.clone(),
+        name,
+        path,
+        branch,
+        base: parent_branch.to_owned(),
+    });
+    s.bases.insert(r.id.clone(), parent_branch.to_owned());
+    Ok(())
+}
+
 /// Attach a registered repository to a workspace session (Desk `addRepoToSessions`: no
 /// refresh, `base` = the base picked in the session settings, else the repo's). Already
 /// attached: no-op.

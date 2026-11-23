@@ -639,6 +639,27 @@ session-repos-open = Session repositories
 activity-working = Working
 activity-needs-input = Needs you
 activity-new-answer = New answer
+child-create-menu = Add a child session
+child-dialog-title = Child session of “{ $parent }”
+child-title-placeholder = Title (empty: derived)
+child-separate = Own worktrees
+child-separate-hint = Branched from the parent’s branches; merge it back later.
+child-shared = Shared folder
+child-shared-hint = Works in the parent’s folder and worktrees.
+child-repos-label = Repositories (the parent’s)
+child-create = Create
+child-merge = Merge into the parent
+child-sync = Get the parent’s changes
+family-fold = Fold child sessions
+family-unfold = Unfold child sessions
+merge-nothing = Nothing to merge.
+merge-merged = { $name }: merged
+merge-up-to-date = { $name }: already up to date
+merge-conflicts = { $count ->
+    [one] { $name }: 1 file in conflict; resolve it in Changes and commit
+   *[other] { $name }: { $count } files in conflict; resolve them in Changes and commit
+}
+merge-failed = { $name }: failed, nothing changed ({ $error })
 session-pin = Pin
 session-unpin = Unpin
 session-archive = Move to archive
@@ -663,6 +684,18 @@ err-repo-in-use = { $count ->
 } repository “{ $name }”; delete them first.
 err-repo-not-attached = Repository “{ $name }” is not attached to this session.
 err-not-a-workspace-session = Session { $id } works in a repository directly (no workspace).
+err-family-needs-workspace = Session { $id } works in a repository directly: it cannot have child sessions.
+err-family-too-deep = Child sessions go at most two levels deep.
+err-repo-not-in-parent = The parent session has no repository “{ $name }”.
+err-session-has-children = { $count ->
+    [one] This session has a child session; delete it first.
+   *[other] This session has { $count } child sessions; delete them first.
+}
+err-repo-used-by-children = { $count ->
+    [one] A child session works in
+   *[other] { $count } child sessions work in
+} repository “{ $name }”.
+err-shared-child-repos = A shared child session uses its parent's repositories: change them in the parent.
 
 ## Base branches, 기준 브랜치 최신화, git init of a plain folder (Hermes Desk)
 base-mode-fixed = Fixed branch

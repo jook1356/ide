@@ -116,6 +116,7 @@ fn input<'a>(
             repos: Vec::new(),
             scratch: f.t.0.join("data").join("sessions").join("s1").join("agent"),
             guidance: None,
+            shared_root: false,
         },
         account: acct,
         configuration: cfg,
