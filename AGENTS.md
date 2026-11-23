@@ -15,7 +15,9 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   its own folder): `cargo build --release -p ide-app -p ide-server` (alias `cargo app`; debug:
   `cargo app-debug`). `IDE_SERVER_BIN` points the app at another server binary.
 - Check: `cargo clippy --workspace --all-targets`, `cargo test --workspace` with
-  `IDE_TEST_TMP=<dir inside the workspace>` (server e2e tests spawn real `ide-server` daemons there).
+  `IDE_TEST_TMP=<scratch dir outside any git repository>` (e.g. `C:/t/test-tmp`; server e2e tests
+  spawn real `ide-server` daemons there). Not inside this repo: tests that need a plain, non-git
+  folder (`register_unregister`, `files_e2e`, `repos_e2e`) fail when the folder is in a git work tree.
 - Run: `WGPU_BACKEND=dx12 <target>/release/ide.exe`. `IDE_DATA_DIR` overrides the data dir of the app
   *and* the server (each data dir gets its own daemon, pipe `\\.\pipe\ide-server-<user>-<hash>`).
   The app attaches to a running daemon or starts one (detached, no console window); closing the

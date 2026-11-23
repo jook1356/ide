@@ -2,7 +2,7 @@
 //! (discard, stash, commit actions, sync / push / pull, branch picker, 새 브랜치로 이어가기)
 //! over the memory transport and a real `ide-server` child (`--no-daemon`), in a session
 //! worktree whose repository has a local bare `origin`.
-//! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
+//! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
 
 mod common;
 

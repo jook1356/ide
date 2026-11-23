@@ -6,7 +6,7 @@
 //! transport (`ServerConfig::gh`, `ServerConfig::git_credential_env`) and a real `ide-server`
 //! child (`IDE_GH`, `IDE_GITHUB_API`, `GIT_CONFIG_GLOBAL`). `git credential fill` only ever sees
 //! a scratch git config (`GIT_CONFIG_NOSYSTEM=1`), never the user's credential store.
-//! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
+//! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
 
 mod common;
 

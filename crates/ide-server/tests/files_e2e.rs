@@ -1,7 +1,7 @@
 //! Phase 2 end to end through `ide_client::Client`: files, watch, folder picker, search, git
 //! and go-to-definition over the memory transport and a real `ide-server` child
 //! (`--no-daemon`), all scoped to `(session, repo)` worktrees.
-//! Run with `IDE_TEST_TMP=<dir inside the workspace>`.
+//! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
 
 mod common;
 
