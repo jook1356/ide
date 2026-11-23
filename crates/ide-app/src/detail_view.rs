@@ -166,7 +166,7 @@ fn item_kind(key: &ItemKey) -> String {
 pub(crate) fn item_icon<'a>(key: &ItemKey) -> El<'a> {
     match key {
         ItemKey::Web | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
-        ItemKey::Terminal(_) => text(">_").size(11).font(style::MONO).color(style::DIM).boxed(),
+        ItemKey::Terminal(_) => text(">_").size(11).font(style::mono()).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
         ItemKey::Diff { path, .. } | ItemKey::Compare(path) => row![
             icons::file_icon(file_name(path)),
@@ -307,7 +307,7 @@ impl App {
                 let mut title_row = row![
                     text(title)
                         .size(13)
-                        .font(style::BOLD)
+                        .font(style::bold())
                         .wrapping(text::Wrapping::None)
                         .ellipsis(text::Ellipsis::End),
                 ]
@@ -468,7 +468,7 @@ impl App {
             row![
                 text(I_CHEVRON).size(11).color(style::DIM),
                 text(tr::open_items()).size(12),
-                container(text(total.to_string()).size(10).font(style::BOLD))
+                container(text(total.to_string()).size(10).font(style::bold()))
                     .padding([0, 5])
                     .style(|_| container::Style {
                         background: Some(style::BORDER.into()),
@@ -522,7 +522,7 @@ impl App {
                 }
                 list = list.push(
                     row![
-                        text(label).size(11).font(style::BOLD).color(style::DIM),
+                        text(label).size(11).font(style::bold()).color(style::DIM),
                         text(rows.len().to_string()).size(11).color(style::FAINT),
                     ]
                     .spacing(6)
@@ -587,7 +587,7 @@ impl App {
             if !shown_terms.is_empty() {
                 list = list.push(
                     row![
-                        text(tr::group_terminal()).size(11).font(style::BOLD).color(style::DIM),
+                        text(tr::group_terminal()).size(11).font(style::bold()).color(style::DIM),
                         text(shown_terms.len().to_string()).size(11).color(style::FAINT),
                     ]
                     .spacing(6)
@@ -693,7 +693,7 @@ impl App {
                 .spacing(5)
                 .align_y(Alignment::Center);
             if let Some((n, tooltip)) = badge {
-                let b = container(text(n).size(10).font(style::BOLD))
+                let b = container(text(n).size(10).font(style::bold()))
                     .padding([0, 5])
                     .style(|_| container::Style {
                         background: Some(style::BORDER.into()),
@@ -877,7 +877,7 @@ impl App {
                 button(
                     text(glyph)
                         .size(11)
-                        .font(style::MONO)
+                        .font(style::mono())
                         .width(18)
                         .align_x(Alignment::Center),
                 )
@@ -1041,7 +1041,7 @@ impl App {
         let mut label = row![
             text(tr::explore_contents())
                 .size(11)
-                .font(style::BOLD)
+                .font(style::bold())
                 .color(style::DIM)
         ]
         .spacing(8)
@@ -1086,7 +1086,7 @@ impl App {
                     container(
                         row![
                             crate::icons::icon(crate::icons::Icon::GitBranch, 12.0, style::DIM),
-                            text(name.to_owned()).size(11).font(style::BOLD).color(style::DIM),
+                            text(name.to_owned()).size(11).font(style::bold()).color(style::DIM),
                         ]
                         .spacing(6)
                         .align_y(Alignment::Center),
@@ -1137,7 +1137,7 @@ impl App {
                         row![
                             text(h.line.to_string())
                                 .size(11)
-                                .font(style::MONO)
+                                .font(style::mono())
                                 .color(style::FAINT)
                                 .width(34)
                                 .align_x(Alignment::End),
@@ -1316,7 +1316,7 @@ fn commit_row<'a>(
     let mut top = row![
         text(c.subject.as_str())
             .size(12)
-            .font(style::BOLD)
+            .font(style::bold())
             .wrapping(text::Wrapping::None)
             .ellipsis(text::Ellipsis::End)
             .width(Fill)
@@ -1335,7 +1335,7 @@ fn commit_row<'a>(
     let avatar = container(
         text(history::initials(&c.author))
             .size(8)
-            .font(style::BOLD)
+            .font(style::bold())
             .color(Color::WHITE)
             .line_height(1.0),
     )
@@ -1423,7 +1423,7 @@ fn commit_file_row<'a>(f: &'a ide_client::GitChange, active: bool, open: Message
         container(
             text(st.letter().to_string())
                 .size(10)
-                .font(ide_views::theme::MONO_BOLD)
+                .font(ide_views::theme::mono_bold())
                 .line_height(1.0),
         )
         .center(16)
@@ -1487,7 +1487,7 @@ fn hit_text<'a>(line: &str, ranges: &[ide_client::ByteRange]) -> El<'a> {
     let piece = |s: &str| {
         text(s.to_owned())
             .size(12)
-            .font(style::MONO)
+            .font(style::mono())
             .wrapping(text::Wrapping::None)
     };
     for r in ranges {

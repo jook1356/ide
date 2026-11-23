@@ -953,7 +953,7 @@ impl FileTree {
                     line = line.push(
                         text(s.letter().to_string())
                             .size(11)
-                            .font(theme::MONO_BOLD)
+                            .font(theme::mono_bold())
                             .color(if e.ignored { theme::FAINT } else { s.color() })
                             .boxed(),
                     );

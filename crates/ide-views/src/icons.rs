@@ -67,7 +67,7 @@ pub fn file_icon<'a, M: 'a>(name: &str) -> Element<'a, M> {
     container(
         text(label)
             .size(7.5)
-            .font(theme::BOLD)
+            .font(theme::bold())
             .color(color!(0x1b1c1f))
             .line_height(1.0),
     )

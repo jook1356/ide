@@ -244,10 +244,10 @@ impl App {
         let ptitle = parent.map(|l| l.info.title.as_str()).unwrap_or("?");
         let mut c = Column::<El<'a>>::new()
             .spacing(10)
-            .push(text(tr::child_dialog_title(ptitle)).size(18).font(style::BOLD).boxed())
+            .push(text(tr::child_dialog_title(ptitle)).size(18).font(style::bold()).boxed())
             .push(
                 column![
-                    text(tr::session_name_label()).size(12).font(style::BOLD),
+                    text(tr::session_name_label()).size(12).font(style::bold()),
                     text_input(tr::child_title_placeholder(), &f.title)
                         .on_input(|v| fm(FamilyMsg::Title(v)))
                         .on_submit(fm(FamilyMsg::Submit))
@@ -262,7 +262,7 @@ impl App {
             let on = f.shared == shared;
             button(
                 column![
-                    text(label).size(13).font(style::BOLD),
+                    text(label).size(13).font(style::bold()),
                     text(hint).size(11).color(style::DIM),
                 ]
                 .spacing(2),
@@ -284,7 +284,7 @@ impl App {
             .boxed(),
         );
         if !f.shared {
-            c = c.push(text(tr::child_repos_label()).size(12).font(style::BOLD).boxed());
+            c = c.push(text(tr::child_repos_label()).size(12).font(style::bold()).boxed());
             for r in parent.map(|l| l.info.repos.as_slice()).unwrap_or(&[]) {
                 let id = r.repo.clone();
                 c = c.push(

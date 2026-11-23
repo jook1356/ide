@@ -354,7 +354,7 @@ impl App {
             };
             let mut title = Row::<El<'_>>::new().spacing(6).push(text(k.title.as_str()).size(12).boxed());
             if k.title != k.name {
-                title = title.push(text(k.name.as_str()).size(10).font(style::MONO).color(style::FAINT).boxed());
+                title = title.push(text(k.name.as_str()).size(10).font(style::mono()).color(style::FAINT).boxed());
             }
             let mut info = Column::<El<'_>>::new().push(title.boxed()).spacing(1).width(Fill);
             if !k.description.is_empty() {
@@ -383,14 +383,14 @@ impl App {
     /// The `SKILL.md` editor dialog.
     pub(crate) fn skill_modal_card<'a>(&'a self, f: &'a SkillEditForm) -> El<'a> {
         let mut c = column![
-            text(tr::skill_edit_title()).size(18).font(style::BOLD),
+            text(tr::skill_edit_title()).size(18).font(style::bold()),
             text(format!("{}/SKILL.md", f.name))
                 .size(12)
-                .font(style::MONO)
+                .font(style::mono())
                 .color(style::DIM),
             text_editor(&f.content)
                 .on_action(|a| Message::Skill(SkillMsg::EditAction(a)))
-                .font(style::MONO)
+                .font(style::mono())
                 .size(12)
                 .height(360),
         ]

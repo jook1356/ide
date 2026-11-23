@@ -432,7 +432,7 @@ impl App {
                 row![
                     text(t.info.title.clone())
                         .size(13)
-                        .font(style::BOLD)
+                        .font(style::bold())
                         .wrapping(text::Wrapping::None)
                         .ellipsis(text::Ellipsis::End),
                     text(status).size(11).color(style::DIM),
@@ -550,7 +550,7 @@ impl App {
                         let is_default = default.as_deref() == Some(s.id.as_str());
                         let open = row_btn(
                             row![
-                                text(">_").size(11).font(style::MONO).color(style::DIM),
+                                text(">_").size(11).font(style::mono()).color(style::DIM),
                                 text(s.name.clone()).size(13),
                             ]
                             .spacing(8)
