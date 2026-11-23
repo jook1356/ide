@@ -607,10 +607,10 @@ impl App {
     pub(crate) fn widget_grant_card<'a>(&'a self, f: &'a GrantForm) -> El<'a> {
         let mut tools = column![].spacing(4);
         for t in &f.tools {
-            tools = tools.push(text(t.clone()).size(12).font(style::MONO));
+            tools = tools.push(text(t.clone()).size(12).font(style::mono()));
         }
         let mut c = column![
-            text(tr::widget_grant_title()).size(18).font(style::BOLD),
+            text(tr::widget_grant_title()).size(18).font(style::bold()),
             text(tr::widget_grant_body(&f.name)).size(13),
             container(tools).padding([6, 10]).style(style::card),
             text(tr::widget_grant_note()).size(12).color(style::DIM),
