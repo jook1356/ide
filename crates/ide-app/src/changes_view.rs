@@ -144,7 +144,7 @@ fn kind_box<'a>(st: ide_views::GitStatus) -> El<'a> {
         container(
             text(st.letter().to_string())
                 .size(10)
-                .font(ide_views::theme::MONO_BOLD)
+                .font(ide_views::theme::mono_bold())
                 .line_height(1.0),
         )
         .center(16)
@@ -187,7 +187,7 @@ fn menu_divider<'a>() -> El<'a> {
 }
 
 fn count_badge<'a>(n: usize) -> El<'a> {
-    container(text(n.to_string()).size(10).font(style::BOLD))
+    container(text(n.to_string()).size(10).font(style::bold()))
         .padding([0, 5])
         .style(|_| container::Style {
             background: Some(style::BORDER.into()),
@@ -682,7 +682,7 @@ impl App {
                     icon(Icon::GitBranch, 14.0, style::DIM),
                     text(repo_name)
                         .size(12)
-                        .font(style::BOLD)
+                        .font(style::bold())
                         .wrapping(text::Wrapping::None)
                         .ellipsis(text::Ellipsis::End)
                         .width(Length::Shrink),
@@ -744,7 +744,7 @@ impl App {
         let a = &d.acts;
         let sid = live.info.id.as_str();
         let section = |label: String| -> El<'a> {
-            container(text(label).size(11).font(style::BOLD).color(style::DIM))
+            container(text(label).size(11).font(style::bold()).color(style::DIM))
                 .padding(Padding {
                     top: 8.0,
                     right: 12.0,
@@ -878,7 +878,7 @@ impl App {
             row![
                 text(tr::chg_picker_branches())
                     .size(11)
-                    .font(style::BOLD)
+                    .font(style::bold())
                     .color(style::DIM),
                 space().width(Fill),
                 button(
@@ -1052,7 +1052,7 @@ impl App {
         let sid = f.session.as_str();
         let cancel = (!f.busy).then_some(Message::CloseModal);
         let online = self.connected();
-        let title = |t: String| -> El<'a> { text(t).size(18).font(style::BOLD).boxed() };
+        let title = |t: String| -> El<'a> { text(t).size(18).font(style::bold()).boxed() };
         let mut c = Column::<El<'a>>::new().spacing(10);
         let width;
         match &f.kind {
@@ -1065,7 +1065,7 @@ impl App {
                             kind_box(view_status(file.kind)),
                             text(file.path.clone())
                                 .size(12)
-                                .font(style::MONO)
+                                .font(style::mono())
                                 .wrapping(text::Wrapping::None)
                                 .ellipsis(text::Ellipsis::Start),
                         ]
@@ -1131,7 +1131,7 @@ impl App {
                 c = c
                     .add(title(kind.label()))
                     .add(text(kind.description()).size(13))
-                    .add(text(commit.sha.clone()).size(12).font(style::MONO))
+                    .add(text(commit.sha.clone()).size(12).font(style::mono()))
                     .add(text(commit.subject.clone()).size(13))
                     .add(
                         text(tr::chg_commit_target(target))
@@ -1395,7 +1395,7 @@ fn base_select<'a>(
             continue;
         }
         list = list.add(
-            container(text(label).size(11).font(style::BOLD).color(style::DIM)).padding([4, 8]),
+            container(text(label).size(11).font(style::bold()).color(style::DIM)).padding([4, 8]),
         );
         for n in names {
             any = true;

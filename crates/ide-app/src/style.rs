@@ -1,7 +1,7 @@
 //! Colours and widget styles of the dark IDE look.
 
 use iced::widget::{button, container, text_input};
-use iced::{Background, Border, Color, Font, Shadow, Theme, color};
+use iced::{Background, Border, Color, Shadow, Theme, color};
 
 pub const BG: Color = color!(0x1e1f22);
 pub const SIDEBAR: Color = color!(0x18191c);
@@ -51,11 +51,7 @@ pub const RAIL_ICON: Color = TEXT;
 pub const RAIL_ACTIVE: Color = SELECTED;
 pub const RAIL_ACTIVE_ICON: Color = ACCENT_TEXT;
 
-pub const BOLD: Font = Font {
-    weight: iced::font::Weight::Bold,
-    ..Font::DEFAULT
-};
-pub const MONO: Font = Font::MONOSPACE;
+pub use ide_views::theme::{bold, mono, ui};
 
 pub fn theme() -> Theme {
     Theme::custom(

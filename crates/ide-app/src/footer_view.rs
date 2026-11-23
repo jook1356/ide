@@ -246,7 +246,7 @@ fn small<'a>(s: String) -> text::Text<'a> {
 }
 
 fn title<'a>(s: impl text::IntoFragment<'a>) -> El<'a> {
-    text(s).size(17).font(style::BOLD).boxed()
+    text(s).size(17).font(style::bold()).boxed()
 }
 
 fn dot<'a>(c: Color) -> El<'a> {
@@ -392,14 +392,14 @@ impl App {
             ic(FIcon::Sparkles, 14.0, style::ACCENT_TEXT),
             text(tr::foot_commit())
                 .size(12)
-                .font(style::BOLD)
+                .font(style::bold())
                 .wrapping(text::Wrapping::None),
         ]
         .spacing(6)
         .align_y(Alignment::Center);
         if partial {
             label = label.pb(
-                container(text(files.len().to_string()).size(10).font(style::BOLD))
+                container(text(files.len().to_string()).size(10).font(style::bold()))
                     .padding([0, 5])
                     .style(|_| container::Style {
                         background: Some(style::ACCENT.into()),
@@ -699,7 +699,7 @@ impl App {
             dot(c),
             text(j.title.as_str())
                 .size(12)
-                .font(style::BOLD)
+                .font(style::bold())
                 .width(Fill)
         ]
         .spacing(6)
@@ -839,7 +839,7 @@ impl App {
                         &e.number.map(|n| n.to_string()).unwrap_or_default()
                     ))
                     .size(13)
-                    .font(style::BOLD)
+                    .font(style::bold())
                     .color(style::GREEN),
                     text(e.title.as_str()).size(12),
                     button(text(tr::foot_pr_open_existing()).size(12))
@@ -863,7 +863,7 @@ impl App {
             let t = f.target.clone().unwrap_or_default();
             c = c.pb(container(
                 column![
-                    text(tr::foot_pr_same_as(&t)).size(12).font(style::BOLD),
+                    text(tr::foot_pr_same_as(&t)).size(12).font(style::bold()),
                     text(tr::foot_pr_same_as_body(&t))
                         .size(11)
                         .color(style::DIM),
@@ -880,10 +880,10 @@ impl App {
             Load::Loading => c = c.pb(small(tr::foot_pr_targets_loading())),
             Load::Ready(t) => {
                 let mut col =
-                    column![text(tr::foot_pr_target()).size(12).font(style::BOLD)].spacing(4);
+                    column![text(tr::foot_pr_target()).size(12).font(style::bold())].spacing(4);
                 col = col.pb(row![
                     ic(FIcon::GitMerge, 16.0, style::DIM),
-                    text(format!("{} →", t.current)).size(12).font(style::MONO),
+                    text(format!("{} →", t.current)).size(12).font(style::mono()),
                     pick_list(f.target.clone(), t.branches.clone(), |b: &String| b.clone())
                         .on_select({
                             let sid = sid.to_owned();
@@ -931,7 +931,7 @@ impl App {
                         col = col.pb(warn(tr::foot_pr_no_commits()));
                     }
                     col = col.pb(column![
-                        text(tr::foot_pr_title_label()).size(12).font(style::BOLD),
+                        text(tr::foot_pr_title_label()).size(12).font(style::bold()),
                         small(tr::foot_pr_title_note()),
                         text_input("", &f.title)
                             .id(PR_TITLE_ID)
@@ -961,7 +961,7 @@ impl App {
                     .align_y(Alignment::Center));
                     if f.show_body {
                         col = col.pb(container(
-                            scrollable(text(p.body.as_str()).size(11).font(style::MONO))
+                            scrollable(text(p.body.as_str()).size(11).font(style::mono()))
                                 .height(160),
                         )
                         .padding([6, 8])
@@ -1334,7 +1334,7 @@ fn group<'a>(
     for i in items {
         list = list.pb(text(i)
             .size(11)
-            .font(style::MONO)
+            .font(style::mono())
             .wrapping(text::Wrapping::None)
             .ellipsis(text::Ellipsis::End));
     }
@@ -1342,7 +1342,7 @@ fn group<'a>(
         row![
             checkbox(on).size(14),
             dot(tone),
-            text(head).size(13).font(style::BOLD),
+            text(head).size(13).font(style::bold()),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -1487,13 +1487,13 @@ fn leftover_card<'a>(f: &'a PrForm, file: &'a ide_client::PrLeftoverFile) -> El<
     let mut col = column![
         text(tr::foot_left_title())
             .size(13)
-            .font(style::BOLD)
+            .font(style::bold())
             .color(c),
         small(match &reason {
             Some(r) => tr::foot_left_written_reason(&when, r),
             None => tr::foot_left_written(&when),
         }),
-        text(line).size(11).font(style::BOLD).color(c),
+        text(line).size(11).font(style::bold()).color(c),
     ]
     .spacing(6);
     if !file.new_commits.is_empty() {
@@ -1539,7 +1539,7 @@ fn leftover_card<'a>(f: &'a PrForm, file: &'a ide_client::PrLeftoverFile) -> El<
     col = col.pb(container(t).padding([6, 8]).width(Fill).style(band));
     if f.show_left_body {
         col = col.pb(container(
-            scrollable(text(file.body.as_str()).size(11).font(style::MONO)).height(160),
+            scrollable(text(file.body.as_str()).size(11).font(style::mono())).height(160),
         )
         .padding([6, 8])
         .width(Fill)
@@ -1560,15 +1560,15 @@ fn merge_card(f: &MergeForm) -> El<'_> {
     let mut c = column![
         title(tr::foot_merge_title(&n)),
         column![
-            text(f.pr.title.as_str()).size(14).font(style::BOLD),
+            text(f.pr.title.as_str()).size(14).font(style::bold()),
             text(format!("{} → {}", f.pr.head_ref, f.pr.base_ref))
                 .size(12)
-                .font(style::MONO)
+                .font(style::mono())
                 .color(style::DIM),
         ]
         .spacing(2),
         column![
-            text(tr::foot_merge_method()).size(12).font(style::BOLD),
+            text(tr::foot_merge_method()).size(12).font(style::bold()),
             pick_list(Some(f.method), METHODS, method_label)
                 .on_select({
                     let sid = sid.to_owned();
@@ -1625,7 +1625,7 @@ fn merge_card(f: &MergeForm) -> El<'_> {
 fn close_card(f: &ClosePrForm) -> El<'_> {
     let mut c = column![
         title(tr::foot_close_title(&f.number.to_string())),
-        text(f.title.as_str()).size(13).font(style::BOLD),
+        text(f.title.as_str()).size(13).font(style::bold()),
         text(tr::foot_close_body()).size(13).color(style::DIM),
     ]
     .spacing(12);
@@ -1708,7 +1708,7 @@ fn continue_card(f: &ContinueForm) -> El<'_> {
     let name_ok = crate::footer::branch_name_ok(&f.name);
     let mut name_col = column![
         row![
-            text(tr::foot_continue_name()).size(12).font(style::BOLD),
+            text(tr::foot_continue_name()).size(12).font(style::bold()),
             small(tr::foot_continue_name_placeholder(&info.suggested)),
         ]
         .spacing(8),
@@ -1719,7 +1719,7 @@ fn continue_card(f: &ContinueForm) -> El<'_> {
                 move |t| fm(&sid, FooterMsg::ContinueName(t))
             }))
             .on_submit(fm(sid, FooterMsg::ContinueRun))
-            .font(style::MONO)
+            .font(style::mono())
             .size(12)
             .padding([5, 8])
             .style(style::input),
@@ -1744,7 +1744,7 @@ fn continue_card(f: &ContinueForm) -> El<'_> {
         .unwrap_or_default();
     let all = !info.commits.is_empty() && f.picked.len() == info.commits.len();
     let mut head = row![
-        text(tr::foot_continue_commits()).size(12).font(style::BOLD),
+        text(tr::foot_continue_commits()).size(12).font(style::bold()),
         small(format!("{}/{}", f.picked.len(), info.commits.len())),
         space().width(Fill),
     ]
@@ -1774,7 +1774,7 @@ fn continue_card(f: &ContinueForm) -> El<'_> {
                 checkbox(f.picked.contains(&cm.full)).size(14),
                 text(cm.sha.chars().take(7).collect::<String>())
                     .size(11)
-                    .font(style::MONO)
+                    .font(style::mono())
                     .color(style::DIM),
                 text(cm.subject.as_str())
                     .size(12)

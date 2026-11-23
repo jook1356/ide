@@ -1,6 +1,6 @@
 //! UI state remembered across restarts (`<data dir>/ui.json`): selected session, split ratio,
 //! detail collapsed, active configuration, per-session web URL, last repo folder, UI language,
-//! which server to use (local / SSH), what closing the window does, each session's open
+//! which server to use (local / SSH), the UI / code / terminal fonts, what closing the window does, each session's open
 //! detail items, the page chosen in the navigation rail and whether the session list is open.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +27,46 @@ pub enum CloseAction {
     Keep,
     /// Stop every session and the daemon, then exit.
     Stop,
+}
+
+/// Font families picked in Settings (blank = the default). The UI font applies at the next
+/// start; the code and terminal fonts at once.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontPrefs {
+    /// UI text (iced's default font).
+    pub ui: String,
+    /// Editor, diff, hashes and paths.
+    pub code: String,
+    /// Terminals.
+    pub terminal: String,
+}
+
+/// Which font of [`FontPrefs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontSlot {
+    Ui,
+    Code,
+    Terminal,
+}
+
+impl FontPrefs {
+    pub fn get(&self, slot: FontSlot) -> &str {
+        match slot {
+            FontSlot::Ui => &self.ui,
+            FontSlot::Code => &self.code,
+            FontSlot::Terminal => &self.terminal,
+        }
+    }
+
+    pub fn set(&mut self, slot: FontSlot, name: &str) {
+        let v = name.trim().to_owned();
+        match slot {
+            FontSlot::Ui => self.ui = v,
+            FontSlot::Code => self.code = v,
+            FontSlot::Terminal => self.terminal = v,
+        }
+    }
 }
 
 /// A page of the navigation rail.
@@ -110,6 +150,9 @@ pub struct UiState {
     /// Server to connect to (`IDE_REMOTE` overrides it).
     #[serde(deserialize_with = "lenient")]
     pub server: ServerPref,
+    /// Fonts picked in Settings.
+    #[serde(deserialize_with = "lenient")]
+    pub fonts: FontPrefs,
     /// Open detail items per session id.
     #[serde(deserialize_with = "lenient")]
     pub detail: BTreeMap<String, DetailUi>,
@@ -231,6 +274,7 @@ impl Default for UiState {
             language: LanguagePref::System,
             on_close: CloseAction::Ask,
             server: ServerPref::Local,
+            fonts: FontPrefs::default(),
             detail: BTreeMap::new(),
             page: Page::Work,
             sessions_open: true,
@@ -334,6 +378,11 @@ mod tests {
             server: ServerPref::Ssh {
                 host: "me@devbox".into(),
                 command: "/opt/ide/ide-server --stdio".into(),
+            },
+            fonts: FontPrefs {
+                ui: "Pretendard".into(),
+                code: "D2Coding".into(),
+                terminal: String::new(),
             },
             ..Default::default()
         };

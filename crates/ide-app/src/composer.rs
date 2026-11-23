@@ -91,7 +91,7 @@ fn text_width(s: &str, size: f32) -> f32 {
         bounds: iced::Size::INFINITE,
         size: iced::Pixels(size),
         line_height: t::LineHeight::default(),
-        font: iced::Font::DEFAULT,
+        font: style::ui(),
         align_x: t::Alignment::Default,
         align_y: iced::alignment::Vertical::Top,
         shaping: t::Shaping::Advanced,
@@ -783,7 +783,7 @@ impl App {
         let edit_sid = sid.clone();
         let editor = CodeEditor::new(&c.content)
             .id(iced::widget::Id::new(COMPOSER_ID))
-            .plain(iced::Font::DEFAULT, TEXT_SIZE, LINE_H)
+            .plain(style::ui(), TEXT_SIZE, LINE_H)
             .padding(iced::Padding {
                 top: PAD_Y,
                 right: 10.0,
