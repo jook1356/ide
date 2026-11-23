@@ -24,12 +24,15 @@ agent CLI (claude / codex, in the session's PTY)
                     └─ Notify::AgentRequest -> app -> agent.reply   (ide_show_message)
 ```
 
+- **Name** `ide-bridge`, not `ide`: Claude Code takes an MCP server named `ide` for its IDE
+  integration (VS Code extension tools such as `closeAllDiffTabs`) and does not offer its tools
+  as usual (v: seen in a real session).
 - **Injection** (`ide-agents`, provider-agnostic): `SessionInput::bridge` (`Bridge { server,
   env, instructions }`) is set by the server for every agent session. `assemble()` adds the
-  bridge's MCP server after the configuration's servers (a configuration server named `ide` is
+  bridge's MCP server after the configuration's servers (a configuration server named `ide-bridge` is
   left out with a note), appends the bridge instructions after the configuration's, and sets the
   env vars on the agent process. Providers map them as they map configuration MCP servers
-  (Claude `--mcp-config <scratch>/mcp.json`, Codex `-c mcp_servers.ide={...}`). Plain programs
+  (Claude `--mcp-config <scratch>/mcp.json`, Codex `-c mcp_servers.ide-bridge={...}`). Plain programs
   (shells) get the env vars only.
 - **Env** (agent process and MCP server; MCP clients start servers with a reduced environment,
   so the server entry repeats them): `IDE_SESSION_ID`, `IDE_AGENT_TOKEN`, `IDE_SERVER_SOCKET`.

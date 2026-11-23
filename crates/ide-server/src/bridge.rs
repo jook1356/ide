@@ -27,7 +27,9 @@ use ide_proto::{
 use tokio::sync::oneshot;
 
 /// Name of the bridge's MCP server (reserved: a configuration server of this name is left out).
-pub const MCP_NAME: &str = "ide";
+/// Not `ide`: Claude Code takes an MCP server of that name for its own IDE integration (VS Code
+/// extension: `closeAllDiffTabs`, ...) and does not offer it as a normal tool server.
+pub const MCP_NAME: &str = "ide-bridge";
 /// Env vars of the agent process and of the bridge's MCP server.
 pub const SESSION_ENV: &str = "IDE_SESSION_ID";
 pub const TOKEN_ENV: &str = "IDE_AGENT_TOKEN";
@@ -68,7 +70,7 @@ const APP_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTRUCTIONS: &str = "\
 ## ide
 You are running inside ide, the IDE that manages this session: its terminal, its \
-repositories / worktrees and the panels around it. The `ide` MCP server connects you to the \
+repositories / worktrees and the panels around it. The `ide-bridge` MCP server connects you to the \
 IDE. Use its tools (names start with `ide_`) instead of guessing about this session or the \
 IDE: `ide_session` describes this session (folder, repositories, branches, base branches); \
 `ide_show_message` shows a short note to the user in the IDE. Child sessions \

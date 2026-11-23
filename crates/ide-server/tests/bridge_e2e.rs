@@ -1,5 +1,5 @@
 //! The agent bridge (`docs/agent-bridge.md`) without any agent CLI: launch specs carry the
-//! `ide` MCP server and its instructions; an agent connection (session token) gets the tools,
+//! `ide-bridge` MCP server and its instructions; an agent connection (session token) gets the tools,
 //! nothing else; an app-carried tool round-trips through a connected app; the real
 //! `ide-server mcp` speaks MCP over stdio to a real daemon.
 //!
@@ -160,7 +160,7 @@ async fn launch_specs_carry_the_bridge() {
     // A configuration server named like the bridge's is left out (the name is reserved).
     c.update_configuration(ConfigurationInfo {
         mcp_servers: vec![McpServerInfo {
-            name: "ide".into(),
+            name: "ide-bridge".into(),
             command: "node".into(),
             args: vec!["shadow.js".into()],
             env: Vec::new(),
@@ -196,7 +196,7 @@ async fn launch_specs_carry_the_bridge() {
                     &std::fs::read_to_string(scratch.join("mcp.json")).unwrap(),
                 )
                 .unwrap();
-                let ide = &mcp["mcpServers"]["ide"];
+                let ide = &mcp["mcpServers"]["ide-bridge"];
                 assert_eq!(ide["command"], bin.join("ide-server-fake").display().to_string());
                 assert_eq!(ide["args"], serde_json::json!(["mcp"]));
                 assert_eq!(ide["env"][TOKEN_ENV], token.as_str());
@@ -209,7 +209,7 @@ async fn launch_specs_carry_the_bridge() {
                 let ide = spec
                     .args
                     .iter()
-                    .find(|a| a.starts_with("mcp_servers.ide="))
+                    .find(|a| a.starts_with("mcp_servers.ide-bridge="))
                     .expect("ide mcp override");
                 assert!(ide.contains(r#"args=["mcp"]"#) && ide.contains(&token), "{ide}");
                 assert!(!spec.args.iter().any(|a| a.contains("shadow.js")));
@@ -375,7 +375,7 @@ async fn mcp_stdio_against_a_daemon() {
             .unwrap(),
     )
     .unwrap();
-    let ide = &mcp["mcpServers"]["ide"];
+    let ide = &mcp["mcpServers"]["ide-bridge"];
     assert!(ide_core::same_path(Path::new(ide["command"].as_str().unwrap()), Path::new(exe)));
 
     let mut cmd = tokio::process::Command::new(ide["command"].as_str().unwrap());
@@ -409,7 +409,7 @@ async fn mcp_stdio_against_a_daemon() {
     let init = ask(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
     .await;
-    assert_eq!(init["result"]["serverInfo"]["name"], "ide");
+    assert_eq!(init["result"]["serverInfo"]["name"], "ide-bridge");
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     // Notifications get no answer: the next line answers the next request.
     ask(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
