@@ -34,6 +34,7 @@ mod item_menu;
 mod uterm;
 mod script;
 mod scripts_view;
+mod session_menu;
 mod session_sort;
 mod profiles_view;
 mod skills_ui;

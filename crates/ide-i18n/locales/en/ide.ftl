@@ -32,8 +32,6 @@ sessions-label = SESSIONS
 new-session = New session
 no-sessions = No sessions yet. Click + to start one.
 session-title-placeholder = Session title
-start = Start
-stop = Stop
 restart = Restart
 rename = Rename
 delete = Delete
@@ -285,7 +283,7 @@ close-remember = Don't ask again (change it in Settings)
 ## Errors shown by the app
 
 err-web-view = Web view: { $detail }
-err-rename-failed = Rename failed: { $detail }
+err-session-flags-failed = Could not change the session: { $detail }
 err-choose-repo = Choose a repository.
 err-server-missing = The server program was not found: { $detail }
 
@@ -623,13 +621,27 @@ worktree-repos-note = The first selection is the profile's default repositories;
 original-repo-warning = The agent edits and commits in the repository's own folder and current branch. Other sessions and your own work in that repository can get mixed up; clean up uncommitted changes first.
 original-repo-label = Repository to work in
 no-repos-register-first = No repositories registered. Register one on the Repos page first.
-session-repos-title = Repositories of “{ $title }”
+session-name-label = Session name
 session-repos-label = Repositories · branch ← base
 session-repo-detach = Remove this worktree from the session (its branch is kept)
 session-repos-add-label = Add repositories
 session-repos-note = Added repositories get a worktree in the session folder when you save; a running agent sees them in its guidance after a restart.
 session-repos-no-workspace = This session works in a repository directly and has no workspace, so repositories cannot be added.
 session-repos-open = Session repositories
+session-pin = Pin
+session-unpin = Unpin
+session-archive = Move to archive
+session-unarchive = Take out of archive
+archive-label = Archive
+archive-fold = Fold archive
+archive-unfold = Unfold archive
+session-open-folder = Open working folder
+session-copy-folder = Copy working folder path
+session-copy-id = Copy session ID
+session-settings = Session settings
+session-copied-folder = Working folder path copied
+session-copied-id = Session ID copied
+session-open-folder-failed = Could not open the working folder: { $error }
 no-repos-in-session = This session has no repositories. Add one with ⚙.
 err-some-worktrees-failed = Some worktrees could not be created:
     { $detail }

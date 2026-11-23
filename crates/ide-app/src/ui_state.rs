@@ -126,6 +126,10 @@ pub struct UiState {
     /// Folded groups of the session list: configuration slugs, or [`LOGIN_GROUP`].
     #[serde(deserialize_with = "lenient")]
     pub folded_groups: BTreeSet<String>,
+    /// Session list groups whose 보관함 (archived sessions) is unfolded; same keys as
+    /// `folded_groups`, "" for the single block of one configuration.
+    #[serde(deserialize_with = "lenient")]
+    pub archive_open: BTreeSet<String>,
     /// The detail area lives in a window of its own (Hermes Desk's `region-detached:detail`):
     /// kept while that window is hidden (its own close button, the detail toggle, quitting)
     /// and across restarts; cleared only by "앱으로 합치기".
@@ -142,6 +146,9 @@ pub struct UiState {
     /// Width of the side panel (Changes / History / Explore), set by dragging its left edge
     /// (Desk's `changes-panel-width`); clamped to the window when drawn.
     pub side_width: f32,
+    /// Width of the session / profile list, set by dragging its right edge; clamped to the
+    /// window when drawn.
+    pub list_width: f32,
     /// Explore's 파일 찾기 leaves gitignored files and folders out (Desk's
     /// `explore-search-hide-ignored`, on by default).
     pub explore_hide_ignored: bool,
@@ -221,11 +228,13 @@ impl Default for UiState {
             sessions_all: false,
             session_sort: Vec::new(),
             folded_groups: BTreeSet::new(),
+            archive_open: BTreeSet::new(),
             detail_detached: false,
             detail_pinned: false,
             detail_window: None,
             detail_rail: RailPrefs::default(),
             side_width: crate::detail::SIDE_W,
+            list_width: crate::app::SIDEBAR_W,
             explore_hide_ignored: true,
             bookmarks: Vec::new(),
             default_shell: None,

@@ -3337,7 +3337,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             Step::ExpectSessionsOpen(open) => {
                 let left = crate::app::RAIL_W
                     + if open {
-                        crate::app::SIDEBAR_W + 1.0
+                        app.list_w() + crate::app::DIVIDER_W
                     } else {
                         0.0
                     };

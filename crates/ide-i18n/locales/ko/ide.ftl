@@ -28,8 +28,6 @@ sessions-label = 세션
 new-session = 새 세션
 no-sessions = 세션이 아직 없어요. +를 눌러 시작하세요.
 session-title-placeholder = 세션 제목
-start = 시작
-stop = 중지
 restart = 다시 시작
 rename = 이름 바꾸기
 delete = 삭제
@@ -263,7 +261,7 @@ close-remember = 다시 묻지 않기 (설정에서 바꿀 수 있어요)
 ## Errors shown by the app
 
 err-web-view = 웹 뷰 오류: { $detail }
-err-rename-failed = 이름을 바꾸지 못했어요: { $detail }
+err-session-flags-failed = 세션을 바꾸지 못했어요: { $detail }
 err-choose-repo = 레포를 선택하세요.
 err-server-missing = 서버 프로그램을 찾지 못했어요: { $detail }
 
@@ -541,13 +539,27 @@ worktree-repos-note = 고른 레포마다 워크트리를 만듭니다. 처음 �
 original-repo-warning = 원본 레포에서 바로 작업해요. 에이전트가 고른 레포의 원본 폴더와 지금 체크아웃된 브랜치에서 그대로 파일을 고치고 커밋합니다. 같은 레포를 쓰는 다른 세션이나 직접 하던 작업과 변경이 섞일 수 있어요. 커밋하지 않은 변경이 있으면 먼저 정리해 두세요.
 original-repo-label = 작업할 레포
 no-repos-register-first = 등록된 레포가 없습니다. 먼저 레포를 등록하세요.
-session-repos-title = “{ $title }” 레포
+session-name-label = 세션 이름
 session-repos-label = 레포 · 브랜치 ← 기준 브랜치
 session-repo-detach = 이 워크트리를 세션에서 제거 (브랜치는 유지)
 session-repos-add-label = 레포 추가
 session-repos-note = 추가한 레포는 저장하면 세션 폴더에 워크트리가 생기고, 이미 실행 중인 에이전트는 다시 시작할 때 작업 규칙에 반영돼요.
 session-repos-no-workspace = 이 세션은 워크스페이스가 없어 레포를 추가할 수 없습니다.
 session-repos-open = 세션 레포
+session-pin = 고정
+session-unpin = 고정 해제
+session-archive = 보관함으로 이동
+session-unarchive = 보관함에서 꺼내기
+archive-label = 보관함
+archive-fold = 보관함 접기
+archive-unfold = 보관함 펼치기
+session-open-folder = 작업 폴더 열기
+session-copy-folder = 작업 폴더 경로 복사
+session-copy-id = 세션 ID 복사
+session-settings = 세션 설정
+session-copied-folder = 작업 폴더 경로를 복사했어요
+session-copied-id = 세션 ID를 복사했어요
+session-open-folder-failed = 작업 폴더를 열지 못했어요: { $error }
 no-repos-in-session = 이 세션에는 레포가 없어요. ⚙에서 추가하세요.
 err-some-worktrees-failed = 일부 레포의 워크트리를 만들지 못했습니다:
     { $detail }

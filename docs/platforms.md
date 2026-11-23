@@ -33,6 +33,8 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 - [ ] **Packaging.** The binaries with `libcef.so` and its resources in one folder.
 - [ ] **Terminal font.** `ide-term` defaults to `Consolas` (`config.rs`); pick a Linux default
   (`DejaVu Sans Mono` / `monospace`).
+- [ ] **Session menu "작업 폴더 열기".** `session_menu::open_folder` runs `xdg-open <folder>`.
+  Check: right-click a session, open its folder in the desktop's file manager.
 
 ## macOS: to do
 
@@ -133,6 +135,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
   macOS). Check: delete a file in Explore, find it in the Trash with "Put Back".
 - [ ] **Explore "Finder에서 보기" label and reveal.** `tree.rs::reveal_os_label` and
   `item_menu::reveal_in_file_manager` (`open -R`). Check the label and that Finder selects the entry.
+- [ ] **Session menu "작업 폴더 열기".** `session_menu::open_folder` runs `open <folder>`.
+  Assumption: `open` on a directory opens it in Finder. Check: right-click a session, open its folder.
 
 ### 3. Shipping
 
@@ -152,6 +156,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-23: session right-click menu opens the working folder with `open` (macOS) /
+  `xdg-open` (Linux) (`session_menu.rs`); unbuilt on macOS / Linux.
 - 2026-11-23: Explore cut / copy / paste via the OS file clipboard, delete to the Trash
   (`trash` crate), reveal label per OS (`explore_actions.rs`, `fsops.rs`, `tree.rs`); unbuilt on
   macOS / Linux.

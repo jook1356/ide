@@ -31,8 +31,11 @@ use crate::ui_state::{CloseAction, DetailUi, Page, SPLIT_RANGE, ServerPref, UiSt
 
 /// Width of the navigation rail in logical pixels, its right border included.
 pub const RAIL_W: f32 = 64.0;
-/// Width of the session list column in logical pixels.
+/// Default width of the session / profile list column in logical pixels.
 pub const SIDEBAR_W: f32 = 264.0;
+/// Narrowest and widest session / profile list.
+const LIST_MIN: f32 = 200.0;
+const LIST_MAX: f32 = 600.0;
 /// Width of the draggable divider between centre and detail.
 pub const DIVIDER_W: f32 = 5.0;
 /// Narrowest side panel (Desk's `MIN_PANEL`), and what it leaves at least to the terminal and
@@ -48,7 +51,6 @@ pub const DEFAULT_CONFIGURATION: &str = "default";
 const INITIAL_GRID: (u16, u16) = (120, 30);
 
 pub const TERM_ID: &str = "ide-term";
-pub const RENAME_ID: &str = "ide-rename";
 pub const NEW_TITLE_ID: &str = "ide-new-title";
 pub const URL_ID: &str = "ide-url";
 pub const CONFIG_NAME_ID: &str = "ide-config-name";
@@ -349,6 +351,8 @@ pub struct DeleteEntryForm {
 /// detaching one (ide addition; Desk cannot remove a worktree mid-session).
 pub struct SessionReposForm {
     pub session: String,
+    /// The session name being edited (Desk's 세션 설정 "세션 이름"); renamed on save when changed.
+    pub title: String,
     /// Registered repos checked to be attached on save.
     pub add: Vec<String>,
     /// Base branch chosen per repo id (attached: the session's base, saved with
@@ -701,10 +705,9 @@ pub enum Message {
     Start(String),
     Stop(String),
     SessionOp(String, Result<SessionInfo, ProtoError>),
-    StartRename(String),
-    RenameInput(String),
-    RenameCommit,
-    Renamed(Result<SessionInfo, ProtoError>),
+    /// Pin / unpin (`.1`) and archive / unarchive (`.2`) a session (`None` = unchanged).
+    SetSessionFlags(String, Option<bool>, Option<bool>),
+    SessionFlagsSet(Result<SessionInfo, ProtoError>),
 
     AskDelete(String),
     DeleteWorktree(bool),
@@ -734,6 +737,8 @@ pub enum Message {
     Page(Page),
     /// The pointer entered / left the rail's work button.
     RailHover(bool),
+    /// The pointer entered (`true`) or left (`false`) a session row.
+    SessionHover(String, bool),
     AcctProvider(String),
     AcctName(String),
     /// Create the account and open its login command in a terminal.
@@ -797,6 +802,8 @@ pub enum Message {
     DividerPressed,
     /// The side panel's left edge is pressed (width drag).
     SideResizePressed,
+    /// The session / profile list's right edge is pressed (width drag).
+    ListResizePressed,
     DragMoved(Point),
     /// The pointer moved in a window while the divider is dragged.
     WindowDrag(window::Id, Point),
@@ -814,6 +821,8 @@ pub enum Message {
     Sort(SortChange),
     /// Fold / unfold a session list group (configuration slug or `LOGIN_GROUP`).
     ToggleGroupFold(String),
+    /// Fold / unfold a session list group's 보관함.
+    ToggleArchiveOpen(String),
     QuickOpen,
     QuickInput(String),
     QuickResults(u64, Result<Vec<FileMatch>, ProtoError>),
@@ -865,6 +874,7 @@ pub enum Message {
     BaseSaved(Result<RepoInfo, ProtoError>),
     /// Open the session's repos dialog.
     SessionRepos(String),
+    SessionReposTitle(String),
     SessionRepoAdd(String, bool),
     SessionReposSave,
     SessionRepoDetach(String),
@@ -906,6 +916,11 @@ pub enum Message {
     /// An open item's right-click menu opened (at the pointer) or closed (`item_menu.rs`).
     ItemMenu(Option<crate::item_menu::ItemMenu>),
     ItemAct(crate::item_menu::ItemAct),
+    /// Open (`Some`) or close a session row's right-click menu.
+    SessionMenu(Option<crate::session_menu::SessionMenu>),
+    SessionAct(crate::session_menu::SessionAct),
+    /// Close the session menu, then handle the message (세션 설정, 삭제).
+    SessionMenuThen(Box<Message>),
     ItemDrag(crate::item_menu::DragMsg),
     /// User terminals of the detail area (`uterm.rs`).
     UTerm(crate::uterm::UTermMsg),
@@ -1080,12 +1095,15 @@ pub struct App {
     pub dragging: bool,
     /// The side panel's left edge is dragged.
     pub side_dragging: bool,
+    /// The session / profile list's right edge is dragged.
+    pub list_dragging: bool,
     pub modal: Option<Modal>,
     /// Accounts, configurations, repos and settings pages.
     pub settings: SettingsForm,
     /// The pointer is over the rail's work button (shows the session-list toggle icon).
     pub rail_hover: bool,
-    pub rename: Option<(String, String)>,
+    /// The session row under the pointer (shows its pin / delete buttons).
+    pub session_hover: Option<String>,
     /// Problems outside a modal (failed RPCs, ...), shown in the sidebar.
     pub banner: Option<String>,
     pub script: Option<Script>,
@@ -1104,6 +1122,7 @@ pub struct App {
     pub rail_arm: u64,
     /// The open item menu (right-click on an item of the tab list or the popover).
     pub item_menu: Option<crate::item_menu::ItemMenu>,
+    pub session_menu: Option<crate::session_menu::SessionMenu>,
     /// An open item dragged within its group.
     pub item_drag: Option<crate::item_menu::ItemDrag>,
     /// The "+ 새로 열기" menu is open.
@@ -1208,10 +1227,11 @@ impl App {
             detail_window_maximized: false,
             dragging: false,
             side_dragging: false,
+            list_dragging: false,
             modal: None,
             settings,
             rail_hover: false,
-            rename: None,
+            session_hover: None,
             banner: None,
             script: None,
             modal_web_unsafe: false,
@@ -1221,6 +1241,7 @@ impl App {
             rail_menu: false,
             rail_arm: 0,
             item_menu: None,
+            session_menu: None,
             item_drag: None,
             new_menu: false,
             new_global: false,
@@ -1329,13 +1350,19 @@ impl App {
         self.conn.is_connected().then(|| self.client()).flatten()
     }
 
-    /// Width left of the terminal: the rail and, when open, the session list and its border.
+    /// Width left of the terminal: the rail and, when open, the session list and its handle.
     pub fn left_w(&self) -> f32 {
         if self.ui.sessions_open {
-            RAIL_W + SIDEBAR_W + 1.0
+            RAIL_W + self.list_w() + DIVIDER_W
         } else {
             RAIL_W
         }
+    }
+
+    /// The session / profile list's width: the dragged one, leaving the terminal its minimum.
+    pub fn list_w(&self) -> f32 {
+        let max = (self.window_size.width - RAIL_W - DIVIDER_W - CENTRE_MIN).min(LIST_MAX);
+        self.ui.list_width.clamp(LIST_MIN, max.max(LIST_MIN))
     }
 
     /// Width shared by the terminal and the detail pane (the divider's range): the window
@@ -1761,7 +1788,6 @@ impl App {
         let attach = Task::batch([self.ensure_attached(), self.sync_detail(), uterms]);
         if self.selected_live().is_some()
             && self.modal.is_none()
-            && self.rename.is_none()
             && self.on_work_page()
         {
             Task::batch([attach, operation::focus(TERM_ID)])
@@ -1908,39 +1934,16 @@ impl App {
                 }
                 self.ensure_attached()
             }
-            Message::StartRename(id) => {
-                if !self.connected() {
+            Message::SetSessionFlags(id, pinned, archived) => {
+                let Some(c) = self.online() else {
                     return Task::none();
-                }
-                let title = self
-                    .live(&id)
-                    .map(|l| l.info.title.clone())
-                    .unwrap_or_default();
-                self.rename = Some((id, title));
-                operation::focus(RENAME_ID)
+                };
+                Task::perform(
+                    async move { c.set_session_flags(&id, pinned, archived).await },
+                    Message::SessionFlagsSet,
+                )
             }
-            Message::RenameInput(t) => {
-                if let Some((_, v)) = &mut self.rename {
-                    *v = t;
-                }
-                Task::none()
-            }
-            Message::RenameCommit => {
-                let mut task = Task::none();
-                if let Some((id, title)) = self.rename.take() {
-                    let title = title.trim().to_owned();
-                    if !title.is_empty()
-                        && let Some(c) = self.online()
-                    {
-                        task = Task::perform(
-                            async move { c.rename_session(&id, &title).await },
-                            Message::Renamed,
-                        );
-                    }
-                }
-                Task::batch([task, self.after_select()])
-            }
-            Message::Renamed(r) => {
+            Message::SessionFlagsSet(r) => {
                 match r {
                     Ok(info) => {
                         let id = info.id.clone();
@@ -1948,7 +1951,9 @@ impl App {
                             l.info = info;
                         }
                     }
-                    Err(e) => self.banner = Some(tr::err_rename_failed(&i18n::proto_error(&e))),
+                    Err(e) => {
+                        self.banner = Some(tr::err_session_flags_failed(&i18n::proto_error(&e)))
+                    }
                 }
                 Task::none()
             }
@@ -2290,10 +2295,6 @@ impl App {
             Message::NewSubmit => self.submit_new(),
             Message::NewCreated(result) => self.on_created(result),
             Message::CloseModal => {
-                // Escape also cancels an inline rename.
-                if self.rename.take().is_some() && self.modal.is_none() {
-                    return self.after_select();
-                }
                 let busy = match &self.modal {
                     Some(Modal::DeleteEntry(f)) => f.busy,
                     Some(Modal::Delete(f)) => f.busy,
@@ -2353,7 +2354,6 @@ impl App {
                 crate::script::log(&format!("page {page:?}"));
                 self.ui.page = page;
                 self.open_items = false;
-                self.rename = None;
                 self.rail_hover = false;
                 self.settings.error = None;
                 self.save_ui();
@@ -2382,6 +2382,15 @@ impl App {
             }
             Message::RailHover(v) => {
                 self.rail_hover = v;
+                Task::none()
+            }
+            Message::SessionHover(id, entered) => {
+                if entered {
+                    self.session_hover = Some(id);
+                } else if self.session_hover.as_deref() == Some(id.as_str()) {
+                    // Leaving a row only clears it if the pointer has not entered another one yet.
+                    self.session_hover = None;
+                }
                 Task::none()
             }
             Message::ReposLoaded(r) => {
@@ -2523,14 +2532,22 @@ impl App {
                     return Task::none();
                 }
                 self.open_items = false;
+                let title = self.live(&sid).map(|l| l.info.title.clone()).unwrap_or_default();
                 self.modal = Some(Modal::SessionRepos(SessionReposForm {
                     session: sid,
+                    title,
                     add: Vec::new(),
                     bases: Default::default(),
                     error: None,
                     busy: false,
                 }));
                 Task::batch([self.load_repos(), self.load_origin_branches()])
+            }
+            Message::SessionReposTitle(t) => {
+                if let Some(Modal::SessionRepos(f)) = &mut self.modal {
+                    f.title = t;
+                }
+                Task::none()
             }
             Message::SessionRepoAdd(id, on) => {
                 if let Some(Modal::SessionRepos(f)) = &mut self.modal {
@@ -2544,6 +2561,13 @@ impl App {
             Message::SessionReposSave | Message::SessionRepoDetach(_) => {
                 let Some(c) = self.online() else {
                     return Task::none();
+                };
+                // The session's current title, to rename only when changed (and not emptied).
+                let old_title = match &self.modal {
+                    Some(Modal::SessionRepos(f)) => {
+                        self.live(&f.session).map(|l| l.info.title.clone()).unwrap_or_default()
+                    }
+                    _ => String::new(),
                 };
                 // The attached repos' current (session) bases, to save only changed ones.
                 let current: Vec<(String, String)> = match &self.modal {
@@ -2566,6 +2590,8 @@ impl App {
                     return Task::none();
                 }
                 let sid = f.session.clone();
+                let new_title = f.title.trim().to_owned();
+                let rename = (!new_title.is_empty() && new_title != old_title).then_some(new_title);
                 let changes: Vec<(String, String)> = current
                     .iter()
                     .filter_map(|(r, cur)| {
@@ -2584,7 +2610,7 @@ impl App {
                             Message::SessionReposDone(false, r)
                         })
                     }
-                    _ if f.add.is_empty() && changes.is_empty() => {
+                    _ if f.add.is_empty() && changes.is_empty() && rename.is_none() => {
                         self.modal = None;
                         self.after_select()
                     }
@@ -2599,13 +2625,16 @@ impl App {
                             })
                             .collect();
                         crate::script::log(&format!(
-                            "session repos save {sid}: bases {changes:?}, attach {add:?}"
+                            "session settings save {sid}: rename {rename:?}, bases {changes:?}, attach {add:?}"
                         ));
                         // Desk: `wsSetSessionBase` for changed bases, then one worktree after
                         // the other (`wsAddRepoToSessions` with the picked base).
                         Task::perform(
                             async move {
                                 let mut last = None;
+                                if let Some(t) = rename {
+                                    last = Some(c.rename_session(&sid, &t).await?);
+                                }
                                 for (r, b) in changes {
                                     last = Some(c.set_session_base(&sid, &r, Some(&b)).await?);
                                 }
@@ -2651,7 +2680,6 @@ impl App {
                 if self.online().is_none() {
                     return Task::none();
                 }
-                self.rename = None;
                 self.modal = Some(Modal::PickRoot(PickRootForm::default()));
                 self.pick_go(None)
             }
@@ -3212,6 +3240,13 @@ impl App {
                 self.save_ui();
                 Task::none()
             }
+            Message::ToggleArchiveOpen(key) => {
+                if !self.ui.archive_open.remove(&key) {
+                    self.ui.archive_open.insert(key);
+                }
+                self.save_ui();
+                Task::none()
+            }
             Message::ToggleGroupFold(key) => {
                 if !self.ui.folded_groups.remove(&key) {
                     self.ui.folded_groups.insert(key);
@@ -3347,6 +3382,10 @@ impl App {
                 self.side_dragging = true;
                 Task::none()
             }
+            Message::ListResizePressed => {
+                self.list_dragging = true;
+                Task::none()
+            }
             Message::DragMoved(p) => {
                 if self.dragging {
                     let avail = self.split_avail();
@@ -3356,6 +3395,10 @@ impl App {
                     // The panel reaches the window's right edge; the pointer is on its handle.
                     self.ui.side_width = self.window_size.width - p.x - DIVIDER_W / 2.0;
                     self.ui.side_width = self.side_w();
+                } else if self.list_dragging {
+                    // The list starts at the rail's right edge; the pointer is on its handle.
+                    self.ui.list_width = p.x - RAIL_W - DIVIDER_W / 2.0;
+                    self.ui.list_width = self.list_w();
                 }
                 Task::none()
             }
@@ -3366,9 +3409,10 @@ impl App {
                 Task::none()
             }
             Message::DragEnd => {
-                if self.dragging || self.side_dragging {
+                if self.dragging || self.side_dragging || self.list_dragging {
                     self.dragging = false;
                     self.side_dragging = false;
+                    self.list_dragging = false;
                     self.save_ui();
                 }
                 Task::none()
@@ -3416,6 +3460,15 @@ impl App {
             Message::Rail(m) => self.on_rail(m),
             Message::ItemMenu(m) => self.on_item_menu(m),
             Message::ItemAct(a) => self.on_item_act(a),
+            Message::SessionMenu(m) => {
+                self.session_menu = m;
+                Task::none()
+            }
+            Message::SessionAct(a) => self.on_session_act(a),
+            Message::SessionMenuThen(m) => {
+                self.session_menu = None;
+                self.update_inner(*m)
+            }
             Message::ItemDrag(m) => self.on_item_drag(m),
             Message::UTerm(m) => self.on_uterm(m),
             Message::Browser(m) => self.on_browser(m),
@@ -3442,7 +3495,6 @@ impl App {
                 if self.online().is_none() {
                     return Task::none();
                 }
-                self.rename = None;
                 self.modal = Some(Modal::PickRoot(PickRootForm {
                     purpose: PickPurpose::Terminal,
                     ..PickRootForm::default()
@@ -3618,7 +3670,6 @@ impl App {
         ));
         match self.ui.on_close {
             CloseAction::Ask if local && running => {
-                self.rename = None;
                 self.modal = Some(Modal::Close(CloseForm::default()));
                 Task::none()
             }
@@ -3953,7 +4004,7 @@ impl App {
                     .map(|(generation, e)| Message::Client(generation, e)),
             );
         }
-        if self.dragging || self.side_dragging {
+        if self.dragging || self.side_dragging || self.list_dragging {
             // The dividers are in the app window: the detail window's pointer does not drive them.
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -3965,12 +4016,20 @@ impl App {
                 _ => None,
             }));
         }
-        if self.modal.is_some() || self.rename.is_some() {
+        if self.modal.is_some() {
             subs.push(event::listen_with(|e, _, _| match e {
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::CloseModal),
+                _ => None,
+            }));
+        } else if self.session_menu.is_some() {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::SessionMenu(None)),
                 _ => None,
             }));
         } else if self.item_menu.is_some() {

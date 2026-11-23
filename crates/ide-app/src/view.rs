@@ -14,7 +14,7 @@ use ide_term::TerminalView;
 use crate::app::{
     ALL_CONFIGURATIONS, App, Choice, Conn, DIVIDER_W, Live, Message,
     Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PICK_PATH_ID, PickRootForm, QuickForm, RAIL_W,
-    RENAME_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
+    RunState, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
     TERM_ID,
 };
 use crate::i18n::{self, tr};
@@ -30,7 +30,6 @@ const I_PLUS: &str = "+";
 // U+25B8: U+25B6 would get the emoji presentation from Segoe UI Emoji.
 const I_PLAY: &str = "▸";
 const I_RESTART: &str = "↻";
-const I_STOP: &str = "■";
 const I_EDIT: &str = "✎";
 const I_DELETE: &str = "✕";
 const I_DOT: &str = "●";
@@ -180,6 +179,38 @@ fn sort_key_label(key: SortKey) -> String {
 }
 
 /// Hermes Desk's `AgentDivider`: "▾ name ───── 3", folding the group's rows on click.
+/// Desk's `session-archive-toggle`: "보관함" with its count, folding the group's archived rows.
+fn archive_toggle<'a>(key: String, count: usize, open: bool) -> El<'a> {
+    let body = row![
+        icons::icon(
+            if open { Icon::ChevronDown } else { Icon::ChevronRight },
+            12.0,
+            style::DIM
+        ),
+        icons::icon(Icon::Archive, 14.0, style::DIM),
+        text(tr::archive_label())
+            .size(11)
+            .color(style::DIM)
+            .width(Fill),
+        text(count.to_string()).size(11).color(style::FAINT),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+    let b = button(body)
+        .padding([4, 6])
+        .width(Fill)
+        .style(style::row(false))
+        .on_press(Message::ToggleArchiveOpen(key));
+    tip(
+        b.boxed(),
+        if open {
+            tr::archive_fold()
+        } else {
+            tr::archive_unfold()
+        },
+    )
+}
+
 fn group_divider<'a>(key: String, name: String, count: usize, folded: bool) -> El<'a> {
     let tooltip = if folded {
         tr::group_unfold(&name)
@@ -234,14 +265,7 @@ impl App {
         // The session list's slot keeps its place when hidden (same child count), so the
         // terminal and the detail area keep their widget state.
         let (list, list_border): (El<'_>, El<'_>) = if self.ui.sessions_open {
-            (
-                self.sidebar(),
-                container(space())
-                    .width(1)
-                    .height(Fill)
-                    .style(style::bg(style::BORDER))
-                    .boxed(),
-            )
+            (self.sidebar(), self.list_handle())
         } else {
             (space().width(0).boxed(), space().width(0).boxed())
         };
@@ -272,6 +296,7 @@ impl App {
             let window = stack![
                 column![bar, root],
                 self.item_menu_layer(false),
+                self.session_menu_layer(),
                 self.drag_ghost(),
                 self.side_menu_layer()
             ]
@@ -506,12 +531,24 @@ impl App {
         let empty = groups.is_empty();
         for (key, name, members) in groups {
             let folded = !key.is_empty() && self.ui.folded_groups.contains(&key);
+            // Desk: each block is its live rows, then its 보관함 (archived rows, folded by default).
+            let (archived, members): (Vec<&Live>, Vec<&Live>) =
+                members.into_iter().partition(|l| l.info.archived);
             if !key.is_empty() {
-                list = list.push(group_divider(key, name, members.len(), folded));
+                list = list.push(group_divider(key.clone(), name, members.len(), folded));
             }
             if !folded {
                 for l in members {
                     list = list.push(self.session_row(l));
+                }
+                if !archived.is_empty() {
+                    let open = self.ui.archive_open.contains(&key);
+                    list = list.push(archive_toggle(key, archived.len(), open));
+                    if open {
+                        for l in archived {
+                            list = list.push(self.session_row(l));
+                        }
+                    }
                 }
             }
         }
@@ -535,10 +572,34 @@ impl App {
             );
         }
         container(col)
-            .width(SIDEBAR_W)
+            .width(self.list_w())
             .height(Fill)
             .style(style::bg(style::SIDEBAR))
             .boxed()
+    }
+
+    /// The session / profile list's right edge: a 1 px border that drags the list's width
+    /// (like the side panel's left edge).
+    pub(crate) fn list_handle(&self) -> El<'_> {
+        let color = if self.list_dragging {
+            style::ACCENT
+        } else {
+            style::BORDER
+        };
+        mouse_area(
+            container(
+                container(space())
+                    .width(1)
+                    .height(Fill)
+                    .style(style::bg(color)),
+            )
+            .center_x(DIVIDER_W)
+            .height(Fill)
+            .style(style::bg(style::SIDEBAR)),
+        )
+        .on_press(Message::ListResizePressed)
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .boxed()
     }
 
     /// The session list's groups in display order: (key, divider label, sessions sorted by
@@ -552,6 +613,8 @@ impl App {
             .filter(|l| self.in_filter(&l.info))
             .collect();
         crate::session_sort::sort_by(&mut mine, &self.ui.session_sort, |l| sort_item(l));
+        // Desk: pinned sessions first in their block (a stable sort keeps the order otherwise).
+        mine.sort_by_key(|l| !l.info.pinned);
         let mut groups: Vec<(String, String, Vec<&Live>)> = Vec::new();
         if self.ui.sessions_all {
             for c in &self.configs {
@@ -767,84 +830,81 @@ impl App {
         let (glyph, gcolor) = provider_glyph(self, &s.provider);
         let (dot, dcolor) = status_glyph(live.state);
 
-        if let Some((id, value)) = &self.rename
-            && id == &s.id
-        {
-            return text_input(tr::session_title_placeholder(), value)
-                .id(RENAME_ID)
-                .on_input(Message::RenameInput)
-                .on_submit(Message::RenameCommit)
-                .size(13)
-                .padding([5, 8])
-                .style(style::input)
-                .boxed();
-        }
-
         let subtitle = if !s.term_title.is_empty() {
             s.term_title.clone()
         } else {
             i18n::status_label(live.state)
         };
-        let mut title = row![
-            text(s.title.as_str())
-                .size(13)
+        let title = text(s.title.as_str())
+            .color(if s.archived { style::DIM } else { style::TEXT })
+            .size(13)
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End)
+            .width(Fill);
+        // The branch badge (변경 없음, 커밋 있음, ...) sits right after the subtitle (provider name).
+        let mut sub = row![
+            text(subtitle)
+                .size(11)
+                .color(style::DIM)
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End)
-                .width(Fill)
         ]
         .spacing(4)
         .align_y(Alignment::Center);
         if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
-            title = title.push(b);
+            sub = sub.push(b);
         }
-        let main = button(
-            row![
-                text(glyph).size(14).color(gcolor).width(18),
-                column![
-                    title,
-                    text(subtitle)
-                        .size(11)
-                        .color(style::DIM)
-                        .wrapping(text::Wrapping::None)
-                        .ellipsis(text::Ellipsis::End),
-                ]
-                .width(Fill),
-                text(dot).size(10).color(dcolor),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
-        .padding([4, 6])
-        .width(Fill)
-        .style(style::row(selected))
-        .on_press(Message::Select(s.id.clone()));
-        let main = mouse_area(main).on_right_press(Message::StartRename(s.id.clone()));
+        // Desk: a pinned row shows a filled pin before the rest.
+        let mut content = row![].spacing(6).align_y(Alignment::Center);
+        if s.pinned {
+            content = content.push(icons::icon(Icon::PinFilled, 12.0, style::ACCENT_TEXT));
+        }
+        let mut content = content
+            .push(text(glyph).size(14).color(gcolor).width(18).boxed())
+            .push(column![title, sub].width(Fill).boxed())
+            .push(text(dot).size(10).color(dcolor).boxed());
+        // Pin / delete take room inside the row (pushing the title) only while hovered.
+        if self.session_hover.as_deref() == Some(s.id.as_str()) {
+            content = content.push(self.session_actions(live));
+        }
+        let main = button(content)
+            .padding([4, 6])
+            .width(Fill)
+            .style(style::row(selected))
+            .on_press(Message::Select(s.id.clone()));
+        let main = mouse_area(main)
+            .on_enter(Message::SessionHover(s.id.clone(), true))
+            .on_exit(Message::SessionHover(s.id.clone(), false))
+            .boxed();
+        crate::session_menu::with_menu(main, &s.id)
+    }
 
-        let run: El<'a> = match live.state {
-            RunState::Starting | RunState::Running => icon_button(
-                I_STOP,
-                self.when_connected(Message::Stop(s.id.clone())),
-                tr::stop(),
-            ),
-            RunState::Stopped => icon_button(
-                I_PLAY,
-                self.when_connected(Message::Start(s.id.clone())),
-                tr::start(),
-            ),
-            RunState::Exited(_) | RunState::Failed => icon_button(
-                I_RESTART,
-                self.when_connected(Message::Start(s.id.clone())),
-                tr::restart(),
-            ),
+    /// The hovered session row's pin / delete buttons.
+    fn session_actions<'a>(&'a self, live: &'a Live) -> El<'a> {
+        let s = &live.info;
+        // An archived session cannot be pinned (Desk's `canPin`).
+        let pin: El<'a> = if s.archived {
+            space().width(0).boxed()
+        } else {
+            let label = if s.pinned { tr::session_unpin() } else { tr::session_pin() };
+            tip(
+                button(icons::icon(
+                    if s.pinned { Icon::PinFilled } else { Icon::Pin },
+                    14.0,
+                    if s.pinned { style::ACCENT_TEXT } else { style::DIM },
+                ))
+                .padding([3, 5])
+                .style(style::icon)
+                .on_press_maybe(
+                    self.when_connected(Message::SetSessionFlags(s.id.clone(), Some(!s.pinned), None)),
+                )
+                .boxed(),
+                label,
+            )
         };
+        // Renaming is in 세션 설정; run / stop is in the terminal's footer.
         row![
-            main,
-            run,
-            icon_button(
-                I_EDIT,
-                self.when_connected(Message::StartRename(s.id.clone())),
-                tr::rename()
-            ),
+            pin,
             icon_button(
                 I_DELETE,
                 self.when_connected(Message::AskDelete(s.id.clone())),
@@ -1205,9 +1265,17 @@ impl App {
         };
         let s = &live.info;
         let mut c = column![
-            text(tr::session_repos_title(&s.title))
-                .size(18)
-                .font(style::BOLD),
+            text(tr::session_settings()).size(18).font(style::BOLD),
+            column![
+                text(tr::session_name_label()).size(12).font(style::BOLD),
+                text_input(tr::session_title_placeholder(), &f.title)
+                    .on_input(Message::SessionReposTitle)
+                    .on_submit_maybe((!f.busy && self.connected()).then_some(Message::SessionReposSave))
+                    .size(13)
+                    .padding([5, 8])
+                    .style(style::input),
+            ]
+            .spacing(4),
             row![
                 text(tr::session_repos_label()).size(12).font(style::BOLD),
                 space().width(Fill),
@@ -1795,16 +1863,9 @@ impl App {
         if !self.ui.sessions_open {
             return page;
         }
-        row![
-            self.repo_list(),
-            container(space())
-                .width(1)
-                .height(Fill)
-                .style(style::bg(style::BORDER)),
-            page,
-        ]
-        .height(Fill)
-        .boxed()
+        row![self.repo_list(), self.list_handle(), page]
+            .height(Fill)
+            .boxed()
     }
 
     /// Desk's `RepoList`: title and hide button, "레포 추가" (folder picker), a path input,
@@ -1881,7 +1942,7 @@ impl App {
                 .spacing(10)
                 .padding(10),
         )
-        .width(SIDEBAR_W)
+        .width(self.list_w())
         .height(Fill)
         .style(style::bg(style::SIDEBAR))
         .boxed()

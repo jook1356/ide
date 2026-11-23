@@ -16,7 +16,6 @@ use crate::app::{App, CONFIG_NAME_ID, ConfigEdit, McpField, Message};
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
 use crate::style;
-use crate::app::{RAIL_W, SIDEBAR_W};
 use crate::view::{card, error_box, icon_button, tip};
 
 type El<'a> = Element<'a, Message>;
@@ -28,14 +27,7 @@ impl App {
         if !self.ui.sessions_open {
             return page;
         }
-        row![
-            self.profile_list(),
-            container(space())
-                .width(1)
-                .height(Fill)
-                .style(style::bg(style::BORDER)),
-            page,
-        ]
+        row![self.profile_list(), self.list_handle(), page,]
         .height(Fill)
         .boxed()
     }
@@ -113,7 +105,7 @@ impl App {
                 .spacing(10)
                 .padding(10),
         )
-        .width(SIDEBAR_W)
+        .width(self.list_w())
         .height(Fill)
         .style(style::bg(style::SIDEBAR))
         .boxed()
@@ -124,9 +116,7 @@ impl App {
     fn profile_view(&self) -> El<'_> {
         let f = &self.settings;
         let online = self.connected();
-        let avail = self.window_size.width
-            - RAIL_W
-            - if self.ui.sessions_open { SIDEBAR_W + 1.0 } else { 0.0 };
+        let avail = self.window_size.width - self.left_w();
         let width = (avail - 64.0).clamp(320.0, 896.0);
         let mut c = Column::<El<'_>>::new().spacing(16);
         match (self.profile_shown(), &f.cfg_edit) {
