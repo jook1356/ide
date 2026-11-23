@@ -1,7 +1,9 @@
 //! A popover that opens to the right of its button, its top level with the button's top.
 //! iced's `popover::Position::Right` centres the popup vertically on the button; this wraps
-//! such a popover and moves its overlay down by half the difference of the popup's and the
-//! button's heights (the popup is laid out by the popover in a first pass, see `overlay`).
+//! such a popover and moves its overlay so the popup's top is level with the button's (the
+//! popup is laid out by the popover in a first pass, see `overlay`). The popover's own snapping
+//! is off: it snaps into the clip of the enclosing scrollable (the rail list), which pushed
+//! the popup back over the button; this one keeps the popup inside the window vertically.
 
 use iced::advanced::Widget;
 use iced::advanced::layout::{self, Layout};
@@ -20,6 +22,7 @@ pub fn side_popover<'a, Message: Clone + 'a>(
     let inner = iced::widget::popover(trigger, popup)
         .position(Position::Right)
         .gap(gap)
+        .snap_within_viewport(false)
         .on_close(on_close);
     TopAligned {
         inner: inner.boxed(),
@@ -122,14 +125,13 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for TopAligned<'_, Me
                 .overlay(tree, layout, renderer, viewport, translation, window),
         );
         let popup_h = tree.children.get(1).map_or(0.0, |t| t.size.height);
-        let dy = ((popup_h - layout.bounds().height) / 2.0).max(0.0);
-        // The popover snaps into `viewport + translation`: keep that one where it was.
-        let shifted = Vector::new(translation.x, translation.y + dy);
-        let viewport = Rectangle {
-            y: viewport.y - dy,
-            ..*viewport
-        };
+        let base = layout.bounds() + translation;
+        // Where `Position::Right` puts it (centred on the button) and where it should go: the
+        // button's top, moved up when the popup would leave the window's bottom.
+        let centred = base.y + (base.height - popup_h) / 2.0;
+        let top = base.y.min(window.height - popup_h).max(0.0);
+        let shifted = Vector::new(translation.x, translation.y + top - centred);
         self.inner
-            .overlay(tree, layout, renderer, &viewport, shifted, window)
+            .overlay(tree, layout, renderer, viewport, shifted, window)
     }
 }

@@ -16,8 +16,6 @@ protocol changed, the user restarts the server (Settings) afterwards.
 
 Windows; the exe runs from `<target>\release`; the repository it was built from
 (`CARGO_MANIFEST_DIR/../..`) has `.git`, `Cargo.toml` and `scripts\ide-update.ps1`.
-The script always works in the **original repository**: when that path is a worktree (an ide
-session's), it switches to the checkout its common git dir belongs to (`git rev-parse --git-common-dir`).
 
 ## Files (`<data>\self-update\`)
 
@@ -28,7 +26,7 @@ session's), it switches to the checkout its common git dir belongs to (`git rev-
 
 | Phase | Meaning |
 |---|---|
-| `pulling` | First, if another worktree on the same branch (an ide session's) moved the branch while this checkout's files still equal an earlier commit of it (nothing unsaved), `git reset --hard HEAD` brings them up. Then `git pull --ff-only`; if it fails (local changes, conflicts, no upstream) the checkout is built as it is. |
+| `pulling` | `git pull --ff-only`. If it fails (local changes, conflicts, no upstream) the checkout is built as it is. |
 | `building` | `ide.exe` / `ide-server.exe` are renamed to `*.<run>.old` (a running exe can be renamed, not overwritten), then `cargo build --release -p ide-app -p ide-server` with the user's `PATH`, `CEF_PATH`, `WGPU_BACKEND` and `CARGO_TARGET_DIR=<target>`. A failed build moves the old files back (`failed`). |
 | `ready` | Built; the footer shows a purple restart icon. Clicking writes the run id to `apply-request`. If the app closes first: `done` with message `closed-before-restart` (the next start uses the new build). |
 | `swapping` | The app that applied quits; the script waits for its pid (killed after 60 s) and starts the new `ide.exe`. |
