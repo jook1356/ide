@@ -107,7 +107,7 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
 | Skills | (v) generated plugin `<scratch>/plugin/{.claude-plugin/plugin.json, skills/<folder>/...}` (copied) via `--plugin-dir`; skill ids `ide-<config>:<folder>` | (v) fallback: listed in the developer instructions (name, description, SKILL.md path) | ignored | fallback if instructions are supported |
 | MCP | (v) `<scratch>/mcp.json` `{"mcpServers":{name:{type:"stdio",command,args,env}}}` via `--mcp-config` | (v) `-c mcp_servers.<name>={command="..", args=[..], env={"K"="v"}}` | ignored | unsupported (noted) |
 | Instructions | (v) `<scratch>/instructions.md` via `--append-system-prompt-file` | (v) `-c developer_instructions="..."` (single-line TOML string) | ignored | `flag` / `env` / `file` |
-| Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `ide-server hook` (`docs/agent-bridge.md`) | (d) account integration: ide's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
+| Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `ide-server hook` (`docs/agent-bridge.md`); background agents (`SubagentStart/Stop`) -> `HookEvent::Background*` (optional for a provider: report a start only with its end) | (d) account integration: ide's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
 | Session name | (v) `-n <title>` | — | — | — |
 | Daemon | — | (v) `--no-daemon` always | — | — |
 

@@ -89,6 +89,9 @@ pub enum AgentHookEvent {
     PreShell { tool: String, command: String },
     /// About to use another tool.
     PreTool { tool: String },
+    /// Work that can outlive the turn started / ended (`id`: the CLI's, opaque).
+    BackgroundStarted { id: String },
+    BackgroundEnded { id: String },
 }
 
 /// A tool the agent bridge offers (MCP `tools/list`).
