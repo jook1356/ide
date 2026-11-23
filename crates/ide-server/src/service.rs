@@ -1907,9 +1907,11 @@ impl UserCtx {
                 Ok(Response::Merges(self.merge_child(&id, squash)?))
             }
             Request::SessionSyncParent { id } => Ok(Response::Merges(self.sync_parent(&id)?)),
-            Request::WidgetList { session } => Ok(Response::Widgets(self.widget_list(&session)?)),
+            Request::WidgetList => Ok(Response::Widgets(self.widget_list())),
             Request::WidgetFile { session, widget, path } => self.widget_file(&session, &widget, &path),
-            Request::WidgetGrant { session, widget, tools } => self.widget_grant(&session, &widget, &tools),
+            Request::WidgetRegister { session, widget, tools } => self.widget_register(&session, &widget, &tools),
+            Request::WidgetDelete { widget } => self.widget_delete(&widget),
+            Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
             Request::ScriptsList { session, repo } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
@@ -1972,6 +1974,7 @@ impl UserCtx {
                 self.sessions.lock().unwrap().remove(&s.id).map_err(core)?;
                 self.hosts.lock().unwrap().remove(s.id.as_str());
                 self.bridge.forget(s.id.as_str());
+                self.widget_forget_session(s.id.as_str());
                 // The parent's guidance lists its children.
                 if let Some(p) = s.parent.as_ref().and_then(|p| self.resolve_session(p.as_str()).ok()) {
                     self.refresh_root(&p);

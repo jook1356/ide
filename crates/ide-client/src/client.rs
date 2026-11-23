@@ -916,9 +916,9 @@ impl Client {
         expect_unit(self.call(Request::AgentReply { request, result }).await)
     }
 
-    /// `widget.list`: the widgets of the session's folder (`docs/widgets.md`).
-    pub async fn widget_list(&self, session: &str) -> Result<Vec<ide_proto::WidgetInfo>, ProtoError> {
-        match self.call(Request::WidgetList { session: session.into() }).await? {
+    /// `widget.list`: the registered widgets (`docs/widgets.md`).
+    pub async fn widget_list(&self) -> Result<Vec<ide_proto::WidgetInfo>, ProtoError> {
+        match self.call(Request::WidgetList).await? {
             Response::Widgets(w) => Ok(w),
             _ => Err(ProtoError::new("bad-message").arg("detail", "expected widgets")),
         }
@@ -937,13 +937,30 @@ impl Client {
         }
     }
 
-    /// `widget.grant`: the user approved `tools` (as shown) for the widget.
-    pub async fn widget_grant(&self, session: &str, widget: &str, tools: Vec<String>) -> Result<(), ProtoError> {
+    /// `widget.register`: the user allowed registering the session's draft with `tools` (as shown).
+    pub async fn widget_register(&self, session: &str, widget: &str, tools: Vec<String>) -> Result<(), ProtoError> {
         expect_unit(
-            self.call(Request::WidgetGrant {
+            self.call(Request::WidgetRegister {
                 session: session.into(),
                 widget: widget.into(),
                 tools,
+            })
+            .await,
+        )
+    }
+
+    /// `widget.delete`: remove a registered widget.
+    pub async fn widget_delete(&self, widget: &str) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::WidgetDelete { widget: widget.into() }).await)
+    }
+
+    /// `widget.set_open`: a widget tab was opened / closed in the session.
+    pub async fn widget_set_open(&self, session: &str, widget: &str, open: bool) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::WidgetSetOpen {
+                session: session.into(),
+                widget: widget.into(),
+                open,
             })
             .await,
         )

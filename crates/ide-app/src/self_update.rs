@@ -301,7 +301,10 @@ impl App {
         .padding([0, 4])
         .style(style::icon)
         .on_press(Message::Page(crate::ui_state::Page::Settings));
-        let mut r = row![server, space().width(Fill)].spacing(8).align_y(Alignment::Center);
+        // Desk's status-bar mod launcher (`widgets_page.rs`).
+        let mut r = row![server, self.widget_launcher(), space().width(Fill)]
+            .spacing(8)
+            .align_y(Alignment::Center);
         let s = self.update_status.as_ref();
         // The last result, once (until dismissed).
         let result = s

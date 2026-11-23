@@ -1,86 +1,112 @@
 # Widgets
 
-Status: implemented (protocol 16). Hermes Desk's mods, renamed: "mode" would be confused with
+Status: implemented (protocol 17). Hermes Desk's mods, renamed: "mode" would be confused with
 the agent CLIs' own modes (plan mode, permission modes) and "mod" with Claude Code's own mods.
 A widget is a small web app (HTML / CSS / JS, any framework or none, no build step) that a
-session's agent writes into the session folder; ide shows it as a tab of the detail area and
-gives the page `window.ide`: the bridge's `ide_*` tools (approved by the user) and stored data.
+session's agent drafts in its folder and registers once; like Desk's mod classes, every session
+can then open it as a tab of the detail area. The page gets `window.ide`: the bridge's `ide_*`
+tools (allowed by the user at registration) and stored data.
 
-Code: `ide-core/src/widget.rs` (folder, manifest, files, data, approvals), server
+Code: `ide-core/src/widget.rs` (drafts, registry, files, data), server
 `ide-server/src/service/widgets.rs` (`widget.*`, the `ide_widget` tool), CEF scheme
-`ide-web/src/scheme.rs`, app `ide-app/src/widgets_ui.rs`. Tests: `ide-core` `widget::tests`,
-`ide-server/tests/widgets_e2e.rs`, app script `IDE_APP_SCRIPT_ONLY=widget`
-(`script_widgets.rs`, real CEF: `window.ide`, tools, data, refused tool, files outside).
+`ide-web/src/scheme.rs`, app `ide-app/src/widgets_ui.rs` (tabs, scheme, registration dialog)
+and `widgets_page.rs` (위젯 page, status-bar launcher). Tests: `ide-core` `widget::tests`,
+`ide-server/tests/widgets_e2e.rs`, app script `IDE_APP_SCRIPT_ONLY=widget` (`script_widgets.rs`,
+real CEF: registration dialog, page, launcher, menu, `window.ide`, remembered tab, agent
+open / close, delete).
 
-## Files
+## Drafts and registration
 
-- `<session folder>/.ide/widgets/<id>/` (`id`: 1-40 of `a-z0-9-`, not starting or ending with
-  `-`: it is a URL host label). Shared children see their parent's widgets (same folder). An
-  original-repo session's folder is the repository, like `.ide/pr-*.md`.
-- `widget.json`: `name` (tab title), `description`, `entry` (default `index.html`), `tools`
-  (`ide_*` names the bridge has; others make the widget unusable), `scope` (`session` default /
-  `family` / `global`). Unknown keys are refused (typos show up in `list`).
-- Every other file of the folder is served (up to 8 MiB); paths leaving the folder (`..`,
-  absolute, links out) are refused.
+- Draft: `<session folder>/.ide/widgets/<id>/` (`id`: 1-40 of `a-z0-9-`, not starting or ending
+  with `-`: it is a URL host label). `widget.json`: `name`, `description`, `entry` (default
+  `index.html`), `tools` (`ide_*` names the bridge has), `scope` (`session` default / `family` /
+  `global`). Unknown keys are refused (typos show up in the agent's `list`).
+- `ide_widget register` copies the draft (files and folders, no links; 8 MiB per file, 64 MiB in
+  all) to `<data>/widgets/sources/<id>/` and records it in `<data>/widgets/registry.json`
+  (name, description, entry, tools, scope, version, registering sessions, times).
+- Registering asks the user first (dialog 위젯 등록, Desk's "모드 등록 (모든 세션에서 사용)") when the
+  widget is new, was registered by another session, or its tool list changed; the agent's call
+  waits for the answer (5 min). 허용 sends `widget.register` with the tools shown (refused with
+  `widget-changed` when the draft lists others now); closing / 거절 answers the agent "refused".
+  The same session updating its widget with the same tools registers without asking.
+- The tab serves the registered copy, never the draft: change, register again, open again.
+- Delete: the 위젯 page (`widget.delete`) or the registering session's agent (`unregister`):
+  the copy, its open tabs and its global data go. Session / family data stays in those
+  sessions' data folders until they are deleted.
+
+## Scopes
+
+`scope` decides where `ide.data` lives, and so how the widget is shown:
+
+| Scope | Data | Tab |
+|---|---|---|
+| `session` | `<data>/sessions/<folder owner>/widgets/<id>.json` (shared children: the parent's) | one per session |
+| `family` | `<data>/sessions/<family root>/widgets-family/<id>.json` | one per session, same data in the family |
+| `global` | `<data>/widgets/data/<id>.json` | one 공용 tab, shown in every session |
 
 ## Serving (`ide-widget://`)
 
 - `ide_web::register_custom_schemes(&["ide-widget"])` first in `main` (CEF helper processes need
   the list): standard, secure, CORS- and fetch-enabled, so a widget page has its own origin
-  `ide-widget://<id>.<session>` (relative URLs, `localStorage`, `fetch` to itself).
+  `ide-widget://<id>.<session>` (`session`: the session showing the tab; for a 공용 tab the one
+  it was opened from).
 - CEF asks `ide_web::set_scheme_handler`'s handler on its IO thread; the app answers through a
-  `Responder` (async: `Callback::Continue` when the answer is there). The app serves a request
-  only for the tab it opened for that widget (the request's browser = that tab's view, host =
-  that widget): files through `widget.file` (the server reads the session folder, so SSH
-  servers work too); HTML gets `<script src="/__ide/ide.js">` at the start of `<head>`.
+  `Responder`. The app serves a request only for the tab it opened for that widget (the
+  request's browser = that tab's view, host = that widget): files through `widget.file` (the
+  registered copy); HTML gets `<script src="/__ide/ide.js">` at the start of `<head>`.
 - `/__ide/call` and `/__ide/data` (POST JSON) answer only the widget's own frame (frame origin
   = widget origin), not pages it embeds. Answers are `{ok, text | value | error}` (HTTP 200).
 - `window.ide`: `call(tool, args)` (JSON result parsed, else text; rejects on error),
   `data.get / set / delete / keys`, `widget = {id, session}`.
-
-## Approvals and data
-
-- A widget with `tools` opens only after the user allowed exactly that list (dialog 위젯 허용;
-  `widget.grant`, stored per folder owner in `<data>/sessions/<owner>/widget-grants.json`). A
-  changed list asks again; `widget.call` refuses undeclared tools and unapproved lists
-  (`widget-not-allowed`) and runs the tool as the session's agent would (audit
-  `widget.call <session> <widget> <tool>`).
-- Data (JSON values, at most 1 MiB per widget and scope): `session` ->
-  `<data>/sessions/<folder owner>/widgets/<id>.json`, `family` -> the family root's
-  `widgets-family/<id>.json`, `global` -> `<data>/widgets/<id>.json`.
+- `widget.call` refuses tools the registration did not allow (`widget-not-allowed`) and runs the
+  tool as the session showing the tab would (audit `widget.call <session> <widget> <tool>`).
 
 ## Agent tool `ide_widget`
 
 | Action | Answered by | What |
 |---|---|---|
-| `guide` | daemon | how to build one (the folder, `widget.json`, `window.ide`) |
-| `list` | daemon | widgets with name, tools, scope, `approved_by_user`, `problem` |
-| `open {widget}` | daemon checks, app opens | opens the tab, or reloads it (entry page) when open; asks the user first when the tools are not approved (the agent is told) |
-| `close {widget}` | app | closes its tab |
+| `guide` | daemon | how to build and register one |
+| `list` | daemon | registered widgets (`registered_by_this_session`, `open_here`) and this session's drafts with their problems |
+| `register {widget}` | daemon, or app (question) | register / update the draft |
+| `unregister {widget}` | daemon | only the registering session's agent |
+| `open {widget}` | daemon checks, app opens | opens the tab here, or reloads it (entry page) when open |
+| `close {widget}` | app | closes its tab here |
 
 The base instructions mention widgets in one sentence; the guide is fetched on demand.
 
 ## App
 
-- 열린 항목 -> "+ 새로 열기" lists the selected session's widgets (위젯); a broken one is
-  disabled with its problem as the tooltip.
+- Rail -> 위젯 (Desk's 모드 page): the list beside the rail (hidden with the rail button again)
+  grouped 세션 가족별 / 세션별 / 공용 데이터, each row with a dot when open in the selected
+  session and its version; the picked widget's 설명, 데이터, ide 기능, 등록한 세션 (a link), 버전,
+  수정, 열린 곳, "이 세션에서 열기" / "여기서 닫기" and 위젯 삭제 (confirmed).
+- Status bar: the puzzle button (Desk's `ModLauncher`) lists 공용 and 이 세션 widgets with
+  열림 / 닫힘; a click opens or closes it in the selected session; 관리 goes to the page.
+- 열린 항목 -> "+ 새로 열기" lists the registered widgets too.
 - A widget tab is a browser tab (`Browser.widget`): name instead of the address, reload, and
-  developer tools in its header; not remembered across restarts (like browser tabs).
+  developer tools in its header. Open tabs are remembered by the server
+  (`registry.json` `open`, `widget.set_open`) and restored quietly at start (once per tab and
+  run); deleting a session forgets its tabs; tabs of unregistered widgets close.
 
-## Protocol (16)
+## Protocol (17)
 
 | Request | Payload |
 |---|---|
-| `widget.list` | `{session}` -> `Widgets([WidgetInfo {id, name, description, tools, scope, granted, error}])` |
+| `widget.list` | -> `Widgets([WidgetInfo {id, name, description, tools, scope, version, created_by, created_by_title, updated, open}])` |
 | `widget.file` | `{session, widget, path}` -> `WidgetFile {mime, data}` |
-| `widget.grant` | `{session, widget, tools}` -> `Unit` (`widget-changed` when the manifest lists others) |
+| `widget.register` | `{session, widget, tools}` -> `Unit` (`widget-changed` when the draft lists others) |
+| `widget.delete` | `{widget}` -> `Unit` |
+| `widget.set_open` | `{session, widget, open}` -> `Unit` |
 | `widget.call` | `{session, widget, tool, args}` -> `AgentResult` |
 | `widget.data` | `{session, widget, op: Get / Set / Delete / Keys}` -> `WidgetData(Option<json text>)` |
 
-Errors: `widget {detail}`, `widget-changed {widget}`, `widget-not-allowed {tool}`.
+`Notify::WidgetsChanged` after registrations, deletions and open / close. Errors:
+`widget {detail}`, `widget-changed {widget}`, `widget-not-allowed {tool}`.
 
-## Later
+## Not like Desk (yet)
 
+- No separate OS windows (Desk's default `display: window`, 앱 위에 고정): widgets are tabs.
+- One tab per session (Desk's `single: true`); no multi-instance widgets.
+- No env file (secrets / allowed origins), no `deskAccess`, no code view on the page.
 - React / TSX without a CDN (a bundled runtime + transpiler page, Desk's approach).
-- Remember open widget tabs; a widget list in the session's side panel.
 - `macOS` / Linux: the scheme code is not OS-specific, but the app script ran on Windows only.

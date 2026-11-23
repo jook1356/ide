@@ -234,14 +234,15 @@ impl App {
         Task::batch([show, self.sync_detail()])
     }
 
-    /// Close a browser tab (its page goes).
-    pub(crate) fn close_browser(&mut self, id: u32) {
+    /// Close a browser tab (its page goes); the widget it showed, if any.
+    pub(crate) fn close_browser(&mut self, id: u32) -> Option<crate::widgets_ui::WidgetTab> {
         let take = |v: &mut Vec<Browser>| v.iter().position(|b| b.id == id).map(|i| v.remove(i));
         let gone = take(&mut self.global_browsers).or_else(|| {
             self.sessions
                 .iter_mut()
                 .find_map(|l| take(&mut l.browsers))
         });
+        let widget = gone.as_ref().and_then(|b| b.widget.clone());
         if let Some(b) = gone
             && let Some(v) = b.view
         {
@@ -253,6 +254,26 @@ impl App {
             }
         }
         self.sync_web();
+        widget
+    }
+
+    /// Add a browser tab without showing it (a widget tab restored at start).
+    pub(crate) fn add_browser_tab_quietly(
+        &mut self,
+        sid: &str,
+        global: bool,
+        url: String,
+        widget: Option<crate::widgets_ui::WidgetTab>,
+    ) {
+        self.next_browser += 1;
+        let mut b = Browser::new(self.next_browser, url);
+        b.widget = widget;
+        let sid = self.workspace_owner(sid);
+        if global {
+            self.global_browsers.push(b);
+        } else if let Some(l) = self.live_mut(&sid) {
+            l.browsers.push(b);
+        }
     }
 
     /// A page event of a browser tab (`false`: not one of them).

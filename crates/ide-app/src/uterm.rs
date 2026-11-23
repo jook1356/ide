@@ -340,11 +340,7 @@ impl App {
                 self.new_menu = open;
                 self.bookmark_edit = None;
                 if open {
-                    let widgets = match self.selected.clone() {
-                        Some(s) => self.load_widgets(&s),
-                        None => Task::none(),
-                    };
-                    Task::batch([self.load_shells(), self.load_ports(), widgets])
+                    Task::batch([self.load_shells(), self.load_ports(), self.load_widgets()])
                 } else {
                     Task::none()
                 }

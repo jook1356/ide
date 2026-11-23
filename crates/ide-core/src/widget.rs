@@ -1,7 +1,9 @@
-//! Widgets (`docs/widgets.md`): small web apps an agent writes into its session folder
-//! (`<root>/.ide/widgets/<id>/` with a `widget.json`), shown by the app as a tab of the detail
-//! area. This module reads the folder (manifests, files inside a widget only), keeps the
-//! widgets' key-value data per scope and the user's approvals of the ide tools a widget uses.
+//! Widgets (`docs/widgets.md`, Hermes Desk's mods): small web apps an agent drafts in its
+//! session folder (`<root>/.ide/widgets/<id>/` with a `widget.json`) and registers once the
+//! user allowed it: the registry (`<data>/widgets/registry.json`) keeps a copy of each
+//! registered widget, which every session can open as a tab of its detail area, and the open
+//! tabs. This module reads drafts (manifests, files inside a widget only), keeps the registry
+//! and the widgets' key-value data per scope.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -26,7 +28,7 @@ pub const MAX_KEY: usize = 200;
 /// Why a widget request failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WidgetError {
-    #[error("no widget `{0}` in this session")]
+    #[error("no widget `{0}`")]
     NotFound(String),
     #[error("widget id `{0}` is not valid: 1-40 of a-z, 0-9 and -, not starting or ending with -")]
     BadId(String),
@@ -189,20 +191,19 @@ pub fn load(root: &Path, id: &str) -> Result<Manifest, WidgetError> {
     })
 }
 
-/// A file of a widget (`rel` empty or `/` = its entry page): its bytes and media type. Only
-/// files inside the widget folder (links leading out of it are refused).
-pub fn read_file(root: &Path, id: &str, rel: &str) -> Result<(Vec<u8>, &'static str), WidgetError> {
-    let m = load(root, id)?;
+/// A file of a registered widget (`dir`: its copy, `entry`: its entry page; `rel` empty or
+/// `/` = the entry page): its bytes and media type. Only files inside `dir` (links leading out
+/// of it are refused).
+pub fn read_file(dir: &Path, entry: &str, rel: &str) -> Result<(Vec<u8>, &'static str), WidgetError> {
     let rel = if rel.trim_matches(['/', '\\']).is_empty() {
-        m.entry.as_str()
+        entry
     } else {
         rel
     };
     let no = || WidgetError::NoFile(rel.to_owned());
     let sub = safe_relative(rel).ok_or_else(no)?;
-    let dir = widgets_dir(root).join(id);
     let path = dir.join(&sub);
-    let (Ok(real_dir), Ok(real)) = (canon(&dir), canon(&path)) else {
+    let (Ok(real_dir), Ok(real)) = (canon(dir), canon(&path)) else {
         return Err(no());
     };
     if !real.starts_with(&real_dir) || !real.is_file() {
@@ -255,7 +256,7 @@ pub fn data_file(paths: &Paths, scope: Scope, owner: &str, family_root: &str, wi
     match scope {
         Scope::Session => paths.session_dir(owner).join("widgets").join(name),
         Scope::Family => paths.session_dir(family_root).join("widgets-family").join(name),
-        Scope::Global => paths.root().join("widgets").join(name),
+        Scope::Global => home(paths).join("data").join(name),
     }
 }
 
@@ -309,15 +310,76 @@ pub fn data_put(file: &Path, key: &str, value: Option<serde_json::Value>) -> Res
     write_json(file, &d).map_err(|e| WidgetError::Io(e.to_string()))
 }
 
-// ---------------------------------------------------------------- approvals
+// ---------------------------------------------------------------- registry
 
-/// The approvals of a session folder's widgets (`<data>/sessions/<owner>/widget-grants.json`).
-pub fn grants_file(paths: &Paths, owner: &str) -> PathBuf {
-    paths.session_dir(owner).join("widget-grants.json")
+/// Largest widget (all its files) that can be registered.
+pub const MAX_TOTAL: u64 = 64 * 1024 * 1024;
+
+/// `<data>/widgets`: the registry, the registered copies and the global data.
+pub fn home(paths: &Paths) -> PathBuf {
+    paths.root().join("widgets")
 }
 
-/// What the user approved per widget: the sorted tool list (a changed list asks again).
-type Grants = BTreeMap<String, Vec<String>>;
+/// `<data>/widgets/registry.json`.
+pub fn registry_file(paths: &Paths) -> PathBuf {
+    home(paths).join("registry.json")
+}
+
+/// The registered copy of a widget (`<data>/widgets/sources/<id>/`): what the app serves.
+pub fn source_dir(paths: &Paths, id: &str) -> PathBuf {
+    home(paths).join("sources").join(id)
+}
+
+/// A registered widget (Desk's mod class): every session can open it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Class {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub entry: String,
+    /// The ide tools the user allowed when it was registered.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub scope: Scope,
+    /// 1 at the first registration, +1 at each update.
+    pub version: u32,
+    /// The session that registered it first.
+    pub created_by: String,
+    /// The session that registered the current version.
+    #[serde(default)]
+    pub updated_by: String,
+    pub created: u64,
+    pub updated: u64,
+}
+
+/// An open widget tab, remembered across restarts. `session`: the session showing it (a
+/// `global` widget is one 공용 tab; `session` is then the session it was opened from).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenTab {
+    pub widget: String,
+    pub session: String,
+}
+
+/// `<data>/widgets/registry.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registry {
+    #[serde(default)]
+    pub classes: BTreeMap<String, Class>,
+    #[serde(default)]
+    pub open: Vec<OpenTab>,
+}
+
+/// Why registering asks the user first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ask {
+    /// Not registered yet.
+    New,
+    /// Registered by another session.
+    OtherSession { by: String },
+    /// The ide tools it uses changed.
+    ToolsChanged,
+}
 
 fn sorted(tools: &[String]) -> Vec<String> {
     let mut t = tools.to_vec();
@@ -326,27 +388,138 @@ fn sorted(tools: &[String]) -> Vec<String> {
     t
 }
 
-/// Did the user approve exactly these tools for `widget`? (No tools: nothing to approve.)
-pub fn granted(file: &Path, widget: &str, tools: &[String]) -> bool {
-    if tools.is_empty() {
-        return true;
+/// The same tool lists (order and repeats aside)?
+pub fn same_tools(a: &[String], b: &[String]) -> bool {
+    sorted(a) == sorted(b)
+}
+
+impl Registry {
+    pub fn load(paths: &Paths) -> Registry {
+        read_json(&registry_file(paths)).ok().flatten().unwrap_or_default()
     }
-    let g: Grants = read_json(file).ok().flatten().unwrap_or_default();
-    g.get(widget).is_some_and(|t| *t == sorted(tools))
+
+    pub fn save(&self, paths: &Paths) -> Result<(), WidgetError> {
+        write_json(&registry_file(paths), self).map_err(|e| WidgetError::Io(e.to_string()))
+    }
+
+    /// Does registering `m` as `id` from `session` need the user's approval? (Updating your
+    /// own widget with the same tools does not.)
+    pub fn ask_for(&self, id: &str, session: &str, m: &Manifest) -> Option<Ask> {
+        let Some(c) = self.classes.get(id) else {
+            return Some(Ask::New);
+        };
+        if !same_tools(&c.tools, &m.tools) {
+            return Some(Ask::ToolsChanged);
+        }
+        (c.created_by != session).then(|| Ask::OtherSession {
+            by: c.created_by.clone(),
+        })
+    }
+
+    /// Register (or update) the draft `id` of the session folder `root`: its files are copied
+    /// to `<data>/widgets/sources/<id>/`. The caller saves the registry.
+    pub fn register(&mut self, paths: &Paths, root: &Path, id: &str, session: &str) -> Result<Class, WidgetError> {
+        let m = load(root, id)?;
+        let from = widgets_dir(root).join(id);
+        let to = source_dir(paths, id);
+        let mut tmp = to.as_os_str().to_owned();
+        tmp.push(".new");
+        let tmp = PathBuf::from(tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut total = 0;
+        if let Err(e) = copy_widget(&from, &tmp, &mut total) {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
+        if to.exists() {
+            std::fs::remove_dir_all(&to).map_err(|e| WidgetError::Io(e.to_string()))?;
+        }
+        std::fs::rename(&tmp, &to).map_err(|e| WidgetError::Io(e.to_string()))?;
+        let now = crate::paths::now_unix();
+        let old = self.classes.get(id);
+        let c = Class {
+            name: m.name,
+            description: m.description,
+            entry: m.entry,
+            tools: sorted(&m.tools),
+            scope: m.scope,
+            version: old.map_or(1, |c| c.version + 1),
+            created_by: old.map_or_else(|| session.to_owned(), |c| c.created_by.clone()),
+            updated_by: session.to_owned(),
+            created: old.map_or(now, |c| c.created),
+            updated: now,
+        };
+        // A scope change: the tabs follow the new placement when opened again.
+        if old.is_some_and(|o| o.scope != c.scope) {
+            self.open.retain(|t| t.widget != id);
+        }
+        self.classes.insert(id.to_owned(), c.clone());
+        Ok(c)
+    }
+
+    /// Remove a widget: its copy, its open tabs and its global data (`false`: not registered).
+    /// Session and family data stay in their sessions' folders until those go.
+    pub fn unregister(&mut self, paths: &Paths, id: &str) -> Result<bool, WidgetError> {
+        if !valid_id(id) || self.classes.remove(id).is_none() {
+            return Ok(false);
+        }
+        self.open.retain(|t| t.widget != id);
+        let dir = source_dir(paths, id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| WidgetError::Io(e.to_string()))?;
+        }
+        let _ = std::fs::remove_file(data_file(paths, Scope::Global, "", "", id));
+        Ok(true)
+    }
+
+    /// Remember that `widget` is open (or closed) in `session` (`false`: nothing changed).
+    pub fn set_open(&mut self, widget: &str, session: &str, open: bool) -> bool {
+        let global = self.classes.get(widget).is_some_and(|c| c.scope == Scope::Global);
+        let before = self.open.clone();
+        // A global widget is one 공용 tab, wherever it was opened.
+        self.open
+            .retain(|t| t.widget != widget || (!global && t.session != session));
+        if open && self.classes.contains_key(widget) {
+            self.open.push(OpenTab {
+                widget: widget.to_owned(),
+                session: session.to_owned(),
+            });
+        }
+        self.open != before
+    }
+
+    /// A session went: forget its tabs (`false`: it had none).
+    pub fn forget_session(&mut self, session: &str) -> bool {
+        let n = self.open.len();
+        self.open.retain(|t| t.session != session);
+        self.open.len() != n
+    }
 }
 
-/// Record the user's approval of `tools` for `widget`.
-pub fn grant(file: &Path, widget: &str, tools: &[String]) -> Result<(), WidgetError> {
-    let mut g: Grants = read_json(file).ok().flatten().unwrap_or_default();
-    g.insert(widget.to_owned(), sorted(tools));
-    write_json(file, &g).map_err(|e| WidgetError::Io(e.to_string()))
-}
-
-/// Forget the approval of `widget`.
-pub fn revoke(file: &Path, widget: &str) -> Result<(), WidgetError> {
-    let mut g: Grants = read_json(file).ok().flatten().unwrap_or_default();
-    if g.remove(widget).is_some() {
-        write_json(file, &g).map_err(|e| WidgetError::Io(e.to_string()))?;
+/// Copy a widget folder (files and folders only; links are left out), at most [`MAX_FILE`]
+/// per file and [`MAX_TOTAL`] in all.
+fn copy_widget(from: &Path, to: &Path, total: &mut u64) -> Result<(), WidgetError> {
+    let io = |e: std::io::Error| WidgetError::Io(e.to_string());
+    std::fs::create_dir_all(to).map_err(io)?;
+    for e in std::fs::read_dir(from).map_err(io)?.flatten() {
+        let Ok(t) = e.file_type() else { continue };
+        let dst = to.join(e.file_name());
+        if t.is_dir() {
+            copy_widget(&e.path(), &dst, total)?;
+        } else if t.is_file() {
+            let len = e.metadata().map_err(io)?.len();
+            if len > MAX_FILE {
+                return Err(WidgetError::TooLarge(e.file_name().to_string_lossy().into_owned()));
+            }
+            *total += len;
+            if *total > MAX_TOTAL {
+                return Err(WidgetError::Data(format!(
+                    "a widget is at most {} MiB in all",
+                    MAX_TOTAL / 1024 / 1024
+                )));
+            }
+            std::fs::copy(e.path(), &dst).map_err(io)?;
+        }
     }
     Ok(())
 }
@@ -414,24 +587,82 @@ mod tests {
         std::fs::write(d.join("app/s.css"), "b{}").unwrap();
         std::fs::write(root.join("secret.txt"), "no").unwrap();
 
-        let (b, m) = read_file(root, "w", "").unwrap();
+        let (b, m) = read_file(&d, "app/main.html", "").unwrap();
         assert_eq!((b.as_slice(), m), (&b"<b>x</b>"[..], "text/html; charset=utf-8"));
-        assert_eq!(read_file(root, "w", "/app/s.css").unwrap().1, "text/css; charset=utf-8");
-        assert_eq!(read_file(root, "w", "app\\s.css").unwrap().0, b"b{}");
+        assert_eq!(read_file(&d, "app/main.html", "/app/s.css").unwrap().1, "text/css; charset=utf-8");
+        assert_eq!(read_file(&d, "app/main.html", "app\\s.css").unwrap().0, b"b{}");
         for bad in ["../../../secret.txt", "app/../../../../secret.txt", "/../x", "C:/Windows/win.ini", "nope.js", "app"] {
-            assert!(read_file(root, "w", bad).is_err(), "{bad}");
+            assert!(read_file(&d, "app/main.html", bad).is_err(), "{bad}");
         }
-        assert!(matches!(read_file(root, "x", ""), Err(WidgetError::NotFound(_))));
     }
 
     #[test]
-    fn data_and_grants() {
+    fn registry() {
+        let t = tmp("wreg");
+        let paths = Paths::new(t.0.join("data"));
+        let root = t.0.join("session");
+        let d = widget(&root, "board", r#"{"name":"Board","tools":["ide_session"],"scope":"global"}"#);
+        std::fs::write(d.join("index.html"), "v1").unwrap();
+        std::fs::create_dir_all(d.join("js")).unwrap();
+        std::fs::write(d.join("js/a.js"), "a").unwrap();
+
+        let mut r = Registry::load(&paths);
+        let m = load(&root, "board").unwrap();
+        assert_eq!(r.ask_for("board", "s1", &m), Some(Ask::New));
+        let c = r.register(&paths, &root, "board", "s1").unwrap();
+        assert_eq!((c.version, c.created_by.as_str(), c.scope), (1, "s1", Scope::Global));
+        assert_eq!(read_file(&source_dir(&paths, "board"), &c.entry, "js/a.js").unwrap().0, b"a");
+        r.save(&paths).unwrap();
+        let mut r = Registry::load(&paths);
+        assert!(r.classes.contains_key("board"));
+
+        // The draft changes; the registered copy changes only when registered again.
+        std::fs::write(d.join("index.html"), "v2").unwrap();
+        assert_eq!(read_file(&source_dir(&paths, "board"), "index.html", "").unwrap().0, b"v1");
+        assert_eq!(r.ask_for("board", "s1", &m), None, "own update, same tools");
+        assert_eq!(r.ask_for("board", "s2", &m), Some(Ask::OtherSession { by: "s1".into() }));
+        let more = Manifest {
+            tools: vec!["ide_session".into(), "ide_show_message".into()],
+            ..m.clone()
+        };
+        assert_eq!(r.ask_for("board", "s1", &more), Some(Ask::ToolsChanged));
+        let c = r.register(&paths, &root, "board", "s2").unwrap();
+        assert_eq!((c.version, c.created_by.as_str(), c.updated_by.as_str()), (2, "s1", "s2"));
+        assert_eq!(read_file(&source_dir(&paths, "board"), "index.html", "").unwrap().0, b"v2");
+
+        // A global widget is one tab; others one per session.
+        assert!(r.set_open("board", "s1", true));
+        assert!(r.set_open("board", "s2", true));
+        assert_eq!(r.open, [OpenTab { widget: "board".into(), session: "s2".into() }]);
+        assert!(!r.set_open("nope", "s1", true), "not registered");
+        let l = widget(&root, "local", r#"{"name":"L"}"#);
+        std::fs::write(l.join("index.html"), "").unwrap();
+        r.register(&paths, &root, "local", "s1").unwrap();
+        r.set_open("local", "s1", true);
+        r.set_open("local", "s2", true);
+        assert_eq!(r.open.len(), 3);
+        assert!(r.set_open("local", "s1", false));
+        assert!(r.forget_session("s2"));
+        assert!(r.open.is_empty());
+
+        // Unregister: copy, tabs and global data go.
+        let g = data_file(&paths, Scope::Global, "s1", "s1", "board");
+        data_put(&g, "k", Some(serde_json::json!(1))).unwrap();
+        r.set_open("board", "s1", true);
+        assert!(r.unregister(&paths, "board").unwrap());
+        assert!(!source_dir(&paths, "board").exists() && !g.exists() && r.open.is_empty());
+        assert!(!r.unregister(&paths, "board").unwrap());
+        assert!(matches!(r.register(&paths, &root, "nope", "s1"), Err(WidgetError::NotFound(_))));
+    }
+
+    #[test]
+    fn data() {
         let t = tmp("wdata");
         let paths = Paths::new(t.0.clone());
         let f = data_file(&paths, Scope::Session, "s1", "r", "w");
         assert!(f.ends_with("sessions/s1/widgets/w.json"));
         assert!(data_file(&paths, Scope::Family, "s1", "r", "w").ends_with("sessions/r/widgets-family/w.json"));
-        assert!(data_file(&paths, Scope::Global, "s1", "r", "w").ends_with("widgets/w.json"));
+        assert!(data_file(&paths, Scope::Global, "s1", "r", "w").ends_with("widgets/data/w.json"));
 
         assert_eq!(data_get(&f, "a").unwrap(), None);
         data_put(&f, "a", Some(serde_json::json!({"n": 1}))).unwrap();
@@ -444,16 +675,5 @@ mod tests {
         let big = "x".repeat(MAX_DATA);
         assert!(matches!(data_put(&f, "big", Some(serde_json::json!(big))), Err(WidgetError::Data(_))));
         assert_eq!(data_keys(&f).unwrap(), ["b"], "a refused write changes nothing");
-
-        let g = grants_file(&paths, "s1");
-        let tools = vec!["ide_session".to_owned(), "ide_show_message".to_owned()];
-        assert!(granted(&g, "w", &[]));
-        assert!(!granted(&g, "w", &tools));
-        grant(&g, "w", &[tools[1].clone(), tools[0].clone()]).unwrap();
-        assert!(granted(&g, "w", &tools));
-        assert!(!granted(&g, "w", &tools[..1]), "another list asks again");
-        assert!(!granted(&g, "other", &tools));
-        revoke(&g, "w").unwrap();
-        assert!(!granted(&g, "w", &tools));
     }
 }

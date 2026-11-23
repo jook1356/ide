@@ -182,7 +182,7 @@ start go to stderr.
 | `ide_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
 | `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon | session families: `docs/session-family.md` |
-| `ide_widget` | daemon (`guide`, `list`), app (`open`, `close`) | widgets: `docs/widgets.md` |
+| `ide_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.

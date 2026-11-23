@@ -61,9 +61,11 @@ pub enum Icon {
     CircleX,
     X,
     Checks,
+    // Widgets (widgets_ui.rs, widgets_page.rs).
+    Puzzle,
 }
 
-const SOURCES: [&str; 43] = [
+const SOURCES: [&str; 44] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -107,6 +109,7 @@ const SOURCES: [&str; 43] = [
     include_str!("../assets/icons/circle-x.svg"),
     include_str!("../assets/icons/x.svg"),
     include_str!("../assets/icons/checks.svg"),
+    include_str!("../assets/icons/puzzle.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -157,6 +160,6 @@ mod tests {
             assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::Checks as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Puzzle as usize + 1);
     }
 }

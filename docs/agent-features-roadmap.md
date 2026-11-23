@@ -98,7 +98,8 @@ Desk: 채팅 답변 속 ` ```tsx preview ` 블록을 렌더러 샌드박스에�
 
 ## 5. 위젯 (Desk의 mods) — 구현됨
 
-`docs/widgets.md`. "모드"는 CLI의 plan mode 등과, "mod"는 Claude Code 자체의 mod와 헷갈려서
+`docs/widgets.md`. Desk처럼 한 번 등록하면 모든 세션에서 쓰고(위젯 페이지, 상태 바 런처), 범위(세션 / 가족 / 공용)는
+data와 탭 배치를 정해요. "모드"는 CLI의 plan mode 등과, "mod"는 Claude Code 자체의 mod와 헷갈려서
 위젯이라고 불러요. React 강제 없이 HTML/JS(프레임워크 자유), `ide-widget://` 스킴으로 앱이 서빙,
 `window.ide.call`로 브리지의 `ide_*` 도구를 사용자 승인 후 호출, `ide.data`로 범위별 저장.
 

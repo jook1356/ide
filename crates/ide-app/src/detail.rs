@@ -1237,11 +1237,15 @@ impl App {
         let (tabs, keys): (Vec<ItemKey>, Vec<ItemKey>) = keys
             .into_iter()
             .partition(|k| matches!(k, ItemKey::Browser(_)));
+        let mut closed = Vec::new();
         for k in tabs {
-            if let ItemKey::Browser(id) = k {
-                self.close_browser(id);
+            if let ItemKey::Browser(id) = k
+                && let Some(w) = self.close_browser(id)
+            {
+                closed.push(self.widget_closed(&w));
             }
         }
+        let closed = Task::batch(closed);
         let (terms, keys): (Vec<ItemKey>, Vec<ItemKey>) = keys
             .into_iter()
             .partition(|k| matches!(k, ItemKey::Terminal(_)));
@@ -1252,9 +1256,9 @@ impl App {
             _ => None,
         }));
         if keys.is_empty() {
-            return removed;
+            return Task::batch([closed, removed]);
         }
-        Task::batch([removed, self.close_files(sid, keys)])
+        Task::batch([closed, removed, self.close_files(sid, keys)])
     }
 
     /// [`Self::close_keys`] for the items (files, diffs, commits).
