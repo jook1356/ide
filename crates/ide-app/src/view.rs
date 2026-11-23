@@ -13,7 +13,7 @@ use ide_term::TerminalView;
 
 use crate::app::{
     ALL_CONFIGURATIONS, App, Choice, Conn, DIVIDER_W, Live, Message,
-    Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PickRootForm, QuickForm, RAIL_W, REPO_INPUT_ID,
+    Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PICK_PATH_ID, PickRootForm, QuickForm, RAIL_W,
     RENAME_ID, RunState, SIDEBAR_W, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
     TERM_ID,
 };
@@ -1487,6 +1487,15 @@ impl App {
             .size(18)
             .font(style::BOLD),
             text(tr::pick_root_note()).size(12).color(style::DIM),
+            text_input(tr::pick_path_placeholder(), &f.path)
+                .id(PICK_PATH_ID)
+                .on_input(Message::PickPath)
+                .on_submit(Message::PickPathGo)
+                .size(12)
+                .font(style::MONO)
+                .padding([5, 8])
+                .style(style::input)
+                .width(Fill),
             browser_frame(body.boxed()),
         ]
         .spacing(10);
@@ -1828,14 +1837,6 @@ impl App {
         .padding([6, 10])
         .style(style::primary)
         .on_press_maybe((online && !f.repos_busy).then_some(Message::PickOpen));
-        let input = text_input(tr::repo_path_placeholder(), &f.repo_input)
-            .id(REPO_INPUT_ID)
-            .on_input(Message::RepoInput)
-            .on_submit(Message::RepoAdd)
-            .size(12)
-            .padding([5, 8])
-            .style(style::input)
-            .width(Fill);
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         for r in &self.repos {
             let sel = f.repo_selected.as_deref() == Some(r.id.as_str());
@@ -1876,7 +1877,7 @@ impl App {
             list = list.push(text(tr::repos_none()).size(12).color(style::DIM).boxed());
         }
         container(
-            column![head, add, input, scrollable(list).height(Fill)]
+            column![head, add, scrollable(list).height(Fill)]
                 .spacing(10)
                 .padding(10),
         )

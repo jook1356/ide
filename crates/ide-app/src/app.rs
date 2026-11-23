@@ -53,7 +53,7 @@ pub const NEW_TITLE_ID: &str = "ide-new-title";
 pub const URL_ID: &str = "ide-url";
 pub const CONFIG_NAME_ID: &str = "ide-config-name";
 pub const SSH_HOST_ID: &str = "ide-ssh-host";
-pub const REPO_INPUT_ID: &str = "ide-repo-input";
+pub const PICK_PATH_ID: &str = "ide-pick-path";
 /// The folder list of the repos page's folder picker.
 pub const PICK_LIST_ID: &str = "ide-pick-list";
 
@@ -213,6 +213,9 @@ pub struct PickRootForm {
     pub selected: Option<usize>,
     /// What the picked folder is for.
     pub purpose: PickPurpose,
+    /// The path input above the list: the listed folder, or what the user typed / pasted
+    /// (Enter opens it).
+    pub path: String,
 }
 
 impl PickRootForm {
@@ -867,10 +870,14 @@ pub enum Message {
     SessionRepoDetach(String),
     /// Attach (`true`: closes the dialog) / detach finished.
     SessionReposDone(bool, Result<SessionInfo, ProtoError>),
-    /// Open the repos page's folder picker (at the typed path if it is listable).
+    /// Open the repos page's folder picker.
     PickOpen,
     /// List a folder in the picker (`None` = the start list).
     PickGo(Option<String>),
+    /// The picker's path input changed.
+    PickPath(String),
+    /// Enter in the picker's path input: open the typed folder.
+    PickPathGo,
     PickListed(u64, Result<BrowseListing, ProtoError>),
     /// Highlight an entry of the picker.
     PickHighlight(usize),
@@ -2646,11 +2653,22 @@ impl App {
                 }
                 self.rename = None;
                 self.modal = Some(Modal::PickRoot(PickRootForm::default()));
-                // Start at the typed folder when it is listable, else at the start list.
-                let typed = self.settings.repo_input.trim().trim_matches('"').to_owned();
-                self.pick_go((!typed.is_empty()).then_some(typed))
+                self.pick_go(None)
             }
             Message::PickGo(dir) => self.pick_go(dir),
+            Message::PickPath(v) => {
+                if let Some(Modal::PickRoot(f)) = &mut self.modal {
+                    f.path = v;
+                }
+                Task::none()
+            }
+            Message::PickPathGo => {
+                let Some(Modal::PickRoot(f)) = &self.modal else {
+                    return Task::none();
+                };
+                let typed = f.path.trim().trim_matches('"').trim().to_owned();
+                self.pick_go((!typed.is_empty()).then_some(typed))
+            }
             Message::PickListed(seq, r) => {
                 let Some(Modal::PickRoot(f)) = &mut self.modal else {
                     return Task::none();
@@ -2670,6 +2688,7 @@ impl App {
                         ));
                         f.error = None;
                         f.selected = None;
+                        f.path = l.path.clone();
                         f.listing = Some(l);
                         pick_scroll(0.0)
                     }
@@ -3964,11 +3983,13 @@ impl App {
             }));
         }
         if matches!(self.modal, Some(Modal::PickRoot(_))) {
-            subs.push(event::listen_with(|e, _, _| match e {
+            // Keys the focused path input handles (Enter = open the typed path) are captured
+            // and skip the list's keys.
+            subs.push(event::listen_with(|e, status, _| match e {
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(named),
                     ..
-                }) => match named {
+                }) if status == event::Status::Ignored => match named {
                     keyboard::key::Named::ArrowDown => Some(Message::PickMove(1)),
                     keyboard::key::Named::ArrowUp => Some(Message::PickMove(-1)),
                     keyboard::key::Named::Enter => Some(Message::PickEnter),
