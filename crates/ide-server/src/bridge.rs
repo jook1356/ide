@@ -67,7 +67,7 @@ pub fn is_family_tool(tool: &str) -> bool {
 }
 
 /// How long a tool carried out by an app may take.
-const APP_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const APP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Base instructions of every bridged session (appended to the configuration's).
 const INSTRUCTIONS: &str = "\
@@ -449,9 +449,18 @@ pub fn tools() -> Vec<AgentTool> {
         },
         AgentTool {
             name: TOOL_WIDGET.into(),
-            description: "Widgets: small web apps (HTML/JS, any framework) you write into this                           session's folder and the ide shows as a tab next to the terminal.                           `guide`: how to build one (folder, widget.json, the window.ide API:                           ide tools and stored data). `list`: this session's widgets and                           their problems. `open` / `close` {widget}: show or close one in the                           ide (open again to reload it after changes)."
+            description: "Widgets: small web apps (HTML/JS, any framework) you draft in this \
+                          session's folder and register once; then every session can open \
+                          them as a tab next to the terminal. `guide`: how to build one \
+                          (folder, widget.json, the window.ide API: ide tools and stored \
+                          data). `list`: registered widgets and this session's drafts. \
+                          `register` {widget}: register or update a draft (the user is asked \
+                          first for a new widget, another session's widget or changed \
+                          tools). `unregister` {widget}: remove one this session registered. \
+                          `open` / `close` {widget}: show or close a registered widget here \
+                          (open again to reload it after registering changes)."
                 .into(),
-            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["guide","list","open","close"]},"widget":{"type":"string","description":"The widget id (its folder name), for open / close."}},"required":["action"],"additionalProperties":false}"#
+            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["guide","list","register","unregister","open","close"]},"widget":{"type":"string","description":"The widget id (its folder name), for register / unregister / open / close."}},"required":["action"],"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {
@@ -556,6 +565,19 @@ pub async fn ask_app(
     apps: bool,
     notify: impl FnOnce(Notify),
 ) -> AgentToolResult {
+    ask_app_within(state, session, tool, args, apps, notify, APP_TIMEOUT).await
+}
+
+/// [`ask_app`] waiting at most `timeout` (a question to the user takes longer).
+pub async fn ask_app_within(
+    state: &BridgeState,
+    session: &str,
+    tool: &str,
+    args: String,
+    apps: bool,
+    notify: impl FnOnce(Notify),
+    timeout: Duration,
+) -> AgentToolResult {
     if !apps {
         return err("no ide window is open");
     }
@@ -566,7 +588,7 @@ pub async fn ask_app(
         tool: tool.to_owned(),
         args,
     });
-    let r = tokio::time::timeout(APP_TIMEOUT, rx).await;
+    let r = tokio::time::timeout(timeout, rx).await;
     state.end(id);
     match r {
         Ok(Ok(Ok(text))) => ok(text),

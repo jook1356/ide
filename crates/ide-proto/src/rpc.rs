@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 16;
+pub const PROTO_VERSION: u32 = 17;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -61,26 +61,30 @@ pub const AGENT_TOOL_SESSION: &str = "ide_session";
 /// Agent bridge tool carried out by an app (`Notify::AgentRequest`): show `{"message"}` in the
 /// session's panel.
 pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
-/// Agent bridge tool for widgets (`docs/widgets.md`): `list` / `guide` are answered by the
-/// daemon, `open` / `close` are carried out by an app (`Notify::AgentRequest`).
+/// Agent bridge tool for widgets (`docs/widgets.md`): `guide` / `list` / `unregister` and
+/// registrations without a question are answered by the daemon; `open` / `close` and the
+/// registration question are carried out by an app (`Notify::AgentRequest`).
 pub const AGENT_TOOL_WIDGET: &str = "ide_widget";
 
-/// A widget of a session folder (`widget.list`; `docs/widgets.md`).
+/// A registered widget (`widget.list`; `docs/widgets.md`): every session can open it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetInfo {
-    /// Folder name under `.ide/widgets/` (a URL host label).
+    /// A URL host label (1-40 of `a-z0-9-`).
     pub id: String,
-    /// `widget.json` `name` (the id when the manifest is not usable).
     pub name: String,
     pub description: String,
-    /// ide tools it calls; the user approves them before it first runs.
+    /// ide tools it calls (allowed by the user when it was registered).
     pub tools: Vec<String>,
-    /// `session` / `family` / `global`.
+    /// Where its data lives: `session` / `family` / `global` (`global`: one 공용 tab).
     pub scope: String,
-    /// The user approved `tools` (always true without tools).
-    pub granted: bool,
-    /// Why it cannot be opened (manifest errors); `None` = usable.
-    pub error: Option<String>,
+    pub version: u32,
+    /// The session that registered it first, and its title (empty when it is gone).
+    pub created_by: String,
+    pub created_by_title: String,
+    /// Unix seconds of the last registration.
+    pub updated: u64,
+    /// The sessions showing it (open tabs, remembered across restarts).
+    pub open: Vec<String>,
 }
 
 /// `widget.data`: a widget's key-value store (values are JSON text).
@@ -1079,22 +1083,30 @@ pub enum Request {
         session: String,
         text: String,
     },
-    /// The widgets of the session's folder (protocol 16, `docs/widgets.md`) -> `Widgets`.
-    WidgetList {
-        session: String,
-    },
-    /// A file of a widget (`path` empty = its entry page) -> `WidgetFile`.
+    /// The registered widgets (protocol 17, `docs/widgets.md`) -> `Widgets`.
+    WidgetList,
+    /// A file of a registered widget (`path` empty = its entry page) -> `WidgetFile`.
     WidgetFile {
         session: String,
         widget: String,
         path: String,
     },
-    /// The user approved `tools` (as shown to them) for the widget; refused when the manifest
-    /// now lists others (`widget-changed`) -> `Unit`.
-    WidgetGrant {
+    /// The user allowed registering the session's draft `widget` with `tools` (as shown to
+    /// them); refused when the draft now lists others (`widget-changed`) -> `Unit`.
+    WidgetRegister {
         session: String,
         widget: String,
         tools: Vec<String>,
+    },
+    /// The user deleted a registered widget -> `Unit`.
+    WidgetDelete {
+        widget: String,
+    },
+    /// A widget tab was opened / closed in the session (remembered across restarts) -> `Unit`.
+    WidgetSetOpen {
+        session: String,
+        widget: String,
+        open: bool,
     },
     /// A widget calls an ide tool it declared and the user approved -> `AgentResult`.
     WidgetCall {
@@ -1235,9 +1247,11 @@ impl Request {
             Request::PromptCommit { .. } => "prompt.commit",
             Request::PromptPr { .. } => "prompt.pr",
             Request::SessionSendPrompt { .. } => "session.send_prompt",
-            Request::WidgetList { .. } => "widget.list",
+            Request::WidgetList => "widget.list",
             Request::WidgetFile { .. } => "widget.file",
-            Request::WidgetGrant { .. } => "widget.grant",
+            Request::WidgetRegister { .. } => "widget.register",
+            Request::WidgetDelete { .. } => "widget.delete",
+            Request::WidgetSetOpen { .. } => "widget.set_open",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
         }
@@ -1419,6 +1433,8 @@ pub enum Notify {
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
+    /// The registered widgets or their open tabs changed; re-fetch with `WidgetList`.
+    WidgetsChanged,
     /// The account list changed.
     AccountsChanged,
     /// The configuration list (or a configuration) changed.

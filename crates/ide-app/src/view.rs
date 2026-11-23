@@ -355,11 +355,12 @@ impl App {
             Page::Accounts => (Icon::Key, tr::nav_accounts()),
             Page::Configurations => (Icon::Stack2, tr::nav_configurations()),
             Page::Repos => (Icon::GitBranch, tr::nav_repos()),
+            Page::Widgets => (Icon::Puzzle, tr::nav_widgets()),
             Page::Settings => (Icon::Settings, tr::settings()),
         };
         // On its own page the work / profiles / repos button shows or hides the list beside the rail.
         if page != self.ui.page
-            || !matches!(page, Page::Work | Page::Configurations | Page::Repos)
+            || !matches!(page, Page::Work | Page::Configurations | Page::Repos | Page::Widgets)
         {
             return (icon, label);
         }
@@ -374,6 +375,8 @@ impl App {
             (Page::Work, false) => tr::sessions_show(),
             (Page::Repos, true) => tr::repos_hide(),
             (Page::Repos, false) => tr::repos_show(),
+            (Page::Widgets, true) => tr::widgets_hide(),
+            (Page::Widgets, false) => tr::widgets_show(),
             (_, true) => tr::profiles_hide(),
             (_, false) => tr::profiles_show(),
         };
@@ -435,11 +438,12 @@ impl App {
             Page::Accounts,
             Page::Configurations,
             Page::Repos,
+            Page::Widgets,
             Page::Settings,
         ] {
             let (icon, label) = self.rail_entry(page);
             let mut b: El<'static> = link(icon, self.ui.page == page, Message::Page(page)).boxed();
-            if matches!(page, Page::Work | Page::Configurations | Page::Repos) {
+            if matches!(page, Page::Work | Page::Configurations | Page::Repos | Page::Widgets) {
                 b = mouse_area(b)
                     .on_enter(Message::RailHover(true))
                     .on_exit(Message::RailHover(false))
@@ -1846,6 +1850,8 @@ impl App {
             Page::Configurations => return self.profiles_page(),
             // Its own layout (list beside the rail + the picked repository), like profiles.
             Page::Repos => return self.repos_page(),
+            // Its own layout like repos (`widgets_page.rs`).
+            Page::Widgets => return self.widgets_page(),
             Page::Settings => (
                 tr::settings(),
                 vec![
@@ -2962,7 +2968,7 @@ impl App {
             Modal::BulkDelete(f) => self.bulk_delete_card(f),
             Modal::SelfUpdate => self.update_card(),
             Modal::RestartOldServer(f) => self.old_server_card(f),
-            Modal::WidgetGrant(f) => self.widget_grant_card(f),
+            Modal::WidgetRegister(f) => self.widget_register_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

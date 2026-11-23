@@ -557,8 +557,8 @@ pub enum Modal {
     BulkDelete(crate::session_edit::BulkDeleteForm),
     /// ide 빌드 후 재시작: confirm (`self_update.rs`).
     SelfUpdate,
-    /// Allow a widget's ide tools (`widgets_ui.rs`).
-    WidgetGrant(crate::widgets_ui::GrantForm),
+    /// An agent asks to register a widget (`widgets_ui.rs`).
+    WidgetRegister(crate::widgets_ui::RegisterForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -1182,8 +1182,8 @@ pub struct App {
     pub item_drag: Option<crate::item_menu::ItemDrag>,
     /// The "+ 새로 열기" menu is open.
     pub new_menu: bool,
-    /// Widgets per session, as last listed ("+ 새로 열기", `widgets_ui.rs`).
-    pub widgets: std::collections::HashMap<String, Vec<ide_client::WidgetInfo>>,
+    /// Registered widgets and their open tabs, page and launcher state (`widgets_ui.rs`).
+    pub widgets: crate::widgets_ui::WidgetsState,
     /// "+ 새로 열기" opens 공용 items (no session) instead of the session's.
     pub new_global: bool,
     /// Its address field, and the bookmark being renamed (url, name).
@@ -1780,7 +1780,8 @@ impl App {
                 .find(|l| self.in_filter(&l.info))
                 .map(|l| l.info.id.clone());
         }
-        Task::batch([self.after_select(), self.refresh_badges(true)])
+        // Widgets: their open tabs are restored once the sessions are known.
+        Task::batch([self.after_select(), self.refresh_badges(true), self.load_widgets()])
     }
 
     /// Attach the terminal of every shown or running session, and of sessions with output
@@ -1967,6 +1968,7 @@ impl App {
                 self.refresh()
             }
             Notify::ReposChanged => self.load_repos(),
+            Notify::WidgetsChanged => self.load_widgets(),
             Notify::UTermsChanged { session } => self.load_uterms(&session),
             Notify::FsChanged {
                 session,
@@ -2565,8 +2567,10 @@ impl App {
                 if busy {
                     return Task::none();
                 }
+                // A widget registration closed without 허용 is refused (the agent is told).
+                let refused = self.widget_register_closed();
                 self.modal = None;
-                self.after_select()
+                Task::batch([refused, self.after_select()])
             }
 
             Message::ConfigurationPicked(p) => {
@@ -2593,7 +2597,7 @@ impl App {
             Message::Page(page) => {
                 if page == self.ui.page {
                     // The profiles / repos page's button shows / hides its list (Desk).
-                    if matches!(page, Page::Configurations | Page::Repos) {
+                    if matches!(page, Page::Configurations | Page::Repos | Page::Widgets) {
                         self.ui.sessions_open = !self.ui.sessions_open;
                         self.save_ui();
                     }
@@ -2627,6 +2631,7 @@ impl App {
                         );
                         let load = match page {
                             Page::Repos => self.load_repos(),
+                            Page::Widgets => self.load_widgets(),
                             Page::Settings => {
                                 self.settings.reset_server(&self.ui.server);
                                 Task::none()

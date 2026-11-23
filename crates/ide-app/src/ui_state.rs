@@ -80,6 +80,8 @@ pub enum Page {
     Configurations,
     /// Repository folders the new-session dialog can browse.
     Repos,
+    /// Registered widgets (Desk's 모드 page, `widgets_page.rs`).
+    Widgets,
     /// Language, server and closing behaviour.
     Settings,
 }

@@ -1,6 +1,6 @@
-//! Widgets (`docs/widgets.md`) without any agent CLI: an app lists a session's widgets, reads
-//! their files (only inside the widget), approves their tools, calls tools and keeps data;
-//! the agent's `ide_widget` tool answers `guide` / `list` and hands `open` to the app.
+//! Widgets (`docs/widgets.md`) without any agent CLI: the agent drafts widgets in its folder
+//! and registers them (a new one asks the user through the app); an app lists the registered
+//! widgets, reads their files (only inside the copy), calls tools, keeps data and open tabs.
 //!
 //! Run with `IDE_TEST_TMP=<dir outside any git repository>`.
 
@@ -61,17 +61,79 @@ async fn widgets_end_to_end() {
     write(&widgets.join("ghost").join("index.html"), "");
     write(&repo.join("secret.txt"), "no");
 
-    // List: usable widgets and the problems of the others.
-    let list = app.widget_list(sid).await.unwrap();
-    let ids: Vec<&str> = list.iter().map(|w| w.id.as_str()).collect();
-    assert_eq!(ids, ["board", "broken", "ghost"]);
-    let board = &list[0];
-    assert_eq!((board.name.as_str(), board.scope.as_str()), ("Board", "family"));
-    assert_eq!((board.granted, board.error.as_deref()), (false, None));
-    assert!(list[1].error.as_deref().unwrap().contains("not valid"), "{:?}", list[1].error);
-    assert!(list[2].error.as_deref().unwrap().contains("ide_nope"), "{:?}", list[2].error);
+    // Drafts: the agent's list shows them with their problems; nothing is registered yet.
+    let ctx = server.authorize(server.user()).unwrap();
+    let call = |args: &'static str| {
+        let ctx = ctx.clone();
+        let sid = sid.to_owned();
+        async move { ctx.agent_call(&sid, "ide_widget", args).await }
+    };
+    let r = call(r#"{"action":"guide"}"#).await;
+    assert!(!r.is_error && r.text.contains("widget.json") && r.text.contains("register"), "{}", r.text);
+    let r = call(r#"{"action":"list"}"#).await;
+    let v: serde_json::Value = serde_json::from_str(&r.text).unwrap();
+    assert_eq!(v["drafts"][0]["id"], "board");
+    assert!(v["drafts"][0]["problem"].is_null());
+    assert!(v["drafts"][1]["problem"].as_str().unwrap().contains("not valid"));
+    assert!(v["drafts"][2]["problem"].as_str().unwrap().contains("ide_nope"));
+    assert_eq!(v["registered"].as_array().unwrap().len(), 0);
+    assert!(app.widget_list().await.unwrap().is_empty());
+    assert_eq!(app.widget_file(sid, "board", "").await.unwrap_err().id, "widget");
+    for (args, needle) in [
+        (r#"{"action":"register","widget":"broken"}"#, "not valid"),
+        (r#"{"action":"register","widget":"ghost"}"#, "ide_nope"),
+        (r#"{"action":"register"}"#, "`widget`"),
+        (r#"{"action":"open","widget":"board"}"#, "not registered"),
+        (r#"{"action":"dance"}"#, "unknown action"),
+    ] {
+        let r = ctx.agent_call(sid, "ide_widget", args).await;
+        assert!(r.is_error && r.text.contains(needle), "{args}: {}", r.text);
+    }
 
-    // Files: the entry page, files below the widget, nothing outside it.
+    // Registering a new widget asks the user through the app; the app registers what it showed.
+    let mut events = app.events().unwrap();
+    let app2 = app.clone();
+    let sid2 = s.id.clone();
+    let answering = tokio::spawn(async move {
+        while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::AgentRequest { request, session, tool, args }) = e {
+                assert_eq!((session.as_str(), tool.as_str()), (sid2.as_str(), "ide_widget"));
+                let v: serde_json::Value = serde_json::from_str(&args).unwrap();
+                match v["action"].as_str() {
+                    Some("register") => {
+                        assert_eq!((v["widget"].as_str(), v["ask"].as_str()), (Some("board"), Some("new")));
+                        assert_eq!(v["tools"], serde_json::json!(["ide_session"]));
+                        let e = app2
+                            .widget_register(&sid2, "board", vec!["ide_session".into(), "ide_show_message".into()])
+                            .await
+                            .unwrap_err();
+                        assert_eq!(e.id, "widget-changed");
+                        app2.widget_register(&sid2, "board", vec!["ide_session".into()]).await.unwrap();
+                        app2.agent_reply(request, Ok("registered".into())).await.unwrap();
+                    }
+                    Some("open") => {
+                        assert_eq!(v["widget"].as_str(), Some("board"));
+                        app2.agent_reply(request, Ok("opened".into())).await.unwrap();
+                        return;
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
+    });
+    let r = call(r#"{"action":"register","widget":"board"}"#).await;
+    assert_eq!((r.is_error, r.text.as_str()), (false, "registered"));
+    let r = call(r#"{"action":"open","widget":"board"}"#).await;
+    assert_eq!((r.is_error, r.text.as_str()), (false, "opened"));
+    answering.await.unwrap();
+    let list = app.widget_list().await.unwrap();
+    assert_eq!(list.len(), 1);
+    let board = &list[0];
+    assert_eq!((board.id.as_str(), board.name.as_str(), board.scope.as_str()), ("board", "Board", "family"));
+    assert_eq!((board.version, board.created_by.as_str()), (1, sid));
+    assert_eq!(board.tools, ["ide_session"]);
+
+    // Files come from the registered copy: below the widget only, the draft not before an update.
     let (mime, data) = app.widget_file(sid, "board", "").await.unwrap();
     assert_eq!((mime.as_str(), data.as_slice()), ("text/html; charset=utf-8", &b"<html><head></head><body>hi</body></html>"[..]));
     let (mime, _) = app.widget_file(sid, "board", "js/app.js").await.unwrap();
@@ -80,34 +142,22 @@ async fn widgets_end_to_end() {
         let e = app.widget_file(sid, "board", bad).await.unwrap_err();
         assert_eq!(e.id, "widget", "{bad}");
     }
-    assert_eq!(app.widget_file(sid, "nope", "").await.unwrap_err().id, "widget");
     assert_eq!(app.widget_file("zzz", "board", "").await.unwrap_err().id, "session-not-found");
+    write(&widgets.join("board").join("index.html"), "v2");
+    assert_ne!(app.widget_file(sid, "board", "").await.unwrap().1, b"v2");
+    // Updating your own widget with the same tools does not ask.
+    let r = call(r#"{"action":"register","widget":"board"}"#).await;
+    assert!(!r.is_error && r.text.contains("\"version\": 2"), "{}", r.text);
+    assert_eq!(app.widget_file(sid, "board", "").await.unwrap().1, b"v2");
 
-    // Tools: only declared ones, only after the user approved exactly that list.
-    let e = app.widget_call(sid, "board", "ide_session", "{}").await.unwrap_err();
-    assert_eq!(e.id, "widget-not-allowed");
-    let e = app.widget_grant(sid, "board", vec!["ide_session".into(), "ide_show_message".into()]).await.unwrap_err();
-    assert_eq!(e.id, "widget-changed");
-    app.widget_grant(sid, "board", vec!["ide_session".into()]).await.unwrap();
-    assert!(app.widget_list(sid).await.unwrap()[0].granted);
+    // Tools: only the ones allowed at registration.
     let r = app.widget_call(sid, "board", "ide_session", "{}").await.unwrap();
     assert!(!r.is_error, "{}", r.text);
     let v: serde_json::Value = serde_json::from_str(&r.text).unwrap();
     assert_eq!(v["id"], sid);
     let e = app.widget_call(sid, "board", "ide_show_message", "{}").await.unwrap_err();
     assert_eq!(e.id, "widget-not-allowed");
-    // A changed tool list needs a new approval.
-    write(
-        &widgets.join("board").join("widget.json"),
-        r#"{"name":"Board","tools":["ide_session","ide_list_related_sessions"],"scope":"family"}"#,
-    );
-    assert!(!app.widget_list(sid).await.unwrap()[0].granted);
-    let e = app.widget_call(sid, "board", "ide_session", "{}").await.unwrap_err();
-    assert_eq!(e.id, "widget-not-allowed");
-    app.widget_grant(sid, "board", vec!["ide_list_related_sessions".into(), "ide_session".into()])
-        .await
-        .unwrap();
-    assert!(!app.widget_call(sid, "board", "ide_session", "{}").await.unwrap().is_error);
+    assert_eq!(app.widget_call(sid, "nope", "ide_session", "{}").await.unwrap_err().id, "widget");
 
     // Data.
     let get = |k: &str| WidgetDataOp::Get { key: k.into() };
@@ -130,40 +180,19 @@ async fn widgets_end_to_end() {
     // Family scope: kept under the family's root session (this session has no parent).
     assert!(dir.join("data").join("sessions").join(sid).join("widgets-family").join("board.json").is_file());
 
-    // The agent's tool.
-    let ctx = server.authorize(server.user()).unwrap();
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"guide"}"#).await;
-    assert!(!r.is_error && r.text.contains("widget.json") && r.text.contains(".ide"), "{}", r.text);
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"list"}"#).await;
-    let v: serde_json::Value = serde_json::from_str(&r.text).unwrap();
-    assert_eq!(v["widgets"][0]["id"], "board");
-    assert_eq!(v["widgets"][0]["approved_by_user"], true);
-    assert!(v["widgets"][1]["problem"].is_string());
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"open","widget":"broken"}"#).await;
-    assert!(r.is_error && r.text.contains("broken"), "{}", r.text);
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"open"}"#).await;
-    assert!(r.is_error && r.text.contains("`widget`"), "{}", r.text);
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"dance"}"#).await;
-    assert!(r.is_error, "{}", r.text);
+    // Open tabs are remembered.
+    app.widget_set_open(sid, "board", true).await.unwrap();
+    assert_eq!(app.widget_list().await.unwrap()[0].open, [sid]);
+    app.widget_set_open(sid, "board", false).await.unwrap();
+    assert!(app.widget_list().await.unwrap()[0].open.is_empty());
+    app.widget_set_open(sid, "board", true).await.unwrap();
 
-    // `open` goes to the app.
-    let mut events = app.events().unwrap();
-    let app2 = app.clone();
-    let sid2 = s.id.clone();
-    let answering = tokio::spawn(async move {
-        while let Some(e) = events.next().await {
-            if let ClientEvent::Notify(Notify::AgentRequest { request, session, tool, args }) = e {
-                assert_eq!((session.as_str(), tool.as_str()), (sid2.as_str(), "ide_widget"));
-                let v: serde_json::Value = serde_json::from_str(&args).unwrap();
-                assert_eq!((v["action"].as_str(), v["widget"].as_str()), (Some("open"), Some("board")));
-                app2.agent_reply(request, Ok("opened".into())).await.unwrap();
-                return;
-            }
-        }
-    });
-    let r = ctx.agent_call(sid, "ide_widget", r#"{"action":"open","widget":"board"}"#).await;
-    assert_eq!((r.is_error, r.text.as_str()), (false, "opened"));
-    answering.await.unwrap();
+    // Unregister: by the agent of the registering session (or the user, `widget.delete`).
+    let r = call(r#"{"action":"unregister","widget":"board"}"#).await;
+    assert!(!r.is_error, "{}", r.text);
+    assert!(app.widget_list().await.unwrap().is_empty());
+    assert_eq!(app.widget_file(sid, "board", "").await.unwrap_err().id, "widget");
+    assert_eq!(app.widget_delete("board").await.unwrap_err().id, "widget");
 
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);

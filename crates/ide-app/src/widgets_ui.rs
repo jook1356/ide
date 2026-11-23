@@ -1,11 +1,15 @@
-//! Widgets in the app (`docs/widgets.md`): a widget is a browser tab of the detail area whose
-//! page comes from `ide-widget://<widget>.<session>/...`. The app answers that scheme (CEF
-//! asks through `ide_web::set_scheme_handler`): files through the server (`widget.file`),
-//! the page's `window.ide` API (`/__ide/ide.js`, injected into every HTML page) through
-//! `widget.call` / `widget.data`. Only the tab the app opened for a widget gets its files and
-//! API; API calls must come from the widget's own origin. A widget that declares ide tools is
-//! opened only after the user approved them (`widget.grant`).
+//! Widgets in the app (`docs/widgets.md`, Hermes Desk's mods): a registered widget is a
+//! browser tab of the detail area whose page comes from `ide-widget://<widget>.<session>/...`
+//! (`session`: the session showing it; a `global` widget is one 공용 tab). The app answers that
+//! scheme (CEF asks through `ide_web::set_scheme_handler`): files through the server
+//! (`widget.file`), the page's `window.ide` API (`/__ide/ide.js`, injected into every HTML
+//! page) through `widget.call` / `widget.data`. Only the tab the app opened for a widget gets
+//! its files and API; API calls must come from the widget's own origin. An agent's request to
+//! register a widget is asked here (the 위젯 등록 dialog, then `widget.register`); open tabs are
+//! remembered by the server (`widget.set_open`) and restored at start. The 위젯 page and the
+//! status bar's launcher are in `widgets_page.rs`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use iced::widget::{button, column, container, row, space, text};
@@ -30,41 +34,86 @@ const API: &str = "/__ide/";
 /// What a widget tab shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetTab {
+    /// The session showing it (the one it was opened from, for a 공용 tab).
     pub session: String,
     pub id: String,
     pub name: String,
 }
 
-/// The approval dialog of a widget's ide tools.
-pub struct GrantForm {
+/// The registered widgets and the app's widget UI state.
+#[derive(Default)]
+pub struct WidgetsState {
+    /// As last listed (`widget.list`).
+    pub list: Vec<WidgetInfo>,
+    /// Open tabs (widget, session) already restored or opened in this run: a listing that
+    /// still has a tab the user just closed does not bring it back.
+    seen: HashSet<(String, String)>,
+    /// The status bar's launcher is open.
+    pub launcher: bool,
+    /// The 위젯 page: the picked widget, its delete armed, the last error.
+    pub selected: Option<String>,
+    pub delete_armed: bool,
+    pub error: Option<String>,
+}
+
+impl WidgetsState {
+    pub fn get(&self, id: &str) -> Option<&WidgetInfo> {
+        self.list.iter().find(|w| w.id == id)
+    }
+}
+
+/// A `global` widget: one 공용 tab, its data shared by every session.
+pub fn is_global(w: &WidgetInfo) -> bool {
+    w.scope == "global"
+}
+
+/// An agent asks to register a widget (the 위젯 등록 dialog).
+pub struct RegisterForm {
+    /// The agent request to answer.
+    pub request: u64,
     pub session: String,
     pub widget: String,
     pub name: String,
+    pub description: String,
     pub tools: Vec<String>,
+    pub scope: String,
+    /// Why it asks: `new`, `other` (another session registered it), `tools` (they changed).
+    pub ask: String,
+    /// The registering session's title (`other`).
+    pub by: String,
     pub busy: bool,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum WidgetMsg {
-    /// The widgets of a session (for "+ 새로 열기").
-    Listed(String, Result<Vec<WidgetInfo>, ProtoError>),
-    /// Open (or reload) a widget from the menu.
+    /// The registered widgets.
+    Listed(Result<Vec<WidgetInfo>, ProtoError>),
+    /// Open (or reload) a widget in a session (menus, launcher, page).
     Open { session: String, widget: String },
-    /// A widget's info arrived for opening; `request`: the agent request to answer.
-    Info {
+    /// Close its tab in a session.
+    Close { session: String, widget: String },
+    /// The list arrived for opening; `request`: the agent request to answer.
+    Fetched {
         session: String,
         widget: String,
         request: Option<u64>,
         result: Result<Vec<WidgetInfo>, ProtoError>,
     },
-    /// The approval dialog's 허용.
+    /// The registration dialog's 허용.
     Allow,
-    Granted(Result<(), ProtoError>),
+    Registered(Result<(), ProtoError>),
     /// A request of a widget page (CEF).
     Request(SchemeRequest, Responder),
     DevTools(u32),
     Reload(u32),
+    /// The status bar's launcher.
+    Launcher(bool),
+    /// The 위젯 page: pick a widget, arm / disarm its delete, delete it.
+    Select(String),
+    DeleteArm(bool),
+    Delete(String),
+    Deleted(Result<(), ProtoError>),
 }
 
 /// Console lines of widget pages, kept for the app script (`script_widgets.rs`).
@@ -234,16 +283,29 @@ fn api_error(e: impl Into<String>) -> SchemeResponse {
 }
 
 impl App {
-    /// The widget tab showing web view `view`.
-    fn widget_tab_of(&self, view: ide_web::ViewId) -> Option<&Browser> {
+    /// Every browser tab (sessions' and 공용).
+    fn all_browsers(&self) -> impl Iterator<Item = &Browser> {
         self.sessions
             .iter()
             .flat_map(|l| l.browsers.iter())
+            .chain(self.global_browsers.iter())
+    }
+
+    /// The widget tab showing web view `view`.
+    fn widget_tab_of(&self, view: ide_web::ViewId) -> Option<&Browser> {
+        self.all_browsers()
             .find(|b| b.widget.is_some() && b.view.as_ref().is_some_and(|v| v.id() == view))
     }
 
-    /// The tab of a widget, if open.
-    fn widget_tab_id(&self, session: &str, widget: &str) -> Option<u32> {
+    /// The tab of a widget in a session: the 공용 one of a global widget.
+    pub(crate) fn widget_tab_id(&self, session: &str, widget: &str) -> Option<u32> {
+        if let Some(b) = self
+            .global_browsers
+            .iter()
+            .find(|b| b.widget.as_ref().is_some_and(|w| w.id == widget))
+        {
+            return Some(b.id);
+        }
         self.sessions
             .iter()
             .flat_map(|l| l.browsers.iter())
@@ -251,36 +313,27 @@ impl App {
             .map(|b| b.id)
     }
 
-    /// Load a session's widgets (for "+ 새로 열기").
-    pub(crate) fn load_widgets(&self, session: &str) -> Task<Message> {
+    /// Load the registered widgets.
+    pub(crate) fn load_widgets(&self) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        let s = session.to_owned();
-        Task::perform(async move { (s.clone(), c.widget_list(&s).await) }, |(s, r)| {
-            Message::Widget(WidgetMsg::Listed(s, r))
-        })
+        Task::perform(async move { c.widget_list().await }, |r| Message::Widget(WidgetMsg::Listed(r)))
     }
 
-    /// Fetch a widget's info, then open it (`request`: the agent request to answer).
+    /// Fetch the list, then open `widget` (`request`: the agent request to answer).
     fn fetch_and_open(&self, session: String, widget: String, request: Option<u64>) -> Task<Message> {
         let Some(c) = self.online() else {
             return self.reply_agent(request, Err("ide is not connected to its server".into()));
         };
-        Task::perform(
-            async move {
-                let r = c.widget_list(&session).await;
-                (session, widget, r)
-            },
-            move |(session, widget, result)| {
-                Message::Widget(WidgetMsg::Info {
-                    session,
-                    widget,
-                    request,
-                    result,
-                })
-            },
-        )
+        Task::perform(async move { c.widget_list().await }, move |result| {
+            Message::Widget(WidgetMsg::Fetched {
+                session,
+                widget,
+                request,
+                result,
+            })
+        })
     }
 
     /// Answer an agent request (none: nothing to do).
@@ -297,72 +350,225 @@ impl App {
         .discard()
     }
 
-    /// Show a widget: reload its tab when open, else open a new one.
+    /// Tell the server a widget tab was opened / closed (remembered across restarts).
+    fn persist_open(&self, session: &str, widget: &str, open: bool) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let (s, w) = (session.to_owned(), widget.to_owned());
+        Task::perform(
+            async move {
+                let _ = c.widget_set_open(&s, &w, open).await;
+            },
+            |_| (),
+        )
+        .discard()
+    }
+
+    /// The user (or the agent) closed a widget tab.
+    pub(crate) fn widget_closed(&self, w: &WidgetTab) -> Task<Message> {
+        self.persist_open(&w.session, &w.id, false)
+    }
+
+    /// Show a widget in a session: reload its tab when open, else open a new one (a global
+    /// widget's is 공용).
     fn show_widget(&mut self, session: &str, w: &WidgetInfo) -> Task<Message> {
+        self.widgets.seen.insert((w.id.clone(), session.to_owned()));
+        self.widgets.launcher = false;
+        let persist = self.persist_open(session, &w.id, true);
         if let Some(id) = self.widget_tab_id(session, &w.id) {
             if let Some(b) = self.browser_mut(id) {
-                if let Some(t) = &mut b.widget {
-                    t.name = w.name.clone();
-                }
+                let url = b
+                    .widget
+                    .as_mut()
+                    .map(|t| {
+                        t.name = w.name.clone();
+                        widget_url(&t.session, &t.id)
+                    })
+                    .unwrap_or_default();
                 if let Some(v) = &b.view {
-                    v.navigate(&widget_url(session, &w.id));
+                    v.navigate(&url);
                 }
             }
             let owner = self.workspace_owner(session);
             self.new_menu = false;
             self.ui.detail_collapsed = false;
+            if self.ui.page != crate::ui_state::Page::Work {
+                self.ui.page = crate::ui_state::Page::Work;
+            }
             let show = self.activate(&owner, ItemKey::Browser(id));
-            return Task::batch([show, self.sync_detail()]);
+            return Task::batch([show, self.sync_detail(), persist]);
         }
         let tab = WidgetTab {
             session: session.to_owned(),
             id: w.id.clone(),
             name: w.name.clone(),
         };
-        self.open_browser_tab(Some(session.to_owned()), false, widget_url(session, &w.id), Some(tab))
+        self.ui.page = crate::ui_state::Page::Work;
+        let open = self.open_browser_tab(
+            Some(session.to_owned()),
+            is_global(w),
+            widget_url(session, &w.id),
+            Some(tab),
+        );
+        Task::batch([open, persist])
     }
 
-    /// The agent's `ide_widget` `open` / `close` (the server checked the widget).
+    /// Close a widget's tab in a session (its 공용 tab for a global widget).
+    fn close_widget(&mut self, session: &str, widget: &str) -> Option<Task<Message>> {
+        let id = self.widget_tab_id(session, widget)?;
+        let w = self.close_browser(id)?;
+        Some(self.widget_closed(&w))
+    }
+
+    /// Bring back the tabs open when ide last ran (once per tab and run), quietly.
+    fn restore_widget_tabs(&mut self) {
+        if !self.loaded {
+            return;
+        }
+        let mut todo = Vec::new();
+        for w in &self.widgets.list {
+            for s in &w.open {
+                let key = (w.id.clone(), s.clone());
+                if self.widgets.seen.contains(&key) {
+                    continue;
+                }
+                // A 공용 tab opened from a session that went: shown from another one.
+                let session = if self.live(s).is_some() {
+                    s.clone()
+                } else if is_global(w) {
+                    match self.selected.clone().or_else(|| self.sessions.first().map(|l| l.info.id.clone())) {
+                        Some(x) => x,
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                };
+                todo.push((key, session, w.clone()));
+            }
+        }
+        for (key, session, w) in todo {
+            self.widgets.seen.insert(key);
+            if self.widget_tab_id(&session, &w.id).is_some() {
+                continue;
+            }
+            crate::script::log(&format!("widget {} restored in {session}", w.id));
+            let tab = WidgetTab {
+                session: session.clone(),
+                id: w.id.clone(),
+                name: w.name.clone(),
+            };
+            self.add_browser_tab_quietly(&session, is_global(&w), widget_url(&session, &w.id), Some(tab));
+        }
+    }
+
+    /// Tabs of widgets that are no longer registered close.
+    fn drop_unregistered_tabs(&mut self) {
+        let gone: Vec<u32> = self
+            .all_browsers()
+            .filter(|b| {
+                b.widget
+                    .as_ref()
+                    .is_some_and(|w| self.widgets.get(&w.id).is_none())
+            })
+            .map(|b| b.id)
+            .collect();
+        for id in gone {
+            self.close_browser(id);
+        }
+    }
+
+    /// The agent's `ide_widget` `register` / `open` / `close` (the server checked the widget).
     pub(crate) fn agent_widget(&mut self, request: u64, session: String, args: &serde_json::Value) -> Task<Message> {
-        let widget = args.get("widget").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let widget = s("widget");
         crate::script::log(&format!("agent {session}: widget {args}"));
         if self.live(&session).is_none() {
             return self.reply_agent(Some(request), Err("this session is not open in the ide window".into()));
         }
-        match args.get("action").and_then(|v| v.as_str()) {
-            Some("open") => self.fetch_and_open(session, widget, Some(request)),
-            Some("close") => {
-                let r = match self.widget_tab_id(&session, &widget) {
-                    Some(id) => {
-                        self.close_browser(id);
-                        Ok("closed".to_owned())
-                    }
-                    None => Ok("it was not open".to_owned()),
+        match s("action").as_str() {
+            "register" => {
+                if self.modal.is_some() {
+                    return self.reply_agent(
+                        Some(request),
+                        Err("the user is busy with another ide dialog; try again in a moment".into()),
+                    );
+                }
+                let tools = args
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                self.modal = Some(Modal::WidgetRegister(RegisterForm {
+                    request,
+                    session,
+                    widget,
+                    name: s("name"),
+                    description: s("description"),
+                    tools,
+                    scope: s("scope"),
+                    ask: s("ask"),
+                    by: s("by"),
+                    busy: false,
+                    error: None,
+                }));
+                Task::none()
+            }
+            "open" => self.fetch_and_open(session, widget, Some(request)),
+            "close" => {
+                let r = match self.close_widget(&session, &widget) {
+                    Some(t) => (Ok("closed".to_owned()), t),
+                    None => (Ok("it was not open".to_owned()), Task::none()),
                 };
-                self.reply_agent(Some(request), r)
+                Task::batch([r.1, self.reply_agent(Some(request), r.0)])
             }
             _ => self.reply_agent(Some(request), Err(format!("{AGENT_TOOL_WIDGET}: unknown action"))),
         }
     }
 
+    /// The registration dialog closes without 허용: the agent is told the user refused.
+    pub(crate) fn widget_register_closed(&self) -> Task<Message> {
+        match &self.modal {
+            Some(Modal::WidgetRegister(f)) => self.reply_agent(
+                Some(f.request),
+                Err("the user did not allow registering the widget".into()),
+            ),
+            _ => Task::none(),
+        }
+    }
+
     pub(crate) fn on_widget(&mut self, m: WidgetMsg) -> Task<Message> {
         match m {
-            WidgetMsg::Listed(s, r) => {
-                match r {
-                    Ok(list) => {
-                        self.widgets.insert(s, list);
+            WidgetMsg::Listed(r) => {
+                if let Ok(list) = r {
+                    self.widgets.list = list;
+                    if self
+                        .widgets
+                        .selected
+                        .as_deref()
+                        .is_some_and(|s| self.widgets.get(s).is_none())
+                    {
+                        self.widgets.selected = None;
+                        self.widgets.delete_armed = false;
                     }
-                    Err(_) => {
-                        self.widgets.remove(&s);
-                    }
+                    self.drop_unregistered_tabs();
+                    self.restore_widget_tabs();
+                    return self.sync_detail();
                 }
                 Task::none()
             }
             WidgetMsg::Open { session, widget } => {
                 self.new_menu = false;
-                self.fetch_and_open(session, widget, None)
+                match self.widgets.get(&widget).cloned() {
+                    Some(w) => self.show_widget(&session, &w),
+                    None => self.fetch_and_open(session, widget, None),
+                }
             }
-            WidgetMsg::Info {
+            WidgetMsg::Close { session, widget } => {
+                self.widgets.launcher = false;
+                self.close_widget(&session, &widget).unwrap_or_else(Task::none)
+            }
+            WidgetMsg::Fetched {
                 session,
                 widget,
                 request,
@@ -372,32 +578,15 @@ impl App {
                     Ok(l) => l,
                     Err(e) => return self.reply_agent(request, Err(e.to_string())),
                 };
-                self.widgets.insert(session.clone(), list.clone());
-                let Some(w) = list.into_iter().find(|w| w.id == widget) else {
-                    return self.reply_agent(request, Err(format!("no widget `{widget}`")));
-                };
-                if let Some(e) = &w.error {
+                self.widgets.list = list;
+                let Some(w) = self.widgets.get(&widget).cloned() else {
                     if request.is_none()
                         && let Some(d) = self.detail_mut(&session)
                     {
-                        d.toast(crate::notices::Tone::Error, tr::widget_broken_toast(&w.name, e));
+                        d.toast(crate::notices::Tone::Error, tr::widget_gone(&widget));
                     }
-                    return self.reply_agent(request, Err(e.clone()));
-                }
-                if !w.granted {
-                    self.modal = Some(Modal::WidgetGrant(GrantForm {
-                        session,
-                        widget: w.id.clone(),
-                        name: w.name.clone(),
-                        tools: w.tools.clone(),
-                        busy: false,
-                        error: None,
-                    }));
-                    return self.reply_agent(
-                        request,
-                        Ok("the user is asked to allow the widget's ide tools; it opens once they do".into()),
-                    );
-                }
+                    return self.reply_agent(request, Err(format!("no registered widget `{widget}`")));
+                };
                 let reloaded = self.widget_tab_id(&session, &w.id).is_some();
                 let show = self.show_widget(&session, &w);
                 let answer = self.reply_agent(
@@ -410,25 +599,28 @@ impl App {
                 let Some(c) = self.online() else {
                     return Task::none();
                 };
-                let Some(Modal::WidgetGrant(f)) = &mut self.modal else {
+                let Some(Modal::WidgetRegister(f)) = &mut self.modal else {
                     return Task::none();
                 };
                 f.busy = true;
                 f.error = None;
                 let (s, w, t) = (f.session.clone(), f.widget.clone(), f.tools.clone());
-                Task::perform(async move { c.widget_grant(&s, &w, t).await }, |r| {
-                    Message::Widget(WidgetMsg::Granted(r))
+                Task::perform(async move { c.widget_register(&s, &w, t).await }, |r| {
+                    Message::Widget(WidgetMsg::Registered(r))
                 })
             }
-            WidgetMsg::Granted(r) => {
-                let Some(Modal::WidgetGrant(f)) = &mut self.modal else {
+            WidgetMsg::Registered(r) => {
+                let Some(Modal::WidgetRegister(f)) = &mut self.modal else {
                     return Task::none();
                 };
                 match r {
                     Ok(()) => {
-                        let (session, widget) = (f.session.clone(), f.widget.clone());
+                        let (request, widget) = (f.request, f.widget.clone());
                         self.modal = None;
-                        self.fetch_and_open(session, widget, None)
+                        let text = format!(
+                            "registered; every session can open it now. Show it here with {{\"action\":\"open\",\"widget\":\"{widget}\"}}"
+                        );
+                        Task::batch([self.reply_agent(Some(request), Ok(text)), self.load_widgets()])
                     }
                     Err(e) => {
                         f.busy = false;
@@ -451,6 +643,35 @@ impl App {
                     v.navigate(&widget_url(&w.session, &w.id));
                 }
                 Task::none()
+            }
+            WidgetMsg::Launcher(open) => {
+                self.widgets.launcher = open;
+                if open { self.load_widgets() } else { Task::none() }
+            }
+            WidgetMsg::Select(id) => {
+                self.widgets.selected = Some(id);
+                self.widgets.delete_armed = false;
+                self.widgets.error = None;
+                Task::none()
+            }
+            WidgetMsg::DeleteArm(on) => {
+                self.widgets.delete_armed = on;
+                Task::none()
+            }
+            WidgetMsg::Delete(id) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                self.widgets.delete_armed = false;
+                Task::perform(async move { c.widget_delete(&id).await }, |r| {
+                    Message::Widget(WidgetMsg::Deleted(r))
+                })
+            }
+            WidgetMsg::Deleted(r) => {
+                if let Err(e) = r {
+                    self.widgets.error = Some(crate::i18n::proto_error(&e));
+                }
+                self.load_widgets()
             }
         }
     }
@@ -562,19 +783,19 @@ impl App {
         .boxed()
     }
 
-    /// The menu rows of the session's widgets ("+ 새로 열기").
+    /// The menu rows of the registered widgets ("+ 새로 열기"), opened in `session`.
     pub(crate) fn widget_menu_rows<'a>(&'a self, session: &str) -> Vec<El<'a>> {
-        let Some(list) = self.widgets.get(session).filter(|l| !l.is_empty()) else {
+        if self.widgets.list.is_empty() {
             return Vec::new();
-        };
+        }
         let mut rows: Vec<El<'a>> = vec![
             container(text(tr::new_widgets()).size(11).color(style::DIM))
                 .padding([6, 10])
                 .boxed(),
         ];
-        for w in list {
+        for w in &self.widgets.list {
             let label = row![
-                text("◇").size(12).color(style::DIM),
+                crate::icons::icon(crate::icons::Icon::Puzzle, 13.0, style::DIM),
                 text(w.name.clone())
                     .size(13)
                     .wrapping(text::Wrapping::None)
@@ -587,46 +808,69 @@ impl App {
                 .padding([5, 10])
                 .width(Fill)
                 .style(style::row(false))
-                .on_press_maybe(w.error.is_none().then(|| {
-                    Message::Widget(WidgetMsg::Open {
-                        session: session.to_owned(),
-                        widget: w.id.clone(),
-                    })
+                .on_press(Message::Widget(WidgetMsg::Open {
+                    session: session.to_owned(),
+                    widget: w.id.clone(),
                 }));
-            let hint = match &w.error {
-                Some(e) => format!("{}\n{e}", tr::widget_broken()),
-                None if !w.description.is_empty() => w.description.clone(),
-                None => w.id.clone(),
+            let hint = if w.description.is_empty() {
+                w.id.clone()
+            } else {
+                w.description.clone()
             };
             rows.push(tip(b.boxed(), hint));
         }
         rows
     }
 
-    /// The approval dialog.
-    pub(crate) fn widget_grant_card<'a>(&'a self, f: &'a GrantForm) -> El<'a> {
-        let mut tools = column![].spacing(4);
-        for t in &f.tools {
-            tools = tools.push(text(t.clone()).size(12).font(style::mono()));
-        }
+    /// The registration dialog (Desk's "모드 등록 (모든 세션에서 사용)" ask).
+    pub(crate) fn widget_register_card<'a>(&'a self, f: &'a RegisterForm) -> El<'a> {
+        let who = self
+            .live(&f.session)
+            .map_or_else(|| f.session.clone(), |l| l.info.title.clone());
+        let body = match f.ask.as_str() {
+            "other" if !f.by.is_empty() => tr::widget_register_other(&who, &f.name, &f.by),
+            "other" => tr::widget_register_other(&who, &f.name, &tr::widget_session_gone()),
+            "tools" => tr::widget_register_tools(&who, &f.name),
+            _ => tr::widget_register_new(&who, &f.name),
+        };
         let mut c = column![
-            text(tr::widget_grant_title()).size(18).font(style::bold()),
-            text(tr::widget_grant_body(&f.name)).size(13),
-            container(tools).padding([6, 10]).style(style::card),
-            text(tr::widget_grant_note()).size(12).color(style::DIM),
+            text(tr::widget_register_title()).size(18).font(style::bold()).boxed(),
+            text(body).size(13).boxed(),
         ]
         .spacing(10);
+        if !f.description.is_empty() {
+            c = c.push(text(f.description.clone()).size(12).color(style::DIM).boxed());
+        }
+        c = c.push(
+            row![
+                text(tr::widget_label_data()).size(12).color(style::DIM).width(90),
+                text(crate::widgets_page::scope_text(&f.scope)).size(12),
+            ]
+            .spacing(8)
+            .boxed(),
+        );
+        if f.tools.is_empty() {
+            c = c.push(text(tr::widget_register_no_tools()).size(12).color(style::DIM).boxed());
+        } else {
+            let mut tools = column![].spacing(4);
+            for t in &f.tools {
+                tools = tools.push(text(t.clone()).size(12).font(style::mono()));
+            }
+            c = c.push(text(tr::widget_register_uses()).size(13).boxed());
+            c = c.push(container(tools).padding([6, 10]).style(style::card).boxed());
+            c = c.push(text(tr::widget_grant_note()).size(12).color(style::DIM).boxed());
+        }
         if let Some(e) = &f.error {
             c = c.push(crate::view::error_box(e));
         }
         c.push(
             row![
                 space().width(Fill),
-                button(text(tr::cancel()).size(13))
+                button(text(tr::widget_register_refuse()).size(13))
                     .padding([6, 14])
                     .style(style::secondary)
-                    .on_press(Message::CloseModal),
-                button(text(tr::widget_grant_allow()).size(13))
+                    .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
+                button(text(tr::widget_register_allow()).size(13))
                     .padding([6, 14])
                     .style(style::primary)
                     .on_press_maybe((!f.busy).then_some(Message::Widget(WidgetMsg::Allow))),
