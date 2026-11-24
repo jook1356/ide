@@ -204,6 +204,71 @@ pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::Transcri
     out.split_off(skip)
 }
 
+/// The background tasks of the main conversation that still run, by the transcript (v 2.1.331):
+/// a tool result (`toolUseResult`) with `backgroundTaskId` (a Bash / PowerShell command run in
+/// the background or moved there at its timeout) or `status: "async_launched"` + `agentId` (a
+/// background agent) starts one; its `<task-notification>` (`<task-id>`, a `<status>` other
+/// than running; recorded as a `queue-operation` enqueue the moment the task ends, then as the
+/// delivered `attachment` / user message) or a stop result (`task_id` + `task_type`, TaskStop)
+/// ends it. Subagents' own files (sidechains) are not read: their tasks end before they do.
+pub(crate) fn background_running(jsonl: &str) -> Vec<String> {
+    const MARKS: [&str; 4] = ["backgroundTaskId", "async_launched", "<task-notification>", "\"task_type\""];
+    let mut running: Vec<String> = Vec::new();
+    for line in jsonl.lines() {
+        if !MARKS.iter().any(|m| line.contains(m)) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
+        let str_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // A notification's text: queued, delivered as an attachment, or (older) a user message.
+        let note = match kind {
+            "queue-operation" if str_of(&v, "operation").as_deref() == Some("enqueue") => str_of(&v, "content"),
+            "attachment" => v.get("attachment").and_then(|a| str_of(a, "prompt")),
+            "user" => v.get("message").and_then(|m| str_of(m, "content")),
+            _ => None,
+        };
+        if let Some(note) = note.filter(|n| n.trim_start().starts_with("<task-notification>")) {
+            let tag = |t: &str| {
+                let open = format!("<{t}>");
+                let at = note.find(&open)? + open.len();
+                let len = note[at..].find(&format!("</{t}>"))?;
+                Some(note[at..at + len].trim().to_owned())
+            };
+            if let Some(id) = tag("task-id")
+                && !matches!(tag("status").as_deref(), Some("running" | "pending"))
+            {
+                running.retain(|r| *r != id);
+            }
+            continue;
+        }
+        if kind != "user" {
+            continue;
+        }
+        let Some(r) = v.get("toolUseResult").filter(|r| r.is_object()) else {
+            continue;
+        };
+        let started = str_of(r, "backgroundTaskId").or_else(|| {
+            (str_of(r, "status").as_deref() == Some("async_launched"))
+                .then(|| str_of(r, "agentId"))
+                .flatten()
+        });
+        if let Some(id) = started.filter(|i| !i.is_empty()) {
+            if !running.contains(&id) {
+                running.push(id);
+            }
+        } else if let Some(id) = str_of(r, "task_id").filter(|_| r.get("task_type").is_some()) {
+            running.retain(|x| *x != id);
+        }
+    }
+    running
+}
+
 /// Claude Code's file-editing tools (their `tool_input.file_path` / `notebook_path`).
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
@@ -485,7 +550,18 @@ impl AgentProvider for Claude {
                     .map(str::to_owned),
             }),
             "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
-            "Stop" => Some(HookEvent::Stopped),
+            // No hook reports the end of a background shell: the transcript says what still runs.
+            "Stop" => Some(
+                match Some(s("transcript_path"))
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                {
+                    Some(jsonl) => HookEvent::StoppedRunning {
+                        background: background_running(&jsonl),
+                    },
+                    None => HookEvent::Stopped,
+                },
+            ),
             // Without an id the start and its end cannot be paired: ignored.
             "SubagentStart" => Some(HookEvent::BackgroundStarted {
                 id: Some(s("agent_id")).filter(|i| !i.is_empty())?.to_owned(),

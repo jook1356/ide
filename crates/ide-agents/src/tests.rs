@@ -1094,6 +1094,67 @@ fn codex_integration() {
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
 }
 
+/// Background tasks still running, from a transcript shaped like Claude Code 2.1.331's.
+#[test]
+fn claude_background_tasks() {
+    let note = |id: &str, status: &str| {
+        format!("<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>{status}</status>\n<summary>x</summary>\n</task-notification>")
+    };
+    let enqueue = |id: &str, status: &str| {
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": note(id, status)}).to_string()
+    };
+    let lines = [
+        // Two background shells (one moved there at its timeout) and a background agent.
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b2","timedOutAfterMs":120000}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"plain foreground"}}"#.to_owned(),
+        // A subagent's own background shell is not the main conversation's.
+        r#"{"type":"user","isSidechain":true,"toolUseResult":{"backgroundTaskId":"s1"}}"#.to_owned(),
+        // Text that only mentions the markers (a command, its output) changes nothing.
+        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "input": {"command": note("b1", "completed")}}]}}).to_string(),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": note("b1", "completed")}]}, "toolUseResult": {"stdout": note("b1", "completed")}}).to_string(),
+    ]
+    .join("\n");
+    let run = crate::claude::background_running;
+    assert_eq!(run(&lines), ["b1", "b2", "a1"]);
+
+    // b1 ends (queued the moment it ends), a1 fails, b2 is stopped with TaskStop.
+    let ended = [
+        lines.clone(),
+        enqueue("b1", "completed"),
+        serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": note("a1", "failed"), "commandMode": "task-notification"}}).to_string(),
+    ]
+    .join("\n");
+    assert_eq!(run(&ended), ["b2"]);
+    let stopped = format!(
+        "{ended}\n{}",
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"message":"Successfully stopped task: b2","task_id":"b2","task_type":"local_bash"}}"#
+    );
+    assert!(run(&stopped).is_empty());
+    // Older CLIs delivered the notification as a user message; "running" is no end.
+    let older = format!(
+        "{lines}\n{}\n{}",
+        serde_json::json!({"type": "user", "message": {"content": note("b2", "completed")}}),
+        enqueue("a1", "running"),
+    );
+    assert_eq!(run(&older), ["b1", "a1"]);
+
+    // The Stop hook reads the transcript it is given; without one it says nothing about tasks.
+    let t = TempDir::new("bgtasks");
+    let file = t.0.join("t.jsonl");
+    std::fs::write(&file, &lines).unwrap();
+    let stop = |j: serde_json::Value| Claude.parse_hook("Stop", j.to_string().as_bytes());
+    assert_eq!(
+        stop(serde_json::json!({"transcript_path": file})),
+        Some(HookEvent::StoppedRunning {
+            background: vec!["b1".into(), "b2".into(), "a1".into()]
+        })
+    );
+    assert_eq!(stop(serde_json::json!({"transcript_path": t.0.join("gone.jsonl")})), Some(HookEvent::Stopped));
+    assert_eq!(stop(serde_json::json!({"transcript_path": ""})), Some(HookEvent::Stopped));
+}
+
 #[test]
 fn claude_transcripts() {
     let lines = [
