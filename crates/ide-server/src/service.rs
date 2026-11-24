@@ -332,7 +332,14 @@ pub struct UserCtx {
     preparing: Mutex<HashSet<String>>,
     /// The session list's branch badges, kept across restarts (`branch_badges.rs`).
     branch_badges: branch_badges::BranchBadges,
+    /// Detected base branches of repos without a configured one, by repo folder, with when
+    /// they were detected ([`BASE_CACHE_TTL`]): `repo.list` follows every `ReposChanged`.
+    detected_bases: Mutex<HashMap<PathBuf, (std::time::Instant, String)>>,
 }
+
+/// How long a detected base branch is reused by `repo.list` (detection runs several git
+/// commands per repo, seconds per repo on a busy machine).
+const BASE_CACHE_TTL: Duration = Duration::from_secs(20);
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
 struct GithubSetup {
@@ -418,6 +425,7 @@ impl UserCtx {
             this:std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
             branch_badges,
+            detected_bases: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1058,7 +1066,12 @@ impl UserCtx {
         session: &str,
         event: ide_proto::AgentHookEvent,
     ) -> Option<String> {
-        if let Some(reason) = self.agent_hook(session, event.clone()) {
+        // Blocking (the session store's lock): off the async workers.
+        let (me, sid, ev) = (self.clone(), session.to_owned(), event.clone());
+        let refused = tokio::task::spawn_blocking(move || me.agent_hook(&sid, ev))
+            .await
+            .unwrap_or(None);
+        if let Some(reason) = refused {
             return Some(reason);
         }
         self.write_refusal(session, &event).await
@@ -1464,21 +1477,86 @@ impl UserCtx {
         }
     }
 
-    fn repo_info(&self, r: &RegisteredRepo, sessions: &SessionStore) -> RepoInfo {
-        let default_base = ide_core::repo_default_base(r);
-        let base = match &default_base {
-            Some(b) => b.clone(),
-            None => ide_core::Repo::open(&r.path)
+    fn repo_info(&self, r: &RegisteredRepo) -> RepoInfo {
+        self.repo_infos(std::slice::from_ref(r)).remove(0)
+    }
+
+    /// The infos of `list`. Base detection runs git (several commands per repo): it runs
+    /// without holding any store lock (every session request needs the session store), in
+    /// parallel, and reuses results younger than [`BASE_CACHE_TTL`].
+    fn repo_infos(&self, list: &[RegisteredRepo]) -> Vec<RepoInfo> {
+        let counts: Vec<u32> = {
+            let sessions = self.sessions.lock().unwrap();
+            list.iter()
+                .map(|r| sessions.count_using_repo(&r.id) as u32)
+                .collect()
+        };
+        let defaults: Vec<Option<String>> = list.iter().map(ide_core::repo_default_base).collect();
+        let mut bases: Vec<Option<String>> = defaults.clone();
+        {
+            let cache = self.detected_bases.lock().unwrap();
+            for (i, r) in list.iter().enumerate() {
+                if bases[i].is_none()
+                    && let Some((at, b)) = cache.get(&r.path)
+                    && at.elapsed() < BASE_CACHE_TTL
+                {
+                    bases[i] = Some(b.clone());
+                }
+            }
+        }
+        let todo: Vec<usize> = (0..list.len()).filter(|&i| bases[i].is_none()).collect();
+        let detect = |r: &RegisteredRepo| {
+            ide_core::Repo::open(&r.path)
                 .and_then(|repo| ide_core::detect_base(&repo, None))
                 .map(|b| b.name)
-                .unwrap_or_default(),
+                .unwrap_or_default()
         };
+        let found: Vec<(usize, String)> = if todo.len() <= 1 {
+            todo.iter().map(|&i| (i, detect(&list[i]))).collect()
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = todo
+                    .iter()
+                    .map(|&i| {
+                        let r = &list[i];
+                        (i, scope.spawn(move || detect(r)))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(i, h)| (i, h.join().unwrap_or_default()))
+                    .collect()
+            })
+        };
+        if !found.is_empty() {
+            let now = std::time::Instant::now();
+            let mut cache = self.detected_bases.lock().unwrap();
+            cache.retain(|_, (at, _)| at.elapsed() < BASE_CACHE_TTL);
+            for (i, b) in found {
+                cache.insert(list[i].path.clone(), (now, b.clone()));
+                bases[i] = Some(b);
+            }
+        }
+        list.iter()
+            .zip(defaults)
+            .zip(bases.into_iter().zip(counts))
+            .map(|((r, default_base), (base, count))| self.repo_info_with(r, default_base, base.unwrap_or_default(), count))
+            .collect()
+    }
+
+    fn repo_info_with(
+        &self,
+        r: &RegisteredRepo,
+        default_base: Option<String>,
+        base: String,
+        sessions: u32,
+    ) -> RepoInfo {
         RepoInfo {
             id: r.id.to_string(),
             name: r.name.clone(),
             path: r.path.display().to_string(),
             base,
-            sessions: sessions.count_using_repo(&r.id) as u32,
+            sessions,
             base_branch: r.base_branch.clone(),
             base_rule: r.base_branch_rule.as_ref().map(|x| BaseRuleInfo {
                 remote: x.remote.clone(),
@@ -1513,10 +1591,7 @@ impl UserCtx {
         match req {
             Request::RepoList => {
                 let list: Vec<RegisteredRepo> = self.repos.lock().unwrap().list().to_vec();
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repos(
-                    list.iter().map(|r| self.repo_info(r, &sessions)).collect(),
-                ))
+                Ok(Response::Repos(self.repo_infos(&list)))
             }
             Request::RepoRegister { path, init } => {
                 // Any folder the user picks (the folder picker is not limited). A git
@@ -1530,9 +1605,10 @@ impl UserCtx {
                     "repo.register",
                     &format!("{} {}{}", r.id, r.path.display(), if init { " init" } else { "" }),
                 );
+                // A folder registered again (e.g. after `init`): detect its base afresh.
+                self.detected_bases.lock().unwrap().remove(&r.path);
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoUnregister { id } => {
                 let rid = self.parse_repo(&id)?;
@@ -1559,8 +1635,7 @@ impl UserCtx {
                     .map_err(core)?;
                 self.audit("repo.set_base_branch", &format!("{id} {}", base.as_deref().unwrap_or("-")));
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoSetBaseRule { id, rule } => {
                 let rid = self.parse_repo(&id)?;
@@ -1587,8 +1662,7 @@ impl UserCtx {
                     &format!("{id} {}", rule.as_ref().map_or("-", |x| x.pattern.as_str())),
                 );
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoPreviewBaseRule { id, rule } => {
                 let (_, repo) = self.repo_git(&id)?;
@@ -2324,13 +2398,16 @@ impl UserCtx {
         if let Some(h) = self.uterm_host(session) {
             return h.write(bytes);
         }
-        let s = self.resolve_session(session)?;
-        self.existing_host(s.id.as_str())
-            .ok_or_else(|| ProtoError::new("session-not-running").arg("id", session))?
-            .write(bytes)?;
+        // Runs on the connection's request loop: the host map only (hosts are this user's
+        // sessions), never the session store, whose lock a slow request may hold.
+        let Some(h) = self.existing_host(session) else {
+            self.resolve_session(session)?;
+            return Err(ProtoError::new("session-not-running").arg("id", session));
+        };
+        h.write(bytes)?;
         // The user answered a permission prompt / question: the turn goes on.
-        if self.bridge.activity(s.id.as_str()) == ide_proto::AgentActivity::NeedsInput {
-            self.set_activity(s.id.as_str(), ide_proto::AgentActivity::Working);
+        if self.bridge.activity(session) == ide_proto::AgentActivity::NeedsInput {
+            self.set_activity(session, ide_proto::AgentActivity::Working);
         }
         Ok(())
     }
@@ -2341,8 +2418,12 @@ impl UserCtx {
             h.resize(cols, rows);
             return Ok(());
         }
-        let s = self.resolve_session(session)?;
-        self.host(&s).resize(cols, rows);
+        // See `term_write`: the session store only for a session without a host yet.
+        let h = match self.existing_host(session) {
+            Some(h) => h,
+            None => self.host(&self.resolve_session(session)?),
+        };
+        h.resize(cols, rows);
         Ok(())
     }
 
@@ -2447,7 +2528,9 @@ impl UserCtx {
                     h.detach_log();
                 }
                 {
-                    let repos = self.repos.lock().unwrap();
+                    // A snapshot: removing worktrees runs git, and every session list needs
+                    // the registry.
+                    let repos = self.repos.lock().unwrap().clone();
                     ide_core::remove_session_files(&self.paths, &s, &repos, remove_worktree)
                         .map_err(core)?;
                 }
@@ -3738,6 +3821,10 @@ impl UserCtx {
     /// The terminal behind a `term.*` id: a user terminal, else a session.
     pub fn term_host(&self, id: &str) -> Result<Arc<TermHost>, ProtoError> {
         if let Some(h) = self.uterm_host(id) {
+            return Ok(h);
+        }
+        // See `term_write`: the session store only for a session without a host yet.
+        if let Some(h) = self.existing_host(id) {
             return Ok(h);
         }
         let s = self.resolve_session(id)?;

@@ -165,6 +165,14 @@ Deviations and details fixed during implementation:
 - **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `ide-core`
   structs, so a Unix server can serve a Windows client.
 - **PTY size**: the most recent `term.resize` wins (no separate activity tracking).
+- **Locks**: `term.write` / `term.resize` / `term.attach` run on the connection's request loop
+  (in order) and look the terminal up in the host map, never the session store. Every other
+  request runs on a blocking thread and takes the store locks (`sessions`, `repos`, ...) only
+  briefly: git, file IO beyond the store's own JSON and other processes run on a snapshot
+  without a store lock held (on a busy Windows machine one `git` start can take hundreds of ms;
+  `repo.list` once held the session lock across git runs for every repo and stalled every
+  terminal and file request). Agent hooks also run on blocking threads. `repo.list` detects
+  base branches in parallel and reuses them for 20 s.
 - **Colour query replies** (OSC 4/10/11/12) use the client's default dark palette; there is no
   RPC to set the palette yet.
 - **UserInfo**: name from `USERNAME`/`USER`, id `DOMAIN\name` on Windows (not a SID/uid).
