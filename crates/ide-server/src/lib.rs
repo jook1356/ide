@@ -17,6 +17,7 @@ pub mod fsops;
 pub mod git;
 pub mod git_actions;
 pub mod jail;
+pub mod outlog;
 pub mod pr;
 pub mod ports;
 pub mod pty;

@@ -1318,12 +1318,19 @@ impl UserCtx {
         self.host_sized(session.id.as_str(), DEFAULT_COLS, DEFAULT_ROWS)
     }
 
+    /// Session hosts keep their output in `sessions/<id>/output.log`
+    /// ([`TermHost::attach_log`]): a host made after a server restart replays what the session
+    /// printed before it.
     fn host_sized(&self, id: &str, cols: u16, rows: u16) -> Arc<TermHost> {
         self.hosts
             .lock()
             .unwrap()
             .entry(id.to_owned())
-            .or_insert_with(|| TermHost::new(id, cols, rows, self.events.clone()))
+            .or_insert_with(|| {
+                let host = TermHost::new(id, cols, rows, self.events.clone());
+                host.attach_log(&self.paths.session_output_log(id));
+                host
+            })
             .clone()
     }
 
@@ -2366,6 +2373,10 @@ impl UserCtx {
                 self.uterm_remove_session(s.id.as_str());
                 // Watchers hold the worktree folders open: stop them before deleting.
                 self.watchers.remove(s.id.as_str());
+                // The output log is in the session's folder: close it first.
+                if let Some(h) = self.existing_host(s.id.as_str()) {
+                    h.detach_log();
+                }
                 {
                     let repos = self.repos.lock().unwrap();
                     ide_core::remove_session_files(&self.paths, &s, &repos, remove_worktree)
