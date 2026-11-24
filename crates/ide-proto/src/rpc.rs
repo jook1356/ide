@@ -142,7 +142,11 @@ pub enum AgentHookEvent {
         #[serde(default)]
         conversation: Option<String>,
     },
-    PromptSubmitted,
+    /// A turn started; `prompt`: the user's text, if the CLI reported it (`docs/session-titles.md`).
+    PromptSubmitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
     Stopped,
     NeedsInput { permission: bool },
     /// About to edit these files.

@@ -14,6 +14,8 @@ pub struct LaunchPlan {
     pub session_id: String,
     /// Session title.
     pub title: String,
+    /// The title may still be replaced automatically ([`crate::SessionInput::auto_title`]).
+    pub auto_title: bool,
     /// Configuration slug (e.g. for generated plugin names).
     pub configuration: String,
     /// Process cwd (session folder or original repository).
@@ -45,6 +47,7 @@ impl LaunchPlan {
         LaunchPlan {
             session_id: input.session_id.to_owned(),
             title: input.title.to_owned(),
+            auto_title: input.auto_title,
             configuration: input.configuration.slug.clone(),
             cwd: input.ctx.root.clone(),
             mode: input.ctx.mode,

@@ -219,7 +219,7 @@ impl BridgeState {
                 *bg = Background::default();
                 AgentActivity::Idle
             }
-            AgentHookEvent::PromptSubmitted => {
+            AgentHookEvent::PromptSubmitted { .. } => {
                 bg.turn_ended = false;
                 AgentActivity::Working
             }
@@ -415,7 +415,7 @@ impl BridgeState {
 pub fn wire_event(e: HookEvent) -> AgentHookEvent {
     match e {
         HookEvent::SessionStart { conversation } => AgentHookEvent::SessionStart { conversation },
-        HookEvent::PromptSubmitted => AgentHookEvent::PromptSubmitted,
+        HookEvent::PromptSubmitted { prompt } => AgentHookEvent::PromptSubmitted { prompt },
         HookEvent::Stopped => AgentHookEvent::Stopped,
         HookEvent::NeedsInput { permission } => AgentHookEvent::NeedsInput { permission },
         HookEvent::PreTool(ToolUse::Edit { tool, paths }) => AgentHookEvent::PreEdit { tool, paths },
@@ -1195,17 +1195,17 @@ mod tests {
         let tool = || E::PreTool { tool: "Read".into() };
 
         // No background work: as before.
-        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::PromptSubmitted { prompt: None }), Some(Working));
         assert_eq!(h(E::Stopped), Some(Idle));
 
         // Work started inside a turn and ended inside it (a foreground subagent).
-        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::PromptSubmitted { prompt: None }), Some(Working));
         assert_eq!(h(start("f")), None);
         assert_eq!(h(end("f")), None, "the turn still runs");
         assert_eq!(h(E::Stopped), Some(Idle));
 
         // Two background agents outlive the turn.
-        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::PromptSubmitted { prompt: None }), Some(Working));
         assert_eq!(h(start("a")), None);
         assert_eq!(h(start("b")), None);
         assert_eq!(h(E::Stopped), Some(Working), "held by a and b");
@@ -1221,7 +1221,7 @@ mod tests {
         // A new conversation forgets work it never saw end.
         assert_eq!(h(start("c")), None);
         assert_eq!(h(E::SessionStart { conversation: None }), Some(Idle));
-        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(E::PromptSubmitted { prompt: None }), Some(Working));
         assert_eq!(h(E::Stopped), Some(Idle));
     }
 }

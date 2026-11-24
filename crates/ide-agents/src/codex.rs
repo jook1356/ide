@@ -46,6 +46,20 @@ fn codex_home(acct: Option<&AccountDir>) -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".codex"))
 }
 
+/// The last non-empty `thread_name` of thread `id` in `session_index.jsonl` text (lines
+/// `{"id":"<thread>","thread_name":"..","updated_at":".."}`).
+pub(crate) fn thread_name(text: &str, id: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .filter(|l| l.contains(id))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("id").and_then(|x| x.as_str()) == Some(id))
+        .find_map(|v| {
+            let t = v.get("thread_name")?.as_str()?.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        })
+}
+
 /// The user set `sandbox_mode` in Codex's `config.toml` (read only; an unreadable file counts
 /// as not set).
 pub(crate) fn sets_sandbox(acct: Option<&AccountDir>) -> bool {
@@ -213,6 +227,22 @@ impl AgentProvider for Codex {
         Some(&SCREEN)
     }
 
+    /// Slash commands (`/model`) and shell commands (`!ls`) name nothing.
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        crate::title::from_prompt(prompt, &["/", "!"])
+    }
+
+    fn names_conversations(&self) -> bool {
+        true
+    }
+
+    /// Codex names its threads itself: the last `thread_name` of thread `id` in
+    /// `$CODEX_HOME/session_index.jsonl` (v 0.172.0).
+    fn conversation_title(&self, acct: Option<&AccountDir>, id: &str) -> Option<String> {
+        let text = std::fs::read_to_string(codex_home(acct)?.join("session_index.jsonl")).ok()?;
+        thread_name(&text, id)
+    }
+
     fn hook_caps(&self) -> HookCaps {
         // Only with the account integration installed (and approved in Codex).
         HookCaps {
@@ -328,8 +358,16 @@ impl AgentProvider for Codex {
         let v: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
         match event {
-            "SessionStart" => Some(HookEvent::SessionStart { conversation: None }),
-            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
+            // The thread id (d): kept for its name (`conversation_title`); Codex sessions are
+            // not resumed yet (`Caps::resume` is off), so it is not used to start one.
+            "SessionStart" => Some(HookEvent::SessionStart {
+                conversation: Some(s("session_id"))
+                    .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+                    .map(str::to_owned),
+            }),
+            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted {
+                prompt: Some(s("prompt")).filter(|p| !p.is_empty()).map(str::to_owned),
+            }),
             "Stop" => Some(HookEvent::Stopped),
             "PermissionRequest" => Some(HookEvent::NeedsInput { permission: true }),
             "PreToolUse" => {

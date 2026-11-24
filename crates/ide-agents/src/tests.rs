@@ -110,6 +110,7 @@ fn input<'a>(
     SessionInput {
         session_id: "s1",
         title: "My session",
+        auto_title: false,
         ctx: SessionContext {
             mode: SessionMode::OriginalRepo,
             root: f.cwd.clone(),
@@ -384,6 +385,11 @@ fn claude_spec() {
     let out = assemble(&Claude, &input(&f, None, &empty), &f.env).unwrap();
     assert_eq!(without_session_id(&out), ["-n", "My session"]);
     assert_eq!(env_of(&out.spec, "CLAUDE_CONFIG_DIR"), None);
+    // An automatic title is no fixed name: Claude Code names the conversation itself.
+    let mut auto = input(&f, None, &empty);
+    auto.auto_title = true;
+    let out = assemble(&Claude, &auto, &f.env).unwrap();
+    assert!(without_session_id(&out).is_empty(), "{:?}", out.spec.args);
     assert!(!scratch.exists(), "stale generated files are removed");
 }
 
@@ -936,7 +942,8 @@ fn claude_hooks() {
 
     let p = |e: &str, j: serde_json::Value| Claude.parse_hook(e, j.to_string().as_bytes());
     assert_eq!(p("Stop", serde_json::json!({})), Some(HookEvent::Stopped));
-    assert_eq!(p("UserPromptSubmit", serde_json::json!({"prompt": "x"})), Some(HookEvent::PromptSubmitted));
+    assert_eq!(p("UserPromptSubmit", serde_json::json!({"prompt": "x"})), Some(HookEvent::PromptSubmitted { prompt: Some("x".into()) }));
+    assert_eq!(p("UserPromptSubmit", serde_json::json!({})), Some(HookEvent::PromptSubmitted { prompt: None }));
     assert_eq!(
         p("Notification", serde_json::json!({"notification_type": "permission_prompt"})),
         Some(HookEvent::NeedsInput { permission: true })
@@ -1164,4 +1171,68 @@ fn codex_windows_sandbox_readiness() {
     assert!(ready(Some(&acct), true), "the user's other choice");
     cfg("sandbox_mode = \"read-only\"\n");
     assert!(ready(Some(&acct), true), "the user's own sandbox_mode");
+}
+
+#[test]
+fn session_titles() {
+    // Default: the prompt's first line; CLI commands name nothing (Claude, Codex).
+    let decl = DeclarativeProvider::new(
+        DeclarativeSpec::parse("id = \"x\"\nname = \"X\"\nprogram = \"x\"\n").unwrap(),
+    );
+    assert_eq!(decl.prompt_title("/clear").as_deref(), Some("/clear"));
+    assert!(!decl.names_conversations());
+    assert_eq!(decl.conversation_title(None, "id"), None);
+    for p in [&Claude as &dyn AgentProvider, &Codex] {
+        assert_eq!(p.prompt_title("로그인 버그 고쳐줘\n자세히는..").as_deref(), Some("로그인 버그 고쳐줘"));
+        assert_eq!(p.prompt_title("/model"), None, "{}", p.id());
+        assert_eq!(p.prompt_title("!ls"), None, "{}", p.id());
+        assert!(p.names_conversations());
+    }
+
+    // Claude: the last ai-title / custom-title of the transcript (v 2.1.3xx lines).
+    let t = crate::claude::transcript_title(
+        "{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n\
+         {\"type\":\"ai-title\",\"aiTitle\":\"libcef.dll 누락 오류\",\"sessionId\":\"s\"}\n\
+         {\"type\":\"assistant\"}\n",
+    );
+    assert_eq!(t.as_deref(), Some("libcef.dll 누락 오류"));
+    let t = crate::claude::transcript_title(
+        "{\"type\":\"ai-title\",\"aiTitle\":\"a\"}\n{\"type\":\"custom-title\",\"customTitle\":\"b\"}\n",
+    );
+    assert_eq!(t.as_deref(), Some("b"), "a later /rename wins");
+    assert_eq!(crate::claude::transcript_title("{\"type\":\"user\"}\n"), None);
+
+    let dir = TempDir::new("titles");
+    let home = dir.0.join("claude");
+    let id = "0d50bd42-9d2c-4ff8-9e4f-f49fede9cd52";
+    std::fs::create_dir_all(home.join("projects/C--w")).unwrap();
+    std::fs::write(
+        home.join(format!("projects/C--w/{id}.jsonl")),
+        "{\"type\":\"ai-title\",\"aiTitle\":\"세션 제목 자동 요약\"}\n",
+    )
+    .unwrap();
+    let acct = Account { provider: "claude".into(), slug: "a".into(), name: "a".into(), dir: home.clone(), created_at: 0 };
+    assert_eq!(Claude.conversation_title(Some(&acct), id).as_deref(), Some("세션 제목 자동 요약"));
+    assert_eq!(Claude.conversation_title(Some(&acct), "../x"), None, "not a session id");
+
+    // Codex: the thread's last thread_name in session_index.jsonl (v 0.172.0).
+    let index = "{\"id\":\"01a1\",\"thread_name\":\"Fix node-pty build\",\"updated_at\":\"t\"}\n\
+                 {\"id\":\"01a2\",\"thread_name\":\"안녕?\",\"updated_at\":\"t\"}\n\
+                 {\"id\":\"01a1\",\"thread_name\":\"Fix node-pty Python build error\",\"updated_at\":\"t\"}\n";
+    assert_eq!(crate::codex::thread_name(index, "01a1").as_deref(), Some("Fix node-pty Python build error"));
+    assert_eq!(crate::codex::thread_name(index, "01a2").as_deref(), Some("안녕?"));
+    assert_eq!(crate::codex::thread_name(index, "01a"), None);
+    let home = dir.0.join("codex");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("session_index.jsonl"), index).unwrap();
+    let acct = Account { provider: "codex".into(), slug: "a".into(), name: "a".into(), dir: home, created_at: 0 };
+    assert_eq!(Codex.conversation_title(Some(&acct), "01a2").as_deref(), Some("안녕?"));
+    assert_eq!(
+        Codex.parse_hook("SessionStart", br#"{"session_id":"01a2-77"}"#),
+        Some(HookEvent::SessionStart { conversation: Some("01a2-77".into()) })
+    );
+    assert_eq!(
+        Codex.parse_hook("UserPromptSubmit", br#"{"prompt":"hi"}"#),
+        Some(HookEvent::PromptSubmitted { prompt: Some("hi".into()) })
+    );
 }

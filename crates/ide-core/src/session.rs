@@ -215,6 +215,9 @@ pub struct Session {
     /// user opens the session (the server does not restart it by itself).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autostart: bool,
+    /// Whether the title may still be replaced automatically (`docs/session-titles.md`).
+    #[serde(default, skip_serializing_if = "AutoTitle::is_off")]
+    pub auto_title: AutoTitle,
     /// Legacy `profile` field (read only, for migration).
     #[serde(default, rename = "profile", skip_serializing)]
     pub legacy_profile: Option<String>,
@@ -230,6 +233,27 @@ pub struct Session {
     /// Legacy single-repo `branch` (read only, for migration).
     #[serde(default, rename = "branch", skip_serializing)]
     pub legacy_branch: Option<String>,
+}
+
+/// How far a session's title is automatic (`docs/session-titles.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoTitle {
+    /// Given or renamed by the user, or already final: never replaced automatically.
+    #[default]
+    Off,
+    /// The default title (`<provider> · <repos>`): the first prompt replaces it.
+    Pending,
+    /// Made from the first prompt by the provider; the agent CLI's own title of the
+    /// conversation replaces it once the CLI has one.
+    Provisional,
+}
+
+impl AutoTitle {
+    /// [`AutoTitle::Off`].
+    pub fn is_off(&self) -> bool {
+        *self == AutoTitle::Off
+    }
 }
 
 /// A worktree of a workspace session that is still being created in the background.
@@ -277,6 +301,7 @@ impl Session {
             shared: false,
             conversation: None,
             autostart: false,
+            auto_title: AutoTitle::Off,
             legacy_profile: None,
             legacy_agent: None,
             legacy_repo_path: None,
@@ -410,10 +435,23 @@ impl SessionStore {
         self.modify(id, |s| s.autostart = on)
     }
 
-    /// Change a session's title.
+    /// Change a session's title (the user's choice: no automatic title replaces it).
     pub fn set_title(&mut self, id: &SessionId, title: impl Into<String>) -> Result<()> {
+        self.set_auto_title(id, title, AutoTitle::Off)
+    }
+
+    /// Set an automatic title and what may replace it next (`docs/session-titles.md`).
+    pub fn set_auto_title(
+        &mut self,
+        id: &SessionId,
+        title: impl Into<String>,
+        next: AutoTitle,
+    ) -> Result<()> {
         let title = title.into();
-        self.modify(id, |s| s.title = title)
+        self.modify(id, |s| {
+            s.title = title;
+            s.auto_title = next;
+        })
     }
 
     /// Pin / unpin and archive / unarchive (`None` leaves a flag as it is). As Desk, archiving

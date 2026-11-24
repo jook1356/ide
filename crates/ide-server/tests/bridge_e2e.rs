@@ -570,7 +570,7 @@ async fn hooks_drive_the_activity() {
     assert_eq!(info().await, AgentActivity::Unknown, "nothing reported yet");
     assert_eq!(hook(AgentHookEvent::SessionStart { conversation: None }).await, None);
     assert_eq!(next_activity().await, AgentActivity::Idle);
-    assert_eq!(hook(AgentHookEvent::PromptSubmitted).await, None);
+    assert_eq!(hook(AgentHookEvent::PromptSubmitted { prompt: None }).await, None);
     assert_eq!(next_activity().await, AgentActivity::Working);
     let edit = AgentHookEvent::PreEdit {
         tool: "Write".into(),
@@ -586,6 +586,21 @@ async fn hooks_drive_the_activity() {
     assert_eq!(hook(AgentHookEvent::Stopped).await, None);
     assert_eq!(next_activity().await, AgentActivity::Idle);
     assert_eq!(info().await, AgentActivity::Idle);
+    // Automatic title (docs/session-titles.md): created without a title, so the first prompt
+    // with text names the session (the shell provider: the default, final at once).
+    let title = async || {
+        app.sessions().await.unwrap().into_iter().find(|x| x.id == s.id).unwrap().title
+    };
+    assert_eq!(title().await, "Shell · repo", "the default title");
+    let prompt = |p: &str| AgentHookEvent::PromptSubmitted { prompt: Some(p.into()) };
+    assert_eq!(hook(prompt("  \n")).await, None);
+    assert_eq!(title().await, "Shell · repo", "an empty prompt names nothing");
+    assert_eq!(hook(prompt("세션 목록 정렬 고쳐줘. 핀 고정이 안 돼요")).await, None);
+    assert_eq!(title().await, "세션 목록 정렬 고쳐줘");
+    assert_eq!(hook(prompt("another request")).await, None);
+    assert_eq!(title().await, "세션 목록 정렬 고쳐줘", "only the first prompt");
+    let on_disk = std::fs::read_to_string(dir.join("data").join("sessions.json")).unwrap();
+    assert!(!on_disk.contains("auto_title"), "final: not stored");
     // A stopped process reports nothing.
     app.stop_session(&s.id).await.unwrap();
     let mut unknown = false;

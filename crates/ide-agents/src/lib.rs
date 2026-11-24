@@ -45,6 +45,7 @@ mod prompt;
 mod registry;
 mod shell;
 mod skills;
+pub mod title;
 
 use std::path::{Path, PathBuf};
 
@@ -265,6 +266,26 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
+    /// A session title from the user's first prompt (`docs/session-titles.md`), made at once
+    /// without a model call. `None`: not a request to name the session by (e.g. one of the
+    /// CLI's own commands); the next prompt is tried. Default: [`title::from_prompt`].
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        title::from_prompt(prompt, &[])
+    }
+
+    /// Whether the CLI names its conversations itself (read with
+    /// [`AgentProvider::conversation_title`]); the prompt title is then provisional. Default:
+    /// no.
+    fn names_conversations(&self) -> bool {
+        false
+    }
+
+    /// The CLI's own title of conversation `id` (the stored [`Session::conversation`]), once it
+    /// has one. Default: `None`.
+    fn conversation_title(&self, _acct: Option<&AccountDir>, _id: &str) -> Option<String> {
+        None
+    }
+
     /// The last `limit` entries of the stored conversation `id` (`ide_read_session`,
     /// `docs/session-family.md`). `None`: this CLI's transcripts cannot be read. Default: `None`.
     fn transcript(
@@ -467,6 +488,9 @@ pub struct SessionInput<'a> {
     pub session_id: &'a str,
     /// Session title (session name for CLIs that support one).
     pub title: &'a str,
+    /// The title may still be replaced automatically ([`ide_core::AutoTitle`] not `Off`): a
+    /// CLI that names its conversations itself is not given it as a fixed name.
+    pub auto_title: bool,
     /// Where the session runs (cwd, repos, scratch dir).
     pub ctx: SessionContext,
     /// The account, if the session uses one.
@@ -515,6 +539,7 @@ impl<'a> SessionInput<'a> {
         SessionInput {
             session_id: session.id.as_str(),
             title: &session.title,
+            auto_title: !session.auto_title.is_off(),
             ctx: SessionContext {
                 mode: session.mode,
                 root: session.root.clone(),

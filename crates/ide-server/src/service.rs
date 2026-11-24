@@ -915,10 +915,78 @@ impl UserCtx {
         if let Some(a) = self.bridge.hook_activity(session, &event) {
             self.set_activity(session, a);
         }
+        self.auto_title(session, &event);
         match &event {
             ide_proto::AgentHookEvent::PreEdit { paths, .. } => self.edit_refusal(session, paths),
             _ => None,
         }
+    }
+
+    /// Automatic session titles (`docs/session-titles.md`): a session with a default title is
+    /// named by its provider from the first prompt; a CLI that names its conversations
+    /// itself replaces that with its own name at the end of a turn. Provider-agnostic: only
+    /// trait methods.
+    fn auto_title(&self, session: &str, event: &ide_proto::AgentHookEvent) {
+        use ide_core::AutoTitle;
+        use ide_proto::AgentHookEvent as E;
+        let Ok(s) = self.resolve_session(session) else {
+            return;
+        };
+        if s.auto_title.is_off() {
+            return;
+        }
+        let Ok(provider) = self.provider(&s.provider) else {
+            return;
+        };
+        let (title, next) = match (s.auto_title, event) {
+            (AutoTitle::Pending, E::PromptSubmitted { prompt: Some(p) }) => {
+                let Some(t) = provider.prompt_title(p) else {
+                    return;
+                };
+                let next = if provider.names_conversations() {
+                    AutoTitle::Provisional
+                } else {
+                    AutoTitle::Off
+                };
+                (t, next)
+            }
+            (_, E::Stopped) if provider.names_conversations() => {
+                let Some(conversation) = s.conversation.as_deref() else {
+                    return;
+                };
+                let account = s.account.as_ref().and_then(|slug| {
+                    self.accounts
+                        .lock()
+                        .unwrap()
+                        .require(&s.provider, slug)
+                        .ok()
+                        .cloned()
+                });
+                let Some(t) = provider.conversation_title(account.as_ref(), conversation) else {
+                    return;
+                };
+                (t, AutoTitle::Off)
+            }
+            _ => return,
+        };
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return;
+        }
+        if self
+            .sessions
+            .lock()
+            .unwrap()
+            .set_auto_title(&s.id, title.clone(), next)
+            .is_err()
+        {
+            return;
+        }
+        self.audit(
+            "session.auto_title",
+            &format!("{} {next:?} {title:?}", s.id),
+        );
+        self.notify(Notify::SessionsChanged);
     }
 
     /// A tool hook (`PreEdit` / `PreShell`): the shared-folder lease, then the write guard,
