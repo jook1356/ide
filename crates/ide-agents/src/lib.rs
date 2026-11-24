@@ -260,17 +260,18 @@ pub trait AgentProvider: Send + Sync {
         None
     }
     /// Continue the stored conversation `id` (from [`AgentProvider::new_conversation`] or a
-    /// `SessionStart` hook): add the CLI's resume flags and return `true`, or `false` when it
-    /// cannot be resumed (e.g. the CLI kept no transcript of it); then the launch starts a
-    /// new conversation. `acct` is the account with its [`AgentProvider::account_home`].
-    /// Default: `false`.
+    /// `SessionStart` hook): add the CLI's resume flags and return the id of the conversation
+    /// the launch continues (stored on the session; a provider may resolve a placeholder it
+    /// stored itself into the CLI's real id), or `None` when it cannot be resumed (e.g. the
+    /// CLI kept no transcript of it); then the launch starts a new conversation. `acct` is the
+    /// account with its [`AgentProvider::account_home`]. Default: `None`.
     fn resume_conversation(
         &self,
         _plan: &mut LaunchPlan,
         _id: &str,
         _acct: Option<&AccountDir>,
-    ) -> bool {
-        false
+    ) -> Option<String> {
+        None
     }
 
     /// The last `limit` entries of the stored conversation `id` (`ide_read_session`,
@@ -610,12 +611,13 @@ pub fn assemble(
     provider.begin(&mut plan, account.as_ref());
     let mut resumed = false;
     if provider.capabilities().resume {
-        plan.conversation = match input.conversation {
-            Some(id) if provider.resume_conversation(&mut plan, id, account.as_ref()) => {
-                resumed = true;
-                Some(id.to_owned())
-            }
-            _ => provider.new_conversation(&mut plan),
+        let continued = input
+            .conversation
+            .and_then(|id| provider.resume_conversation(&mut plan, id, account.as_ref()));
+        resumed = continued.is_some();
+        plan.conversation = match continued {
+            Some(id) => Some(id),
+            None => provider.new_conversation(&mut plan),
         };
     }
     let cfg = input.configuration;

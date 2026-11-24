@@ -311,10 +311,88 @@ fn claude_resume() {
     }
     assert!(!out.spec.env_remove.iter().any(|r| r == "CLAUDE_CONFIG_DIR"));
 
-    // Providers without resume get neither flags nor an id.
+    // Other providers keep their env.
     let out = assemble(&Codex, &inp, &f.env).unwrap();
-    assert_eq!(out.conversation, None);
     assert!(out.spec.env_remove.is_empty());
+}
+
+/// Codex names its thread itself: a placeholder with the start time is stored, resolved to
+/// the rollout Codex wrote in that cwd since; a stored thread id is resumed while its rollout
+/// exists; untrusted ids never become arguments.
+#[test]
+fn codex_resume() {
+    let f = fixture("agents-codex-resume");
+    let acct = account(&f, "codex");
+    let cfg = Configuration::empty("default", "default");
+    let mut inp = input(&f, Some(&acct), &cfg);
+    let no_resume = |a: &Assembled| !a.spec.args.iter().any(|x| x == "resume");
+
+    // Fresh: a placeholder, no flag.
+    let fresh = assemble(&Codex, &inp, &f.env).unwrap();
+    let marker = fresh.conversation.clone().unwrap();
+    assert!(marker.starts_with("started:"), "{marker}");
+    assert!(no_resume(&fresh));
+
+    // No rollout yet (no prompt was sent): a fresh start again.
+    inp.conversation = Some(&marker);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert!(no_resume(&out));
+    assert!(out.conversation.unwrap().starts_with("started:"));
+
+    // Rollouts: another folder's and this cwd's, written after the start.
+    let day = acct.dir.join("sessions").join("2026").join("11").join("24");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = |id: &str, cwd: &Path| {
+        let meta = serde_json::json!({
+            "timestamp": "2026-11-24T10:46:08.624Z",
+            "type": "session_meta",
+            "payload": {"id": id, "session_id": id, "cwd": cwd.display().to_string()},
+        });
+        std::fs::write(day.join(format!("rollout-2026-11-24T19-45-50-{id}.jsonl")), format!("{meta}\n")).unwrap();
+    };
+    let other = "01a20d29-7429-7433-899f-ec62ad9785e0";
+    let mine = "01a20d29-7429-7433-899f-ec62ad9785ed";
+    rollout(other, &f.t.0.join("elsewhere"));
+    rollout(mine, &f.cwd);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation.as_deref(), Some(mine), "resolved to the real id");
+    assert_eq!(out.spec.args[..2], ["resume".to_owned(), mine.to_owned()], "subcommand first");
+    assert!(out.spec.args.contains(&"--no-daemon".to_owned()));
+
+    // A placeholder from after the rollout was written: not this conversation.
+    let hour_ahead = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 3_600_000;
+    let later = format!("started:{hour_ahead}");
+    inp.conversation = Some(&later);
+    assert!(no_resume(&assemble(&Codex, &inp, &f.env).unwrap()));
+
+    // A stored thread id (the SessionStart hook): resumed while Codex keeps its rollout.
+    inp.conversation = Some(mine);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation.as_deref(), Some(mine));
+    assert_eq!(out.spec.args[..2], ["resume".to_owned(), mine.to_owned()]);
+    let gone = "01a20d29-0000-7433-899f-ec62ad9785ed";
+    inp.conversation = Some(gone);
+    assert!(no_resume(&assemble(&Codex, &inp, &f.env).unwrap()));
+    for bad in ["../x", "--help", "started:x", ""] {
+        inp.conversation = Some(bad);
+        let out = assemble(&Codex, &inp, &f.env).unwrap();
+        assert!(no_resume(&out) && !out.spec.args.iter().any(|a| a == bad), "{bad}");
+    }
+
+    // The hook reports the thread id (only a UUID is taken).
+    let p = |v: serde_json::Value| Codex.parse_hook("SessionStart", v.to_string().as_bytes());
+    assert_eq!(
+        p(serde_json::json!({"session_id": mine, "source": "startup"})),
+        Some(HookEvent::SessionStart { conversation: Some(mine.into()) })
+    );
+    assert_eq!(
+        p(serde_json::json!({"session_id": "../../x"})),
+        Some(HookEvent::SessionStart { conversation: None })
+    );
 }
 
 /// A child's first prompt goes last on the command line, after `--` (the start dialogs can no

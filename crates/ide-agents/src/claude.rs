@@ -420,13 +420,13 @@ impl AgentProvider for Claude {
         plan: &mut LaunchPlan,
         id: &str,
         acct: Option<&AccountDir>,
-    ) -> bool {
+    ) -> Option<String> {
         // `--resume` with an unknown id ends the CLI with an error: resume only what it kept.
         if !is_session_id(id) || !config_home(acct).is_some_and(|h| has_transcript(&h, id)) {
-            return false;
+            return None;
         }
         plan.arg("--resume").arg(id);
-        true
+        Some(id.to_owned())
     }
 
     fn apply_skills(&self, plan: &mut LaunchPlan, skills: &[Skill]) -> Result<()> {
