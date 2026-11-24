@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[?6c");
         host.ingest(b"\x1b]11;?\x07");
         let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
-        assert!(reply.starts_with("\x1b]11;rgb:1e1e/1e1e/1e1e"), "{reply:?}");
+        assert!(reply.starts_with("\x1b]11;rgb:2626/2828/2d2d"), "{reply:?}");
         host.ingest(b"\x1b]0;hello\x07\x07");
         assert_eq!(host.title(), "hello");
         assert_eq!(
