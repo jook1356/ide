@@ -1482,3 +1482,7 @@ auto-answer-trust-added-dir-note = Claude Code's “Adding a new directory … Y
 preview-tip = A preview from the session's agent
 preview-devtools = Developer tools
 err-preview = Preview: { $detail }
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = The agent of “{ $who }” wants to type into the terminal “{ $whom }”.
+approval-cap-terminal-input = type into a terminal

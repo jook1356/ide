@@ -1261,3 +1261,7 @@ auto-answer-trust-added-dir-note = 레포지토리의 git 폴더처럼 추가 �
 preview-tip = 세션의 에이전트가 보여 주는 미리보기예요
 preview-devtools = 개발자 도구
 err-preview = 미리보기: { $detail }
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = “{ $who }” 세션의 에이전트가 “{ $whom }” 터미널에 입력하려고 해요.
+approval-cap-terminal-input = 터미널에 입력

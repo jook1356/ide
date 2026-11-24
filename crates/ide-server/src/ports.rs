@@ -13,6 +13,16 @@ const MAX_DEPTH: usize = 64;
 
 /// The listening TCP ports of processes under `roots` (process ids), by port.
 pub fn under(roots: &[u32]) -> Vec<PortInfo> {
+    let mut by_port: BTreeMap<u16, PortInfo> = BTreeMap::new();
+    for (_, p) in by_root(roots) {
+        by_port.entry(p.port).or_insert(p);
+    }
+    by_port.into_values().collect()
+}
+
+/// The listening TCP ports of processes under `roots`, each with the root it runs under
+/// (`ide_terminal_list`: the ports of each terminal).
+pub fn by_root(roots: &[u32]) -> Vec<(u32, PortInfo)> {
     if roots.is_empty() {
         return Vec::new();
     }
@@ -30,18 +40,25 @@ pub fn under(roots: &[u32]) -> Vec<PortInfo> {
     }
     let parents = parent_map();
     let roots: HashSet<u32> = roots.iter().copied().collect();
-    let mut by_port: BTreeMap<u16, PortInfo> = BTreeMap::new();
+    let mut seen: HashSet<(u32, u16)> = HashSet::new();
+    let mut out = Vec::new();
     for l in listening {
         let pid = l.process.pid;
-        if descends(pid, &roots, &parents) {
-            by_port.entry(l.socket.port()).or_insert(PortInfo {
-                port: l.socket.port(),
-                pid,
-                process: l.process.name.clone(),
-            });
+        if let Some(root) = root_of(pid, &roots, &parents)
+            && seen.insert((root, l.socket.port()))
+        {
+            out.push((
+                root,
+                PortInfo {
+                    port: l.socket.port(),
+                    pid,
+                    process: l.process.name.clone(),
+                },
+            ));
         }
     }
-    by_port.into_values().collect()
+    out.sort_by_key(|(r, p)| (*r, p.port));
+    out
 }
 
 /// Every process' parent.
@@ -56,18 +73,18 @@ fn parent_map() -> HashMap<u32, u32> {
         .collect()
 }
 
-/// `pid` is one of `roots` or below one.
-fn descends(mut pid: u32, roots: &HashSet<u32>, parents: &HashMap<u32, u32>) -> bool {
+/// The one of `roots` that `pid` is or runs below.
+fn root_of(mut pid: u32, roots: &HashSet<u32>, parents: &HashMap<u32, u32>) -> Option<u32> {
     for _ in 0..MAX_DEPTH {
         if roots.contains(&pid) {
-            return true;
+            return Some(pid);
         }
         match parents.get(&pid) {
             Some(&p) if p != pid && p != 0 => pid = p,
-            _ => return false,
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -77,19 +94,22 @@ mod tests {
     #[test]
     fn descendants_follow_parent_links() {
         let parents: HashMap<u32, u32> = [(30, 20), (20, 10), (40, 1), (5, 5)].into_iter().collect();
-        let roots: HashSet<u32> = [10].into_iter().collect();
-        assert!(descends(30, &roots, &parents));
-        assert!(descends(10, &roots, &parents));
-        assert!(!descends(40, &roots, &parents));
-        assert!(!descends(5, &roots, &parents));
+        let roots: HashSet<u32> = [10, 40].into_iter().collect();
+        assert_eq!(root_of(30, &roots, &parents), Some(10));
+        assert_eq!(root_of(10, &roots, &parents), Some(10));
+        assert_eq!(root_of(40, &roots, &parents), Some(40));
+        assert_eq!(root_of(5, &roots, &parents), None);
+        assert_eq!(root_of(1, &roots, &parents), None);
     }
 
     #[test]
     fn a_listening_child_of_this_process_is_found() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let found = under(&[std::process::id()]);
+        let me = std::process::id();
+        let found = under(&[me]);
         assert!(found.iter().any(|p| p.port == port), "{found:?}");
+        assert!(by_root(&[me]).iter().any(|(r, p)| *r == me && p.port == port));
         drop(l);
     }
 }
