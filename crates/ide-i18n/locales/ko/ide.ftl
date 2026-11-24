@@ -583,6 +583,7 @@ child-separate = 분리 워크트리
 child-separate-hint = 부모 브랜치에서 갈라진 자기 워크트리예요. 나중에 부모에 합쳐요.
 child-shared = 공유 폴더
 session-own-worktrees = 자기 워크트리(브랜치)에서 작업해요
+session-unguarded = 이 세션은 세션 밖 쓰기가 막히지 않아요. 계정에 ide 통합이 없거나 예전 버전이에요. 계정 설정에서 통합을 설치(갱신)하고 CLI에서 훅을 한 번 승인하세요.
 child-shared-hint = 부모의 폴더와 워크트리에서 같이 작업해요.
 child-repos-label = 레포 (부모의 레포)
 child-create = 만들기

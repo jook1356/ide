@@ -861,19 +861,26 @@ impl App {
         // original-repo sessions have none).
         let own_worktrees =
             s.mode == ide_client::SessionMode::Workspace && !s.shared && !s.repos.is_empty();
-        let title: El<'a> = if own_worktrees {
+        let title: El<'a> = if own_worktrees || s.unguarded {
             // The title only as wide as its text (cut with … when the row is too narrow), so
-            // the mark sits right after it.
-            row![
-                title.width(fit_up_to_room()),
-                tip(
+            // the marks sit right after it.
+            let mut marks = row![title.width(fit_up_to_room())]
+                .spacing(4)
+                .align_y(Alignment::Center);
+            if own_worktrees {
+                marks = marks.push(tip(
                     icons::icon(Icon::GitBranch, 11.0, style::DIM),
-                    tr::session_own_worktrees()
-                ),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .boxed()
+                    tr::session_own_worktrees(),
+                ));
+            }
+            if s.unguarded {
+                // Writes outside the session are not guarded (docs/write-guard.md).
+                marks = marks.push(tip(
+                    icons::icon(Icon::AlertTriangle, 11.0, style::AMBER),
+                    tr::session_unguarded(),
+                ));
+            }
+            marks.boxed()
         } else {
             title.boxed()
         };

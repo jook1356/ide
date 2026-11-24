@@ -332,6 +332,10 @@ pub struct SessionInfo {
     /// Its worktrees are still being created in the background (`NewSession::background`).
     #[serde(default)]
     pub preparing: bool,
+    /// Writes outside the session are not guarded: the provider's hooks come from an account
+    /// integration (`AccountIntegration`) that is missing or outdated (`docs/write-guard.md`).
+    #[serde(default)]
+    pub unguarded: bool,
     /// Its agent was running when the server last went away and is resumed when a client
     /// opens the session (`session.start`); the server does not restart it by itself.
     #[serde(default)]

@@ -618,11 +618,22 @@ async fn account_integration() {
     let claude = c.create_account("claude", "Work").await.unwrap();
     assert_eq!(c.account_integration("claude", &claude.slug, A::Status).await.unwrap().state, S::NotNeeded);
     assert_eq!(c.account_integration("codex", &codex.slug, A::Status).await.unwrap().state, S::Missing);
+    // Sessions show whether their writes are guarded (docs/write-guard.md): a Codex account
+    // without the integration is not; Claude injects its hooks per session.
+    let session_of = |provider: &str, account: &str| NewSession {
+        account: Some(account.into()),
+        ..new_session(provider, None, vec![])
+    };
+    let (cs, _) = c.create_session(session_of("codex", &codex.slug)).await.unwrap();
+    let (ls, _) = c.create_session(session_of("claude", &claude.slug)).await.unwrap();
+    assert!(cs.unguarded && !ls.unguarded);
+    let unguarded = async |id: &str| c.sessions().await.unwrap().into_iter().find(|s| s.id == id).unwrap().unguarded;
     // Windows: a sandbox counts as set up, so install never starts the real (UAC) setup here.
     let home = data.join("accounts").join("codex").join(&codex.slug);
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[windows]\nsandbox = \"unelevated\"\n").unwrap();
     let i = c.account_integration("codex", &codex.slug, A::Install).await.unwrap();
+    assert!(!unguarded(&cs.id).await);
     assert_eq!((i.state, i.approve_with.as_deref()), (S::Installed, Some("/hooks")));
     let hooks = data.join("accounts").join("codex").join(&codex.slug).join("hooks.json");
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
@@ -630,6 +641,7 @@ async fn account_integration() {
     assert!(cmd.contains("ide-server-fake hook --provider codex Stop"), "{cmd}");
     let i = c.account_integration("codex", &codex.slug, A::Uninstall).await.unwrap();
     assert_eq!(i.state, S::Missing);
+    assert!(unguarded(&cs.id).await);
     drop(c);
 
     // No daemon: nothing to point the hooks at.

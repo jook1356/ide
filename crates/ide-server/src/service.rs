@@ -1252,6 +1252,7 @@ impl UserCtx {
     }
 
     fn info(&self, s: &Session) -> SessionInfo {
+        let unguarded = self.unguarded(s);
         let host = self.existing_host(s.id.as_str());
         let repos = self.repos.lock().unwrap();
         SessionInfo {
@@ -1299,6 +1300,7 @@ impl UserCtx {
             writer: self.shares_folder(s)
                 && self.bridge.writer(self.folder_owner(s).as_str()) == s.id.as_str(),
             preparing: s.preparing(),
+            unguarded,
             resume_on_open: s.autostart
                 && s.kind == SessionKind::Agent
                 && !host.as_ref().is_some_and(|h| h.is_running()),
@@ -1919,6 +1921,10 @@ impl UserCtx {
                     S::Installed => I::Installed,
                     S::Outdated => I::Outdated,
                 };
+                if action != A::Status {
+                    // Sessions of the account show whether their writes are guarded.
+                    self.notify(Notify::SessionsChanged);
+                }
                 Ok(Response::Integration(IntegrationInfo { state, approve_with }))
             }
             Request::AccountStatus { provider, slug } => {

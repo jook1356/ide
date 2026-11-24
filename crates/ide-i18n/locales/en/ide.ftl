@@ -668,6 +668,7 @@ child-separate = Own worktrees
 child-separate-hint = Branched from the parent’s branches; merge it back later.
 child-shared = Shared folder
 session-own-worktrees = Works in its own worktrees (branches)
+session-unguarded = Writes outside this session are not guarded: its account has no current ide integration. Install it from the account's settings (Accounts), then approve the hooks once in the CLI.
 child-shared-hint = Works in the parent’s folder and worktrees.
 child-repos-label = Repositories (the parent’s)
 child-create = Create
