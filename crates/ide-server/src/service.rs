@@ -3254,6 +3254,7 @@ pub fn core_error(e: &ide_core::Error) -> ProtoError {
             .arg("path", path.display().to_string())
             .arg("detail", detail),
         ErrorMessage::GitSpawn { detail } => p.arg("detail", detail),
+        ErrorMessage::SandboxSetup { detail } => p.arg("detail", detail),
         ErrorMessage::Git {
             args,
             status,

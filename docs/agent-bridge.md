@@ -109,6 +109,12 @@ For CLIs whose hooks can only live in their config home (Codex). Only on the use
   entries are found by their command (` hook --provider codex `); the user's own hooks and the
   file's other keys are kept; installing again replaces ide's entries; uninstall removes only
   them. Status: missing / installed / outdated (installed for another program path).
+- Windows: Codex writes only inside its Windows sandbox, set up once per Codex home. Status is
+  `Missing` until it is (`.sandbox/setup_marker.json` with `[windows] sandbox = "elevated"`, or the
+  user's own `sandbox_mode` / `windows.sandbox`); install then runs `codex sandbox setup --elevated
+  --current-user --codex-home <account>` elevated (Windows asks with its UAC prompt; refused: error
+  `sandbox-setup`). Without it every Codex session is read-only and refuses `--add-dir` (v 0.172.0).
+  Never run from tests (`IDE_TEST_TMP`).
 - After an install Codex must trust the new hooks once: `approve_with = "/hooks"`, shown on
   the accounts page ("Approve ide's hooks once in the Codex CLI with /hooks").
 - `account.integration {provider, slug, action: Status | Install | Uninstall}` ->

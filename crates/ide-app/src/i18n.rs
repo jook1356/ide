@@ -77,6 +77,7 @@ pub fn proto_error(e: &ProtoError) -> String {
         "invalid-session-id" => tr::err_invalid_session_id(&a("id")),
         "not-a-git-repo" => tr::err_not_a_git_repo(&a("path"), &a("detail")),
         "git-spawn" => tr::err_git_spawn(&a("detail")),
+        "sandbox-setup" => tr::err_sandbox_setup(&a("detail")),
         "git" => tr::err_git(&a("args"), &a("status"), &a("detail")),
         "worktree-exists" => tr::err_worktree_exists(&a("path")),
         "program-not-found" => tr::err_program_not_found(&a("program")),

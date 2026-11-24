@@ -209,6 +209,10 @@ pub enum Error {
     #[error("failed to run git: {0}")]
     GitSpawn(#[source] std::io::Error),
 
+    /// An agent CLI's one-time sandbox setup failed or was refused (e.g. the UAC prompt).
+    #[error("the sandbox setup failed: {0}")]
+    SandboxSetup(String),
+
     /// A git command exited unsuccessfully.
     #[error("git {args} failed ({status}): {stderr}")]
     Git {
@@ -426,6 +430,9 @@ pub enum ErrorMessage<'a> {
     GitSpawn {
         detail: String,
     },
+    SandboxSetup {
+        detail: String,
+    },
     Git {
         args: &'a str,
         status: &'a str,
@@ -530,6 +537,7 @@ impl ErrorMessage<'_> {
             ErrorMessage::InvalidSessionId { .. } => "invalid-session-id",
             ErrorMessage::NotAGitRepo { .. } => "not-a-git-repo",
             ErrorMessage::GitSpawn { .. } => "git-spawn",
+            ErrorMessage::SandboxSetup { .. } => "sandbox-setup",
             ErrorMessage::Git { .. } => "git",
             ErrorMessage::WorktreeExists { .. } => "worktree-exists",
             ErrorMessage::ProgramNotFound { .. } => "program-not-found",
@@ -621,6 +629,7 @@ impl Error {
             Error::GitSpawn(e) => ErrorMessage::GitSpawn {
                 detail: e.to_string(),
             },
+            Error::SandboxSetup(d) => ErrorMessage::SandboxSetup { detail: d.clone() },
             Error::Git {
                 args,
                 status,
