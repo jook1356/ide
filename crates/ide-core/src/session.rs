@@ -184,6 +184,11 @@ pub struct Session {
     /// measured against. Missing = the repository's default ([`Session::base_of`]).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub bases: std::collections::BTreeMap<crate::registry::RepoId, String>,
+    /// Worktrees still being created in the background after the session was made
+    /// (`NewSession::background`); each leaves this list when it is added to `worktrees` or
+    /// fails. The session folder holds [`crate::PENDING_MARKER`] meanwhile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PendingWorktree>,
     /// Creation time, Unix seconds.
     pub created_at: u64,
     /// Last activity, Unix seconds.
@@ -226,6 +231,21 @@ pub struct Session {
     pub legacy_branch: Option<String>,
 }
 
+/// A worktree of a workspace session that is still being created in the background.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingWorktree {
+    /// The repository.
+    pub repo: crate::registry::RepoId,
+    /// The planned folder name under the session root (Desk's `freeName`).
+    pub name: String,
+    /// Base branch picked for this session (origin's branch name), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<String>,
+    /// 기준 브랜치 최신화: fetch the base first.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
 impl Session {
     /// A session with no repository yet; timestamps are set to now.
     pub fn new(
@@ -247,6 +267,7 @@ impl Session {
             root,
             worktrees: Vec::new(),
             bases: Default::default(),
+            pending: Vec::new(),
             created_at: now,
             last_active: now,
             pinned: false,
@@ -280,6 +301,11 @@ impl Session {
         }
         r.and_then(crate::base::repo_default_base)
             .unwrap_or_else(|| crate::base::short_branch(&wt.base))
+    }
+
+    /// Whether worktrees of this session are still being created in the background.
+    pub fn preparing(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Whether this session has its own workspace folder (attach/detach are possible).
@@ -422,7 +448,7 @@ impl SessionStore {
     pub fn count_using_repo(&self, repo: &crate::registry::RepoId) -> usize {
         self.sessions
             .iter()
-            .filter(|s| s.worktree(repo).is_some())
+            .filter(|s| s.worktree(repo).is_some() || s.pending.iter().any(|p| &p.repo == repo))
             .count()
     }
 

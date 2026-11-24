@@ -288,6 +288,9 @@ pub struct SessionInfo {
     /// Holds the write access of a folder other sessions share (`docs/session-family.md`).
     #[serde(default)]
     pub writer: bool,
+    /// Its worktrees are still being created in the background (`NewSession::background`).
+    #[serde(default)]
+    pub preparing: bool,
 }
 
 /// What merging one repo of a session family did (`session.merge_child` / `sync_parent`).
@@ -329,6 +332,11 @@ pub struct NewSession {
     /// Base picked per repo id (one of origin's branches); missing = the repo's default.
     #[serde(default)]
     pub bases: std::collections::BTreeMap<String, String>,
+    /// Answer once the session folder exists and create the worktrees afterwards in the
+    /// background (`SessionInfo::preparing` meanwhile, `Notify::SessionPrepared` at the end,
+    /// which carries the failures and base changes instead of `SessionCreated`).
+    #[serde(default)]
+    pub background: bool,
     /// Title; empty = derived.
     pub title: String,
     /// Start the process right away.
@@ -1433,6 +1441,13 @@ pub enum Notify {
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
+    /// A session's background worktree creation (`NewSession::background`) finished: the
+    /// repos that failed and the base changes (as `SessionCreated` reports them otherwise).
+    SessionPrepared {
+        session: String,
+        failures: Vec<RepoFailureInfo>,
+        base_changes: Vec<String>,
+    },
     /// The registered widgets or their open tabs changed; re-fetch with `WidgetList`.
     WidgetsChanged,
     /// The account list changed.

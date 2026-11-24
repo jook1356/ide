@@ -97,6 +97,7 @@ async fn git_actions_scenario(c: &Client, repo: &Path, other: &Path) {
             repos: vec![r.id.clone()],
             original_repo: None,
             refresh_base: false,
+            background: false,
             bases: Default::default(),
             title: "actions".into(),
             start: false,

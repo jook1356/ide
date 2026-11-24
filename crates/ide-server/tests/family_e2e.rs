@@ -100,6 +100,7 @@ fn shell_session(repos: Vec<String>, start: bool) -> NewSession {
         repos,
         original_repo: None,
         refresh_base: false,
+        background: false,
         bases: Default::default(),
         title: "P".into(),
         start,

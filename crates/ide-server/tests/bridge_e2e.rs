@@ -77,6 +77,7 @@ fn new_session(provider: &str, original_repo: Option<String>, repos: Vec<String>
         repos,
         original_repo,
         refresh_base: false,
+        background: false,
         bases: Default::default(),
         title: String::new(),
         start: false,

@@ -349,6 +349,7 @@ mod tests {
                 repos: vec![id1.clone()],
                 original_repo: None,
                 refresh_base: false,
+                background: false,
                 bases: Default::default(),
             },
             |_| Ok(()),
