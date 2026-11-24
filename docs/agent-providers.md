@@ -156,7 +156,11 @@ pub struct SessionContext {
   guidance file are removed first (`LaunchPlan::clear_root_path`).
 - `apply_dirs` gets `ctx.outside_dirs()`: worktrees outside the root (migrated legacy sessions)
   and every repo's shared git dir (commits on the worktree branch write there). Claude and Codex
-  pass them with `--add-dir` (both listed in `analysis/*-help.txt`).
+  pass them with `--add-dir` (both listed in `analysis/*-help.txt`). Codex takes them only with a
+  writable sandbox: a session folder is no trusted project, so it would start `read-only` and
+  refuse them ("the effective permissions do not allow additional writable roots", (v) 0.172.0);
+  `begin()` asks for `--sandbox workspace-write` unless the account's `config.toml` sets
+  `sandbox_mode`.
 - `account_home` returns the config home for the session (default: the account dir). The server
   never builds account env itself; `begin()` gets the account with the returned dir.
 - `after_exit` runs when a session's process exited or was stopped (server: `Service::after_exit`).

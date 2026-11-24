@@ -396,8 +396,11 @@ fn codex_spec() {
     let out = assemble(&Codex, &inp, &f.env).unwrap();
     assert_eq!(out.spec.program, f.bin.join(exe("codex")));
     let a = &out.spec.args;
-    assert_eq!(a.len(), 5, "{a:?}");
+    assert_eq!(a.len(), 7, "{a:?}");
     assert_eq!(a[0], "--no-daemon");
+    // A session folder is no trusted project: Codex would start read-only.
+    assert_eq!((a[1].as_str(), a[2].as_str()), ("--sandbox", "workspace-write"));
+    let a = &a[2..];
     assert_eq!((a[1].as_str(), a[3].as_str()), ("-c", "-c"));
     assert_eq!(
         a[2],
@@ -430,7 +433,16 @@ fn codex_spec() {
 
     let empty = Configuration::empty("default", "default");
     let out = assemble(&Codex, &input(&f, None, &empty), &f.env).unwrap();
+    assert_eq!(out.spec.args[0], "--no-daemon");
+
+    // The user's own sandbox choice in the account's config.toml is kept.
+    std::fs::create_dir_all(&acct.dir).unwrap();
+    std::fs::write(acct.dir.join("config.toml"), "sandbox_mode = \"danger-full-access\"\n").unwrap();
+    let out = assemble(&Codex, &input(&f, Some(&acct), &empty), &f.env).unwrap();
     assert_eq!(out.spec.args, ["--no-daemon"]);
+    std::fs::write(acct.dir.join("config.toml"), "[projects]\n").unwrap();
+    let out = assemble(&Codex, &input(&f, Some(&acct), &empty), &f.env).unwrap();
+    assert_eq!(out.spec.args, ["--no-daemon", "--sandbox", "workspace-write"]);
 }
 
 #[test]
@@ -808,7 +820,7 @@ fn real_cli_checks() {
     let inp = input(&f, Some(&acct), &cfg);
     let out = assemble(&Codex, &inp, &real).unwrap();
     println!("codex spec: {:#?}", out.spec);
-    let overrides: Vec<String> = out.spec.args[1..].to_vec(); // without --no-daemon
+    let overrides: Vec<String> = out.spec.args[1..].iter().filter(|a| *a != "--sandbox" && *a != "workspace-write").cloned().collect(); // without --no-daemon and --sandbox
     let with = |pre: &[&str]| {
         let mut v: Vec<String> = pre.iter().map(|x| x.to_string()).collect();
         v.extend(overrides.iter().cloned());
