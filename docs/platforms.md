@@ -54,6 +54,11 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 - [ ] **Restart an incompatible server.** `old_server::kill_tree` ends the daemon's process
   group with `kill -TERM -<pid>` (assumes `spawn_daemon` made it a group leader). Check: run an
   old daemon, start a newer-protocol app, press 서버 재시작 in the connection status.
+- [ ] **Codex resume without the hook** (`ide-agents/src/codex.rs` `started_rollout`): a
+  rollout's age is its creation time, else its last write (file systems without a birth
+  time). Assumption: Codex's rollouts and `session_meta.cwd` look the same as on Windows.
+  Check: start a Codex session, send one prompt, restart the server, open the session: it
+  shows `codex resume <uuid>` with the conversation.
 
 ## macOS: to do
 
@@ -190,6 +195,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-24: Codex resumes after a server restart (`codex.rs` rollout lookup by creation /
+  write time and cwd); checked on Windows only.
 - 2026-11-24: previews: CEF custom scheme `ide-preview://` next to `ide-widget://` (same list in
   `main`); checked on Windows only.
 - 2026-11-24: browser control by agents (`ide-web` `devtools.rs`: CDP through `send_dev_tools_message`, `post_task` to CEF's UI thread; `browser_agent.rs`): no OS-specific code, checked on Windows only.

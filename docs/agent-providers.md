@@ -59,7 +59,7 @@ pub trait AgentProvider: Send + Sync {
     fn after_exit(&self, ctx: &SessionContext, acct: Option<&AccountDir>) {}   // default: nothing
     // Conversations (only with Caps::resume, see "Resume and restart" below)
     fn new_conversation(&self, plan) -> Option<String>;               // default: None
-    fn resume_conversation(&self, plan, id: &str, acct: Option<&AccountDir>) -> bool; // default: false
+    fn resume_conversation(&self, plan, id: &str, acct: Option<&AccountDir>) -> Option<String>; // default: None
     // Session assembly (each step has a default)
     fn prepare_root(&self, plan, ctx: &SessionContext, config: &Configuration, skills: &[Skill])
         -> Result<RootPrepared>;                           // default: nothing (workspace only)
@@ -112,7 +112,7 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
 | Instructions | (v) `<scratch>/instructions.md` via `--append-system-prompt-file` | (v) `-c developer_instructions="..."` (single-line TOML string) | ignored | `flag` / `env` / `file` |
 | Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `ide-server hook` (`docs/agent-bridge.md`); background agents (`SubagentStart/Stop`) -> `HookEvent::Background*` (optional for a provider: report a start only with its end) | (d) account integration: ide's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
 | Session name | (v) `-n <title>` | — | — | — |
-| Resume | fresh `--session-id <uuid>`, next start `--resume <uuid>` when `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` (a) | — (not yet: `codex resume <id>` + hook id, unverified) | — | — |
+| Resume | fresh `--session-id <uuid>`, next start `--resume <uuid>` when `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` (a) | fresh: placeholder `started:<ms>` (Codex picks its id), `SessionStart` hook `session_id` (d); next start `codex resume <uuid> ...` when `<CODEX_HOME>/sessions/**/rollout-*-<uuid>.jsonl` exists (placeholder: earliest rollout of the cwd since the start) (v 0.172.0 help) | — | — |
 | Inherited env | removed: `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, ... (v 2.1.330, see below) | — | — | — |
 | Daemon | — | (v) `--no-daemon` always | — | — |
 
@@ -207,8 +207,12 @@ A session keeps the CLI's own id of its conversation (`Session::conversation` in
 `sessions.json`, opaque to everything outside the provider) and whether its process was
 running when the server went away (`Session::autostart`).
 - `assemble()` (providers with `Caps::resume` only): a stored id goes to
-  `resume_conversation`; when it returns `false` (or nothing is stored) `new_conversation` may
-  pick one. `Assembled::conversation` is what the launch uses; the server stores it at start.
+  `resume_conversation`, which returns the id the launch continues (a provider may resolve a
+  placeholder of its own into the CLI's id there); when it returns `None` (or nothing is
+  stored) `new_conversation` may pick one. `Assembled::conversation` is what the launch uses;
+  the server stores it at start. Only `Caps::resume` sessions get `autostart`: a provider
+  without it is not restarted after a server restart (its terminal stays empty until the user
+  starts it), which is why Codex resumes too.
 - The CLI's `SessionStart` hook may report a different id (`HookEvent::SessionStart {
   conversation }`: after `/clear`, or `/resume` of another conversation inside the TUI); the
   server stores that one, so the next start continues what the user saw last.
@@ -222,6 +226,15 @@ running when the server went away (`Session::autostart`).
   `ide_send_to_session` to a marked session wakes it the same way (`docs/session-family.md`).
 - Claude: `resume_conversation` checks for the transcript first: `--resume` with an unknown id
   ends the CLI. Ids from hooks are used only if they are UUIDs.
+- Codex (v 0.172.0) takes no id up front and writes its rollout
+  (`<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`, first line `session_meta`
+  with `payload.id` and `payload.cwd`) only with the first prompt. A fresh start stores
+  `started:<unix ms>`; the integration's `SessionStart` hook replaces it with `session_id` (d).
+  `resume_conversation` resolves a placeholder to the earliest rollout of the same cwd created
+  since then (without the hook two Codex sessions in one folder may swap threads, and a `/new`
+  is not followed) and checks a stored UUID for its rollout (`.jsonl` or `.jsonl.zst`); then
+  `codex resume <uuid>` goes before every other argument (the subcommand takes all the options
+  ide passes: `--no-daemon`, `--sandbox`, `-c`, `--add-dir`). No rollout: a fresh start.
 - (v 2.1.330) A server started from a Claude Code tool shell (an agent that builds and runs
   ide) inherits that Claude Code's session markers (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
   `CLAUDE_CODE_CHILD_SESSION`, messaging socket, ...). A session's `claude` started with them
