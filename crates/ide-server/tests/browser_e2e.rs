@@ -99,6 +99,7 @@ async fn browser_tools_ask_per_site() {
             repos: vec![id1],
             original_repo: None,
             refresh_base: false,
+            background: false,
             bases: Default::default(),
             title: "P".into(),
             start: false,

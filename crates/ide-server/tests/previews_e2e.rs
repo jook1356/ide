@@ -41,6 +41,7 @@ async fn previews_end_to_end() {
             repos: Vec::new(),
             original_repo: Some(repo_id),
             refresh_base: false,
+            background: false,
             bases: Default::default(),
             title: String::new(),
             start: false,
