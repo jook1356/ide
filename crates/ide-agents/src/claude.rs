@@ -120,6 +120,25 @@ fn transcript_file(home: &std::path::Path, id: &str) -> Option<std::path::PathBu
         .find(|p| p.is_file())
 }
 
+/// The conversation's title in a transcript: the last `{"type":"ai-title","aiTitle":..}` or
+/// `{"type":"custom-title","customTitle":..}` line (v 2.1.3xx: `ai-title` only appears when
+/// the CLI was started without `-n`).
+pub(crate) fn transcript_title(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("-title\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find_map(|v| {
+            let key = match v.get("type")?.as_str()? {
+                "ai-title" => "aiTitle",
+                "custom-title" => "customTitle",
+                _ => return None,
+            };
+            let t = v.get(key)?.as_str()?.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        })
+}
+
 /// Longest text of one entry, and of a tool call / result.
 const TEXT_MAX: usize = 4000;
 const TOOL_MAX: usize = 300;
@@ -327,6 +346,25 @@ impl AgentProvider for Claude {
         Some(vec!["--".into(), prompt.to_owned()])
     }
 
+    /// Slash commands (`/clear`, `/model`, custom commands) and bash mode (`!ls`) name nothing.
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        crate::title::from_prompt(prompt, &["/", "!"])
+    }
+
+    fn names_conversations(&self) -> bool {
+        true
+    }
+
+    /// The last `custom-title` (`/rename`, `-n`) or `ai-title` (Claude Code's own name of the
+    /// conversation) in the transcript.
+    fn conversation_title(&self, acct: Option<&AccountDir>, id: &str) -> Option<String> {
+        if !is_session_id(id) {
+            return None;
+        }
+        let file = transcript_file(&config_home(acct)?, id)?;
+        transcript_title(&std::fs::read_to_string(file).ok()?)
+    }
+
     fn transcript(
         &self,
         acct: Option<&AccountDir>,
@@ -403,7 +441,9 @@ impl AgentProvider for Claude {
         if let Some(a) = acct {
             plan.env.extend(self.account_env(a));
         }
-        if !plan.title.trim().is_empty() {
+        // A fixed name (`-n`) keeps Claude Code from naming the conversation itself (no
+        // `ai-title` in the transcript): an automatic title is not passed.
+        if !plan.auto_title && !plan.title.trim().is_empty() {
             let title = plan.title.trim().to_owned();
             plan.arg("-n").arg(title);
         }
@@ -556,7 +596,9 @@ impl AgentProvider for Claude {
                     .filter(|id| is_session_id(id))
                     .map(str::to_owned),
             }),
-            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
+            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted {
+                prompt: Some(s("prompt")).filter(|p| !p.is_empty()).map(str::to_owned),
+            }),
             // No hook reports the end of a background shell: the transcript says what still runs.
             "Stop" => Some(
                 match Some(s("transcript_path"))

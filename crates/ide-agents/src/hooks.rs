@@ -21,8 +21,9 @@ pub enum HookEvent {
     /// The CLI started (or resumed / cleared) its conversation; `conversation` is the CLI's id
     /// of it, if reported (stored on the session, resumed on the next start).
     SessionStart { conversation: Option<String> },
-    /// The user's prompt was submitted: a turn started.
-    PromptSubmitted,
+    /// The user's prompt was submitted: a turn started. `prompt`: its text, if the CLI reports
+    /// it (a session with a default title is named from it, `docs/session-titles.md`).
+    PromptSubmitted { prompt: Option<String> },
     /// The turn finished.
     Stopped,
     /// The turn finished, and the CLI's own record says exactly these ids of work that can

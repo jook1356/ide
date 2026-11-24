@@ -80,6 +80,7 @@ pub use workspace::{
 pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};
 pub use session::{
+    AutoTitle,
     PendingWorktree, Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore,
     SessionTarget, SessionWorktree,
 };
