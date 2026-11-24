@@ -1006,8 +1006,11 @@ impl UserCtx {
                 title: &key.1,
             };
             // A dialog ide answers by itself (`docs/auto-answers.md`).
-            if let Some((a, path)) = m.answer(&input) {
-                self.auto_answer(&s, &host, a, path.as_deref());
+            if let Some((a, path)) = m.answer(&input)
+                && self.auto_answer(&s, &host, a, path.as_deref())
+            {
+                // Held back for now: read this screen again on the next tick.
+                seen.remove(&id);
             }
             let Some(state) = m.detect(&input) else {
                 continue;
