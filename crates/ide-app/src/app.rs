@@ -960,6 +960,7 @@ pub enum Message {
     Browser(crate::browser::BrowserMsg),
     Widget(crate::widgets_ui::WidgetMsg),
     Approval(crate::approvals_ui::ApprovalMsg),
+    AutoAnswer(crate::auto_answers_ui::AutoAnswerMsg),
     /// The input box under an agent terminal.
     Composer(crate::composer::ComposerMsg),
     /// An in-app file drag: the pointer entered (`Some`) or left a drop target, and moved.
@@ -1189,6 +1190,8 @@ pub struct App {
     pub widgets: crate::widgets_ui::WidgetsState,
     /// Approval questions waiting and the kept grants (`approvals_ui.rs`).
     pub approvals: crate::approvals_ui::ApprovalsState,
+    /// Settings -> 에이전트 자동 응답: the last error (`auto_answers_ui.rs`).
+    pub auto_answer_error: Option<String>,
     /// "+ 새로 열기" opens 공용 items (no session) instead of the session's.
     pub new_global: bool,
     /// Its address field, and the bookmark being renamed (url, name).
@@ -1335,6 +1338,7 @@ impl App {
             new_menu: false,
             widgets: Default::default(),
             approvals: Default::default(),
+            auto_answer_error: None,
             new_global: false,
             new_address: String::new(),
             bookmark_edit: None,
@@ -1682,7 +1686,7 @@ impl App {
 
     // ------------------------------------------------------------------ server state
 
-    fn refresh(&self) -> Task<Message> {
+    pub(crate) fn refresh(&self) -> Task<Message> {
         let Some(c) = self.client() else {
             return Task::none();
         };
@@ -3789,6 +3793,7 @@ impl App {
             Message::Browser(m) => self.on_browser(m),
             Message::Widget(m) => self.on_widget(m),
             Message::Approval(m) => self.on_approval(m),
+            Message::AutoAnswer(m) => self.on_auto_answer(m),
             Message::Composer(m) => self.on_composer(m),
             Message::FileDropped(p) => self.on_file_dropped(p),
             Message::DropHover(t, entered) => {

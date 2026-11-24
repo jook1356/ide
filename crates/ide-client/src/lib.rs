@@ -25,7 +25,7 @@ pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, 
 pub use ide_proto::{
     AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, IntegrationAction,
     IntegrationInfo, IntegrationState, McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
-    ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
+    ProviderDetection, ProviderInfo, AutoAnswerInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
     SessionRepo, Support,
 };
 pub use ide_proto::{

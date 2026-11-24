@@ -149,6 +149,8 @@ fires only after a few seconds).
   0.7 s when their output or title changed. Without hooks since the process started, the
   screen decides the activity; with hooks it only adds a visible dialog (-> NeedsInput) and
   its end (NeedsInput -> what the screen shows).
+- Answers: `[[answers]]` rules type keys into dialogs the user left on, e.g. Claude Code's folder
+  trust questions (`docs/auto-answers.md`).
 - (a) The rules are not yet checked against the real CLIs' screens here (tests use screens
   written after the UI texts); a CLI update can change them: fix the manifest.
 

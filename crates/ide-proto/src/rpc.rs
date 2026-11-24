@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 18;
+pub const PROTO_VERSION: u32 = 19;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -1127,6 +1127,12 @@ pub enum Request {
         widget: String,
         open: bool,
     },
+    /// Turn an agent's auto answer on or off (protocol 19, `docs/auto-answers.md`) -> `Unit`.
+    ProviderSetAutoAnswer {
+        provider: String,
+        answer: String,
+        enabled: bool,
+    },
     /// The kept approvals (protocol 18, `docs/approvals.md`) -> `Approvals`.
     ApprovalList,
     /// Remove a kept approval -> `Unit`.
@@ -1277,6 +1283,7 @@ impl Request {
             Request::WidgetRegister { .. } => "widget.register",
             Request::WidgetDelete { .. } => "widget.delete",
             Request::WidgetSetOpen { .. } => "widget.set_open",
+            Request::ProviderSetAutoAnswer { .. } => "provider.set_auto_answer",
             Request::ApprovalList => "approval.list",
             Request::ApprovalRevoke { .. } => "approval.revoke",
             Request::WidgetCall { .. } => "widget.call",
@@ -1615,6 +1622,7 @@ mod tests {
                             instructions: crate::Support::Native,
                         },
                     },
+                    answers: vec![crate::AutoAnswerInfo { id: "trust_workspace".into(), enabled: true }],
                 }])),
             },
             RpcMessage::Response {

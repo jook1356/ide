@@ -949,6 +949,18 @@ impl Client {
         )
     }
 
+    /// `provider.set_auto_answer`: turn an agent's auto answer on or off (`docs/auto-answers.md`).
+    pub async fn set_auto_answer(&self, provider: &str, answer: &str, enabled: bool) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::ProviderSetAutoAnswer {
+                provider: provider.into(),
+                answer: answer.into(),
+                enabled,
+            })
+            .await,
+        )
+    }
+
     /// `approval.list`: the kept approvals (`docs/approvals.md`).
     pub async fn approval_list(&self) -> Result<Vec<ide_proto::ApprovalInfo>, ProtoError> {
         match self.call(Request::ApprovalList).await? {

@@ -1854,13 +1854,17 @@ impl App {
             Page::Widgets => return self.widgets_page(),
             Page::Settings => (
                 tr::settings(),
-                vec![
-                    card(self.language_section()),
-                    card(self.font_section()),
-                    card(self.server_section(f, online)),
-                    card(self.on_close_section()),
-                    card(self.approvals_section()),
-                ],
+                [
+                    Some(card(self.language_section())),
+                    Some(card(self.font_section())),
+                    Some(card(self.server_section(f, online))),
+                    Some(card(self.on_close_section())),
+                    self.auto_answers_section().map(card),
+                    Some(card(self.approvals_section())),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
             ),
         };
         let mut c = column![

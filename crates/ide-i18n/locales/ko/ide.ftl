@@ -1248,3 +1248,11 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+
+## 자동 응답 (auto_answers_ui.rs)
+auto-answers-label = 에이전트 자동 응답
+auto-answers-note = 에이전트가 묻는 질문 중 ide가 대신 답할 것들이에요. 폴더를 묻는 질문은 ide가 그 세션에 만든 폴더일 때만 답해요.
+auto-answer-trust-workspace = 세션 폴더 신뢰
+auto-answer-trust-workspace-note = 새 폴더에서 세션을 시작할 때 Claude Code가 묻는 “Accessing workspace … Yes, I trust this folder”예요.
+auto-answer-trust-added-dir = 세션에 추가된 폴더 신뢰
+auto-answer-trust-added-dir-note = 레포지토리의 git 폴더처럼 추가 폴더에 대해 Claude Code가 묻는 “Adding a new directory … Yes, add it”예요.

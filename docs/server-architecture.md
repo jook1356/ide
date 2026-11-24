@@ -267,6 +267,7 @@ Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify
 | Pin / archive (protocol 11) | `session.set_flags{id, pinned?, archived?}` -> `Session` (Desk's session PATCH `{pinned}` / `{archived}`; archiving unpins, an archived session stays unpinned); `SessionInfo.pinned` / `.archived`, kept in `sessions.json` only when set. |
 | Widgets (protocol 17) | `widget.list` / `file` / `register` / `delete` / `set_open` / `call` / `data`, `Notify::WidgetsChanged`; bridge tool `ide_widget`. See `docs/widgets.md`. |
 | Approvals (protocol 18) | `approval.list` / `revoke`; the daemon asks apps with `Notify::AgentRequest` `ide.approval`. See `docs/approvals.md`. |
+| Auto answers (protocol 19) | `ProviderInfo.answers`, `provider.set_auto_answer`. See `docs/auto-answers.md`. |
 | Account integration (protocol 15) | `account.integration{provider, slug, action}` -> `Integration{state, approve_with}`; `ProviderCaps.integration`. See `docs/agent-bridge.md`. |
 | Session families (protocol 14) | `session.create_child` / `merge_child` / `sync_parent`, `SessionInfo.parent` / `.shared`; bridge tools `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent`. See `docs/session-family.md`. |
 | Agent hooks (protocol 13) | `agent.hook{event}` from `ide-server hook` -> `AgentHookDecision`; `SessionInfo.activity` / `Notify::Activity` (Unknown / Idle / Working / NeedsInput). See `docs/agent-bridge.md`. |

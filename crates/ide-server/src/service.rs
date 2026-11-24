@@ -33,6 +33,7 @@ use crate::{def, fsops, git, scripts, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 mod approvals;
+mod auto_answers;
 mod widgets;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -295,6 +296,10 @@ pub struct UserCtx {
     bridge: crate::bridge::BridgeState,
     /// What the user allowed agents to do beyond their session (`docs/approvals.md`).
     grants: Mutex<ide_core::approval::Grants>,
+    /// The user's auto answer choices per agent (`docs/auto-answers.md`) and when each
+    /// session's dialog was last answered.
+    auto_answers: Mutex<ide_core::auto_answer::AutoAnswers>,
+    answered: Mutex<HashMap<String, std::time::Instant>>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
 }
@@ -354,6 +359,7 @@ impl UserCtx {
         }
         let providers = Providers::load(&paths.providers_dir());
         let grants = ide_core::approval::Grants::load(&paths);
+        let auto_answers = ide_core::auto_answer::AutoAnswers::load(&paths);
         Ok(UserCtx {
             user,
             paths,
@@ -374,6 +380,8 @@ impl UserCtx {
             github,
             bridge: crate::bridge::BridgeState::new(bridge),
             grants: Mutex::new(grants),
+            auto_answers: Mutex::new(auto_answers),
+            answered: Mutex::new(HashMap::new()),
             this: std::sync::OnceLock::new(),
         })
     }
@@ -953,6 +961,10 @@ impl UserCtx {
                 lines: &lines,
                 title: &key.1,
             };
+            // A dialog ide answers by itself (`docs/auto-answers.md`).
+            if let Some((a, path)) = m.answer(&input) {
+                self.auto_answer(&s, &host, a, path.as_deref());
+            }
             let Some(state) = m.detect(&input) else {
                 continue;
             };
@@ -1681,6 +1693,7 @@ impl UserCtx {
                             instructions: support(c.original_repo.instructions),
                         },
                     },
+                    answers: self.answers_of(p.as_ref()),
                 }
             })
             .collect()
@@ -2088,6 +2101,7 @@ impl UserCtx {
             Request::WidgetDelete { widget } => self.widget_delete(&widget),
             Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
+            Request::ProviderSetAutoAnswer { provider, answer, enabled } => self.set_auto_answer(&provider, &answer, enabled),
             Request::ApprovalList => Ok(self.approval_list()),
             Request::ApprovalRevoke { id } => self.approval_revoke(&id),
             Request::ScriptsList { session, repo } => {

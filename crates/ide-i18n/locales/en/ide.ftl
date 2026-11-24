@@ -1469,3 +1469,11 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+
+## Auto answers (auto_answers_ui.rs)
+auto-answers-label = AUTO ANSWERS
+auto-answers-note = Dialogs of an agent that ide answers by itself. Folder questions are answered only for the folders ide set up for the session.
+auto-answer-trust-workspace = Trust the session's folder
+auto-answer-trust-workspace-note = Claude Code's “Accessing workspace … Yes, I trust this folder” when a session starts in a new folder.
+auto-answer-trust-added-dir = Trust the session's added folders
+auto-answer-trust-added-dir-note = Claude Code's “Adding a new directory … Yes, add it”, e.g. for a repository's git folder.

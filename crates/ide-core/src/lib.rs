@@ -36,6 +36,7 @@
 
 pub mod account;
 pub mod approval;
+pub mod auto_answer;
 pub mod base;
 pub mod configuration;
 pub mod error;
