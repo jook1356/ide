@@ -109,6 +109,101 @@ pub(crate) fn has_transcript(home: &std::path::Path, id: &str) -> bool {
     })
 }
 
+/// The transcript file of session `id` under `home` (`projects/*/<id>.jsonl`).
+fn transcript_file(home: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+    let file = format!("{id}.jsonl");
+    std::fs::read_dir(home.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join(&file))
+        .find(|p| p.is_file())
+}
+
+/// Longest text of one entry, and of a tool call / result.
+const TEXT_MAX: usize = 4000;
+const TOOL_MAX: usize = 300;
+
+fn shorten(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str(" …(shortened)");
+    out
+}
+
+/// The text of a `tool_result`'s `content` (a string or text blocks).
+fn result_text(c: &serde_json::Value) -> String {
+    match c {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Claude Code's transcript (JSONL, one record per line) as entries: user prompts, the
+/// assistant's texts, tool calls and results (shortened); subagent (`isSidechain`) and meta
+/// records, thinking and other record types are left out. The last `limit` entries.
+pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::TranscriptEntry> {
+    let mut out = Vec::new();
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !matches!(kind, "user" | "assistant")
+            || v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true)
+            || v.get("isMeta").and_then(|b| b.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let at = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_owned();
+        let mut push = |role: &str, text: String| {
+            if !text.trim().is_empty() {
+                out.push(crate::TranscriptEntry {
+                    role: role.to_owned(),
+                    text,
+                    at: at.clone(),
+                });
+            }
+        };
+        let content = v.get("message").and_then(|m| m.get("content"));
+        match content {
+            Some(serde_json::Value::String(s)) => push(kind, shorten(s, TEXT_MAX)),
+            Some(serde_json::Value::Array(blocks)) => {
+                for b in blocks {
+                    match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                        "text" => push(
+                            kind,
+                            shorten(b.get("text").and_then(|t| t.as_str()).unwrap_or(""), TEXT_MAX),
+                        ),
+                        "tool_use" => {
+                            let name = b.get("name").and_then(|t| t.as_str()).unwrap_or("?");
+                            let input = b.get("input").map(|i| i.to_string()).unwrap_or_default();
+                            push("tool", format!("call {name} {}", shorten(&input, TOOL_MAX)));
+                        }
+                        "tool_result" => {
+                            let text = result_text(b.get("content").unwrap_or(&serde_json::Value::Null));
+                            let err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                            let head = if err { "error" } else { "result" };
+                            push("tool", format!("{head}: {}", shorten(&text, TOOL_MAX)));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let skip = out.len().saturating_sub(limit);
+    out.split_off(skip)
+}
+
 /// Claude Code's file-editing tools (their `tool_input.file_path` / `notebook_path`).
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
@@ -158,6 +253,33 @@ impl AgentProvider for Claude {
         crate::PromptInput::Paste {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
+    }
+
+    fn transcript(
+        &self,
+        acct: Option<&AccountDir>,
+        id: &str,
+        limit: usize,
+    ) -> Option<std::result::Result<Vec<crate::TranscriptEntry>, String>> {
+        Some((|| {
+            if !is_session_id(id) {
+                return Err(format!("`{id}` is not a Claude Code conversation id"));
+            }
+            let home = config_home(acct).ok_or("no Claude Code config folder")?;
+            let file = transcript_file(&home, id).ok_or("Claude Code kept no transcript of it yet")?;
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            Ok(parse_transcript(&text, limit))
+        })())
+    }
+
+    /// Esc stops Claude Code's turn (d).
+    fn interrupt_keys(&self) -> Option<&'static [u8]> {
+        Some(b"\x1b")
+    }
+
+    /// A prompt sent while Claude Code works is shown to it during the turn (d).
+    fn steers(&self) -> bool {
+        true
     }
     fn capabilities(&self) -> Caps {
         Caps {
@@ -321,7 +443,7 @@ impl AgentProvider for Claude {
             }
             serde_json::json!([g])
         };
-        let settings = serde_json::json!({
+        let mut settings = serde_json::json!({
             "hooks": {
                 "SessionStart": group("SessionStart", None),
                 "UserPromptSubmit": group("UserPromptSubmit", None),
@@ -338,6 +460,11 @@ impl AgentProvider for Claude {
                 "SubagentStop": group("SubagentStop", None),
             }
         });
+        // The bridge's tools run without Claude's prompt: ide asks itself (`mcp__<server>`
+        // allows every tool of a server (d)).
+        if let Some(server) = &hooks.trusted_mcp {
+            settings["permissions"] = serde_json::json!({ "allow": [format!("mcp__{server}")] });
+        }
         let json = serde_json::to_string_pretty(&settings).expect("json");
         let path = plan.write_file("settings.json", json.as_bytes())?;
         plan.arg("--settings").arg(path.display().to_string());

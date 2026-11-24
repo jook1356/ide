@@ -34,6 +34,7 @@ mod agent_bridge;
 mod family_ui;
 mod self_update;
 mod old_server;
+mod approvals_ui;
 mod widgets_page;
 mod widgets_ui;
 mod item_menu;

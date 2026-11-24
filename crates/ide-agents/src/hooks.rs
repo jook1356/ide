@@ -93,6 +93,9 @@ impl HookCaps {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookTargets {
     pub program: Option<PathBuf>,
+    /// The bridge's MCP server: the CLI may run its tools without its own permission prompt,
+    /// ide asks for what needs asking (`docs/approvals.md`). `None` = nothing pre-allowed.
+    pub trusted_mcp: Option<String>,
 }
 
 impl HookTargets {

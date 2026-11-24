@@ -1,6 +1,6 @@
 # Session families (parent / child sessions)
 
-Status: implemented (protocol 14): model and rules (`ide-core/src/family.rs`), server
+Status: implemented (protocol 14; send modes, sent messages, reading conversations: 18): model and rules (`ide-core/src/family.rs`), server
 (`session.create_child`, `session.merge_child`, `session.sync_parent`), bridge tools, app
 (tree, dialog, row menu). Tests: `ide-core` `family::tests`, `ide-server/tests/family_e2e.rs`.
 Goes beyond Hermes Desk, whose child sessions only share the parent's
@@ -50,7 +50,9 @@ its own worktrees branched from the parent's, and the parent merges them back.
 |---|---|---|
 | `ide_list_related_sessions` | any | parent, siblings, children: id, title, mode, activity, repos / branches |
 | `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?}`: create, start, send the first prompt |
-| `ide_send_to_session` | related | `{session, message}`: delivered at once when the target is idle, else queued and delivered when its turn ends; prefixed with the sender |
+| `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue` |
+| `ide_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
+| `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); other CLIs: not supported yet |
 | `ide_merge_child` | parent | `{child, squash?}` -> per repo result |
 | `ide_sync_from_parent` | separate child | per repo result |
 
@@ -103,4 +105,4 @@ owner, i.e. the parent, by default; `SessionInfo.writer`, ✎ in the list).
   it gets the same guidance.
 
 ## Later
-- Reading a related session's conversation (provider transcripts).
+- Reading Codex conversations (`CODEX_HOME/sessions/.../rollout-*.jsonl`, once its conversation id is recorded).

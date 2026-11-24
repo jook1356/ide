@@ -51,6 +51,8 @@ pub const TOOL_MERGE_CHILD: &str = "ide_merge_child";
 pub const TOOL_SYNC_PARENT: &str = "ide_sync_from_parent";
 pub const TOOL_REQUEST_WRITE: &str = "ide_request_write_access";
 pub const TOOL_RELEASE_WRITE: &str = "ide_release_write_access";
+pub const TOOL_READ_SESSION: &str = "ide_read_session";
+pub const TOOL_SENT_MESSAGES: &str = "ide_sent_messages";
 
 /// A tool of the session family.
 pub fn is_family_tool(tool: &str) -> bool {
@@ -62,6 +64,8 @@ pub fn is_family_tool(tool: &str) -> bool {
         TOOL_SYNC_PARENT,
         TOOL_REQUEST_WRITE,
         TOOL_RELEASE_WRITE,
+        TOOL_READ_SESSION,
+        TOOL_SENT_MESSAGES,
     ]
     .contains(&tool)
 }
@@ -106,9 +110,20 @@ pub struct BridgeState {
     /// the owner).
     leases: Mutex<HashMap<String, String>>,
     /// Messages waiting to be typed into a session (`ide_send_to_session`, first prompts).
-    queue: Mutex<HashMap<String, std::collections::VecDeque<String>>>,
+    queue: Mutex<HashMap<String, std::collections::VecDeque<Queued>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     seq: AtomicU64,
+}
+
+/// A message waiting to be typed into a session.
+#[derive(Debug, Clone)]
+pub struct Queued {
+    pub id: u64,
+    /// The sending session (`None`: ide itself).
+    pub from: Option<String>,
+    pub text: String,
+    /// Unix seconds.
+    pub at: u64,
 }
 
 /// A session's background work: the ids still running and whether its turn ended (`Stopped`
@@ -131,6 +146,7 @@ impl BridgeState {
     pub fn hook_targets(&self) -> HookTargets {
         HookTargets {
             program: self.config.as_ref().map(|c| c.exe.clone()),
+            trusted_mcp: None,
         }
     }
 
@@ -161,6 +177,7 @@ impl BridgeState {
             instructions: INSTRUCTIONS.to_owned(),
             hooks: HookTargets {
                 program: Some(c.exe.clone()),
+                trusted_mcp: Some(MCP_NAME.to_owned()),
             },
         })
     }
@@ -252,29 +269,63 @@ impl BridgeState {
         }
     }
 
-    /// Queue a message for `session`.
-    pub fn enqueue(&self, session: &str, msg: String) {
+    /// Queue a message for `session` (`from`: the sending session); its id.
+    pub fn enqueue(&self, session: &str, from: Option<&str>, text: String) -> u64 {
+        let id = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.queue
             .lock()
             .unwrap()
             .entry(session.to_owned())
             .or_default()
-            .push_back(msg);
+            .push_back(Queued {
+                id,
+                from: from.map(str::to_owned),
+                text,
+                at: ide_core::now_unix(),
+            });
+        id
     }
 
     /// The next queued message of `session`.
-    pub fn dequeue(&self, session: &str) -> Option<String> {
+    pub fn dequeue(&self, session: &str) -> Option<Queued> {
         self.queue.lock().unwrap().get_mut(session)?.pop_front()
     }
 
     /// Put a message back at the front (it could not be typed yet).
-    pub fn requeue(&self, session: &str, msg: String) {
+    pub fn requeue(&self, session: &str, msg: Queued) {
         self.queue
             .lock()
             .unwrap()
             .entry(session.to_owned())
             .or_default()
             .push_front(msg);
+    }
+
+    /// The messages `from` queued that are still waiting: (target session, message).
+    pub fn sent_by(&self, from: &str) -> Vec<(String, Queued)> {
+        let q = self.queue.lock().unwrap();
+        let mut out: Vec<(String, Queued)> = q
+            .iter()
+            .flat_map(|(to, msgs)| {
+                msgs.iter()
+                    .filter(|m| m.from.as_deref() == Some(from))
+                    .map(move |m| (to.clone(), m.clone()))
+            })
+            .collect();
+        out.sort_by_key(|(_, m)| m.id);
+        out
+    }
+
+    /// Drop a waiting message `from` queued (`false`: none with that id).
+    pub fn cancel(&self, from: &str, id: u64) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        for msgs in q.values_mut() {
+            if let Some(i) = msgs.iter().position(|m| m.id == id && m.from.as_deref() == Some(from)) {
+                msgs.remove(i);
+                return true;
+            }
+        }
+        false
     }
 
     /// Messages queued for `session`.
@@ -413,11 +464,34 @@ pub fn tools() -> Vec<AgentTool> {
         AgentTool {
             name: TOOL_SEND.into(),
             description: "Send a message to a related session (parent, child or sibling; see \
-                          ide_list_related_sessions). It is typed into that session's agent at \
-                          once when it is idle, else queued until its current turn ends. The \
-                          message is marked as coming from this session."
+                          ide_list_related_sessions), marked as coming from this session. \
+                          `mode`: `queue` (default) types it in at once when that agent is \
+                          idle, else when its current turn ends; `steer` types it in now, \
+                          also during its turn (its agent sees it while working); `interrupt` \
+                          stops its current turn first, then types it in. `steer` and \
+                          `interrupt` ask the user for approval first. Check or cancel \
+                          waiting messages with ide_sent_messages."
                 .into(),
-            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"The session id."},"message":{"type":"string"}},"required":["session","message"],"additionalProperties":false}"#
+            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"The session id."},"message":{"type":"string"},"mode":{"type":"string","enum":["queue","steer","interrupt"],"description":"Default queue."}},"required":["session","message"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_READ_SESSION.into(),
+            description: "Read the recent conversation of a related session (parent, child or \
+                          sibling): user prompts, the agent's answers, tool calls and results \
+                          (long ones shortened). Works for agents whose transcripts ide can read \
+                          (Claude Code)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"The session id."},"limit":{"type":"integer","description":"The last N entries (default 30, at most 200)."}},"required":["session"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_SENT_MESSAGES.into(),
+            description: "Messages this session sent with ide_send_to_session that are still \
+                          waiting to be typed in (`list`, the default), or drop one (`cancel` \
+                          {id})."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["list","cancel"]},"id":{"type":"integer","description":"The message id, for cancel."}},"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {

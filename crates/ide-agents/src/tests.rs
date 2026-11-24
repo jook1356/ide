@@ -891,6 +891,7 @@ fn claude_hooks() {
         instructions: "## ide".into(),
         hooks: HookTargets {
             program: Some(program.clone()),
+            trusted_mcp: Some("ide-bridge".into()),
         },
     });
     let out = assemble(&Claude, &inp, &f.env).unwrap();
@@ -914,6 +915,8 @@ fn claude_hooks() {
         assert_eq!(h["args"], serde_json::json!(["hook", "--provider", "claude", event]));
     }
     assert_eq!(v["hooks"]["PreToolUse"][0].get("matcher"), None, "every tool");
+    // The bridge's tools are pre-allowed: ide asks itself (docs/approvals.md).
+    assert_eq!(v["permissions"]["allow"], serde_json::json!(["mcp__ide-bridge"]));
     assert_eq!(
         v["hooks"]["Notification"][0]["matcher"],
         "permission_prompt|elicitation_dialog"
@@ -1001,6 +1004,7 @@ fn codex_integration() {
     let program = f.bin.join(exe("ide-server"));
     let targets = HookTargets {
         program: Some(program.clone()),
+        trusted_mcp: None,
     };
     assert!(Codex.capabilities().integration && !Claude.capabilities().integration);
     assert_eq!(Claude.integration_status(&acct, &targets), IntegrationStatus::NotNeeded);
@@ -1028,6 +1032,7 @@ fn codex_integration() {
     // Another program (the IDE moved): outdated.
     let moved = HookTargets {
         program: Some(f.t.0.join("elsewhere").join(exe("ide-server"))),
+        trusted_mcp: None,
     };
     assert_eq!(Codex.integration_status(&acct, &moved), IntegrationStatus::Outdated);
     Codex.integration_uninstall(&acct).unwrap();
@@ -1064,4 +1069,56 @@ fn codex_integration() {
     let deny = Codex.hook_reply("PreToolUse", &HookDecision::Deny { reason: "r".into() });
     let v: serde_json::Value = serde_json::from_str(&deny.stdout).unwrap();
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn claude_transcripts() {
+    let lines = [
+        r#"{"type":"summary","summary":"x"}"#,
+        r#"{"type":"user","message":{"role":"user","content":"fix the bug"},"timestamp":"t1"}"#,
+        r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta"}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Looking."},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]},"timestamp":"t2"}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"a.rs"}]}]},"timestamp":"t3"}"#,
+        r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subagent"}]}}"#,
+        "not json",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"timestamp":"t4"}"#,
+    ]
+    .join("\n");
+    let all = crate::claude::parse_transcript(&lines, 100);
+    let got: Vec<(&str, &str, &str)> = all.iter().map(|e| (e.role.as_str(), e.text.as_str(), e.at.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("user", "fix the bug", "t1"),
+            ("assistant", "Looking.", "t2"),
+            ("tool", r#"call Bash {"command":"ls"}"#, "t2"),
+            ("tool", "result: a.rs", "t3"),
+            ("assistant", "Done.", "t4"),
+        ]
+    );
+    let last = crate::claude::parse_transcript(&lines, 2);
+    assert_eq!(last.len(), 2);
+    assert_eq!(last[1].text, "Done.");
+    let long = format!(r#"{{"type":"user","message":{{"role":"user","content":"{}"}}}}"#, "x".repeat(5000));
+    assert!(crate::claude::parse_transcript(&long, 1)[0].text.ends_with("…(shortened)"));
+
+    // Read from the account's projects folder; other CLIs cannot.
+    let t = TempDir::new("transcript");
+    let id = "0c6f3a1e-2b4d-4e5f-8a9b-1c2d3e4f5a6b";
+    let dir = t.0.join("projects").join("C--w");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{id}.jsonl")), &lines).unwrap();
+    let acct = Account {
+        provider: "claude".into(),
+        slug: "a".into(),
+        name: "a".into(),
+        dir: t.0.clone(),
+        created_at: 0,
+    };
+    let r = Claude.transcript(Some(&acct), id, 10).unwrap().unwrap();
+    assert_eq!(r.len(), 5);
+    assert!(Claude.transcript(Some(&acct), "nope", 10).unwrap().is_err());
+    assert!(Shell.transcript(None, id, 10).is_none());
+    assert_eq!(Claude.interrupt_keys(), Some(&b"\x1b"[..]));
+    assert!(Claude.steers() && !Shell.steers());
 }

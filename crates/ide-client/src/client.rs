@@ -949,6 +949,19 @@ impl Client {
         )
     }
 
+    /// `approval.list`: the kept approvals (`docs/approvals.md`).
+    pub async fn approval_list(&self) -> Result<Vec<ide_proto::ApprovalInfo>, ProtoError> {
+        match self.call(Request::ApprovalList).await? {
+            Response::Approvals(a) => Ok(a),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected approvals")),
+        }
+    }
+
+    /// `approval.revoke`: remove a kept approval.
+    pub async fn approval_revoke(&self, id: &str) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::ApprovalRevoke { id: id.into() }).await)
+    }
+
     /// `widget.delete`: remove a registered widget.
     pub async fn widget_delete(&self, widget: &str) -> Result<(), ProtoError> {
         expect_unit(self.call(Request::WidgetDelete { widget: widget.into() }).await)

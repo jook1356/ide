@@ -1,0 +1,66 @@
+# Approvals
+
+Status: implemented (protocol 18). One approval system for the ide-specific things agents (and
+later widgets) ask ide to do: typing into another session, interrupting it, and next terminals,
+browsers, previews (`docs/agent-features-roadmap.md`). Code: `ide-core/src/approval.rs`
+(grants), server `ide-server/src/service/approvals.rs` (`UserCtx::approve`, `approval.*`), app
+`ide-app/src/approvals_ui.rs` (the question, the settings list).
+
+## Why ide asks, not the agent CLI
+
+- **The executor enforces.** A CLI's own permission prompt is skipped in its auto / bypass
+  modes, and an agent (e.g. after a prompt injection) can claim anything. The daemon, which
+  carries the action out, checks the user's grant every time.
+- **Context.** The CLI shows a tool name and JSON; ide shows which session, which terminal,
+  which site, and what is going on there.
+- **Scope.** "This session may steer that one until ide restarts" or "always": the CLI cannot
+  remember ide's targets, and each provider (Claude, Codex, shell) differs.
+- **Callers without a CLI.** Widget pages call `ide_*` tools too (`docs/widgets.md`).
+- **Visibility.** A question inside a background session's terminal goes unnoticed; ide's
+  dialog is shown over the window wherever the user is.
+
+To avoid asking twice, the CLI pre-allows the bridge's tools where it can (Claude Code:
+`permissions.allow: ["mcp__ide-bridge"]` in the session's `--settings` file). The CLI keeps
+asking for its own tools (shell, edits) as before.
+
+## Tiers
+
+| Tier | Examples | Approval |
+|---|---|---|
+| Read, own session or its family | `ide_session`, `ide_list_related_sessions`, `ide_read_session`, `ide_sent_messages` | none |
+| Act within the family, as before | `ide_send_to_session` (queued), create / merge / sync children, write access | none |
+| Act on another session's running turn, or outside ide | `ide_send_to_session` `steer` / `interrupt`; later terminal input, browser control | **asked** |
+
+Adding a feature means picking its tier and, for asked ones, a capability name and the target
+key.
+
+## Grants
+
+- Key: `(capability, requester session, target)`, e.g. `("session.interrupt", child-1,
+  parent)`. A capability is a dotted name (`session.steer`, `session.interrupt`; later
+  `terminal.input`, `browser.act`); the target is what it acts on (a session id; later a
+  terminal id, a site origin).
+- Answers: 거절 (nothing kept, the agent is told), 이번만 (nothing kept), 이 세션 동안 (kept in
+  memory until the daemon restarts or either session is deleted), 항상 (kept in
+  `<data>/approvals.json`).
+- Settings -> 권한 lists every kept grant (requester, what, target, how long) with 취소.
+- Deleting a session removes the grants it requested or that target it.
+
+## Asking
+
+- `UserCtx::approve(requester, capability, target, detail)` (async): a kept grant answers at
+  once; otherwise the daemon asks the connected apps (`Notify::AgentRequest`, tool
+  `ide.approval`, args `{capability, requester, requester_title, target, target_title,
+  detail}`) and waits up to 5 minutes. The app answers `once` / `session` / `always`, or an
+  error (refused, closed, timed out). No app connected: refused at once ("no ide window is
+  open").
+- The app shows one question at a time (a modal); questions arriving meanwhile wait in a queue.
+  Closing the dialog refuses.
+- Every answer is audited (`approval <capability> <requester> -> <target>: <answer>`).
+
+## Protocol (18)
+
+| Request | Payload |
+|---|---|
+| `approval.list` | -> `Approvals([ApprovalInfo {id, capability, requester, requester_title, target, target_title, always, created}])` |
+| `approval.revoke` | `{id}` -> `Unit` |
