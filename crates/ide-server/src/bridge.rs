@@ -43,6 +43,9 @@ pub use ide_proto::AGENT_TOOL_SHOW_MESSAGE as TOOL_SHOW_MESSAGE;
 /// `ide_widget`: the session's widgets (`docs/widgets.md`).
 pub use ide_proto::AGENT_TOOL_WIDGET as TOOL_WIDGET;
 
+/// `ide_preview`: show a page, Markdown, a file or a site in a tab (`docs/previews.md`).
+pub use ide_proto::AGENT_TOOL_PREVIEW as TOOL_PREVIEW;
+
 /// Session family tools (`docs/session-family.md`), answered by the daemon.
 pub const TOOL_LIST_RELATED: &str = "ide_list_related_sessions";
 pub const TOOL_CREATE_CHILD: &str = "ide_create_child_session";
@@ -83,7 +86,9 @@ IDE: `ide_session` describes this session (folder, repositories, branches, base 
 `ide_show_message` shows a short note to the user in the IDE. Child sessions \
 (`ide_create_child_session`) take parallel work; talk to related sessions with \
 `ide_send_to_session`. To show the user something richer than text (a board, a form, a \
-chart, a small tool), build a widget: call `ide_widget` with action `guide` first.";
+chart, a small tool), build a widget: call `ide_widget` with action `guide` first. To show \
+the user a page, a Markdown document, an image or a site, use `ide_preview` (action `guide` \
+explains it).";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -535,6 +540,19 @@ pub fn tools() -> Vec<AgentTool> {
                           (open again to reload it after registering changes)."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["guide","list","register","unregister","open","close"]},"widget":{"type":"string","description":"The widget id (its folder name), for register / unregister / open / close."}},"required":["action"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_PREVIEW.into(),
+            description: "Show the user something in a tab next to your terminal (no approval \
+                          needed): `kind` `html` / `markdown` with `content` (a page you write, \
+                          Markdown rendered), `file` with `path` (an HTML page, Markdown file or \
+                          image inside this session's folder), `url` with `url` (a web page, \
+                          e.g. your dev server). The same `id` (default: from the title) \
+                          replaces the preview and reloads its tab. `guide`: details; `list`; \
+                          `close` {id}."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["show","guide","list","close"],"description":"Default show."},"title":{"type":"string","description":"The tab's title (show)."},"kind":{"type":"string","enum":["html","markdown","file","url"]},"content":{"type":"string","description":"HTML or Markdown text (kind html / markdown)."},"path":{"type":"string","description":"A file inside the session folder, relative to it or absolute (kind file)."},"url":{"type":"string","description":"An http(s) address (kind url)."},"id":{"type":"string","description":"1-40 of a-z, 0-9 and -; the same id replaces the preview."}},"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {

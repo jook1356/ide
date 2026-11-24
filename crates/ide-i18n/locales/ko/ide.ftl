@@ -1248,3 +1248,8 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+
+## Previews (docs/previews.md)
+preview-tip = 세션의 에이전트가 보여 주는 미리보기예요
+preview-devtools = 개발자 도구
+err-preview = 미리보기: { $detail }

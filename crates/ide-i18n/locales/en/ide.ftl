@@ -1469,3 +1469,8 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+
+## Previews (docs/previews.md)
+preview-tip = A preview from the session's agent
+preview-devtools = Developer tools
+err-preview = Preview: { $detail }

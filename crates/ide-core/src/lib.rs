@@ -44,6 +44,7 @@ pub mod launch;
 pub mod migrate;
 pub mod ops;
 pub mod paths;
+pub mod preview;
 pub mod prompts;
 pub mod registry;
 pub mod repo;

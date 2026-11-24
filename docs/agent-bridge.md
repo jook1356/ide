@@ -3,7 +3,7 @@
 Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
 tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
 hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
-workspace's write lease, task queue, terminals, browser, previews) come next; widgets (Desk's mods) are in `docs/widgets.md`.
+workspace's write lease, task queue, terminals, browser) come next; widgets (Desk's mods) are in `docs/widgets.md`, previews in `docs/previews.md`.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why
@@ -183,6 +183,7 @@ start go to stderr.
 | `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_sent_messages`, `ide_read_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon (the user's approval of `steer` / `interrupt` through the app: `docs/approvals.md`) | session families: `docs/session-family.md` |
 | `ide_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
+| `ide_preview` | daemon (checks and stores; `guide`, `list`), app (opens, reloads or closes the tab) | previews: `docs/previews.md` |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.
@@ -203,4 +204,4 @@ Plan for the features on top of the bridge: `docs/agent-features-roadmap.md`.
 1. Codex hooks (see Hooks); the write lease of shared workspaces on `agent.hook`.
 2. Pushing to the agent: queued prompts / steering through the PTY (`session.send_prompt`).
 3. Feature tools on this transport: related sessions (create child, send, read), run_task,
-   terminals, browser (CEF), previews (widgets: done, `docs/widgets.md`).
+   terminals, browser (CEF); widgets (`docs/widgets.md`) and previews (`docs/previews.md`) are done.

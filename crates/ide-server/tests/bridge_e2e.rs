@@ -278,6 +278,7 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_request_write_access",
             "ide_release_write_access",
             "ide_widget",
+            "ide_preview",
             "ide_sync_from_parent",
         ]
     );

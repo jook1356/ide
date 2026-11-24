@@ -4,7 +4,7 @@
 //! older app next to a newer server fails the call instead of leaving the agent waiting.
 
 use iced::Task;
-use ide_client::{AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, APPROVAL_REQUEST};
+use ide_client::{AGENT_TOOL_PREVIEW, AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, APPROVAL_REQUEST};
 
 use crate::app::{App, Message};
 
@@ -24,6 +24,10 @@ impl App {
         if tool == AGENT_TOOL_WIDGET {
             // Answered when done (after fetching the widget's info).
             return self.agent_widget(request, session, &args);
+        }
+        if tool == AGENT_TOOL_PREVIEW {
+            // Opens or reloads the preview tab (`previews_ui.rs`).
+            return self.agent_preview(request, session, &args);
         }
         let result: Result<String, String> = match tool.as_str() {
             AGENT_TOOL_SHOW_MESSAGE => {
