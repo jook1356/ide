@@ -1486,3 +1486,9 @@ err-preview = Preview: { $detail }
 ## Terminals (agent terminal tools: approvals_ui.rs)
 approval-terminal-input = The agent of “{ $who }” wants to type into the terminal “{ $whom }”.
 approval-cap-terminal-input = type into a terminal
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = The agent of “{ $who }” wants to use the site { $whom } in the ide browser (open, click, type, run scripts).
+approval-browser-read = The agent of “{ $who }” wants to read the site { $whom } in the ide browser (its text, console or a screenshot).
+approval-cap-browser-act = use the site in the browser
+approval-cap-browser-read = read the site in the browser

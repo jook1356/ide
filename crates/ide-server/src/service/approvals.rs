@@ -17,11 +17,15 @@ pub(crate) const CAP_STEER: &str = "session.steer";
 pub(crate) const CAP_INTERRUPT: &str = "session.interrupt";
 
 impl UserCtx {
+    /// A target's name: a session's title; a site (browser control) names itself.
     fn title_of(&self, session: &str) -> String {
         match self.resolve_session(session) {
             Ok(s) => s.title,
-            // A terminal (`terminal.input`).
-            Err(_) => self.uterm_label(session).unwrap_or_default(),
+            // A terminal (`terminal.input`, id `<session>:t<n>`), else a site (browser control).
+            Err(_) => self
+                .uterm_label(session)
+                .or_else(|| session.contains(':').then(|| session.to_owned()))
+                .unwrap_or_default(),
         }
     }
 

@@ -1265,3 +1265,9 @@ err-preview = 미리보기: { $detail }
 ## Terminals (agent terminal tools: approvals_ui.rs)
 approval-terminal-input = “{ $who }” 세션의 에이전트가 “{ $whom }” 터미널에 입력하려고 해요.
 approval-cap-terminal-input = 터미널에 입력
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 조작하려고 해요(열기, 클릭, 입력, 스크립트 실행).
+approval-browser-read = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 읽으려고 해요(글, 콘솔, 스크린샷).
+approval-cap-browser-act = 브라우저에서 사이트 조작
+approval-cap-browser-read = 브라우저에서 사이트 읽기

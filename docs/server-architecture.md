@@ -269,6 +269,7 @@ Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify
 | Previews | `preview.file{session, preview, path}` -> `WidgetFile`; bridge tool `ide_preview`. See `docs/previews.md`. |
 | Approvals (protocol 18) | `approval.list` / `revoke`; the daemon asks apps with `Notify::AgentRequest` `ide.approval`. See `docs/approvals.md`. |
 | Auto answers (protocol 19) | `ProviderInfo.answers`, `provider.set_auto_answer`. See `docs/auto-answers.md`. |
+| Browser control (protocol 19) | `AgentToolResult.image {data, mime_type}` (optional); the daemon asks apps `Notify::AgentRequest` `ide.browser.site` and the `ide_browser_*` tools. See `docs/browser-control.md`. |
 | Account integration (protocol 15) | `account.integration{provider, slug, action}` -> `Integration{state, approve_with}`; `ProviderCaps.integration`. See `docs/agent-bridge.md`. |
 | Session families (protocol 14) | `session.create_child` / `merge_child` / `sync_parent`, `SessionInfo.parent` / `.shared`; bridge tools `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent`. See `docs/session-family.md`. |
 | Agent hooks (protocol 13) | `agent.hook{event}` from `ide-server hook` -> `AgentHookDecision`; `SessionInfo.activity` / `Notify::Activity` (Unknown / Idle / Working / NeedsInput). See `docs/agent-bridge.md`. |

@@ -2102,6 +2102,7 @@ dependencies = [
  "cef",
  "iced",
  "png",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",

@@ -94,6 +94,11 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 
 ### 2. Needs checking on a Mac (code exists, untested)
 
+- [ ] **Browser control (`ide-web/src/devtools.rs`, `docs/browser-control.md`).** Assumption:
+  CEF's DevTools messages, `post_task(UI)` and `Input.dispatch*Event` behave as on Windows, and
+  `Page.captureScreenshot` of a hidden OSR view works after `was_hidden(false)`. Check:
+  `IDE_APP_SCRIPT_ONLY=browser` (all `browser call` lines pass; also on Linux).
+
 - [ ] **Dock attention for agent notices** (`ide-app/src/notice_view.rs` `attention`):
   `window::request_user_attention(.., Informational)`. Assumption: winit makes it one Dock icon
   bounce (`NSInformationalRequest`). Check: switch to another app, let an agent finish, and watch
@@ -187,6 +192,7 @@ look at.
 
 - 2026-11-24: previews: CEF custom scheme `ide-preview://` next to `ide-widget://` (same list in
   `main`); checked on Windows only.
+- 2026-11-24: browser control by agents (`ide-web` `devtools.rs`: CDP through `send_dev_tools_message`, `post_task` to CEF's UI thread; `browser_agent.rs`): no OS-specific code, checked on Windows only.
 - 2026-11-23: `old_server.rs` ends an incompatible daemon by pid; `kill -TERM -<pid>` off Windows (unbuilt).
 - 2026-11-23: widgets: CEF custom scheme `ide-widget://` (`scheme.rs`), registered in every
   process; checked on Windows only.

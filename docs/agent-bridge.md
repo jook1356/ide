@@ -187,6 +187,7 @@ start go to stderr.
 | `ide_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
 | `ide_preview` | daemon (checks and stores; `guide`, `list`), app (opens, reloads or closes the tab) | previews: `docs/previews.md` |
 | `ide_terminal_list`, `ide_terminal_read`, `ide_terminal_input` | daemon (input: the user's approval through the app) | the user's terminals of this session (related sessions': read only): `docs/terminals.md` |
+| `ide_browser_list`, `ide_browser_open`, `ide_browser_read`, `ide_browser_act`, `ide_browser_screenshot` | app (CEF pages through DevTools), after the daemon's per-site approval (`browser.act` / `browser.read`) | browser control: `docs/browser-control.md`; screenshots come back as MCP image content (`AgentToolResult.image`) |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.

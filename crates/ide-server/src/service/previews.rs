@@ -19,6 +19,7 @@ fn ok(v: serde_json::Value) -> AgentToolResult {
     AgentToolResult {
         text: serde_json::to_string_pretty(&v).expect("json"),
         is_error: false,
+        image: None,
     }
 }
 
@@ -26,6 +27,7 @@ fn err(t: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: t.into(),
         is_error: true,
+        image: None,
     }
 }
 
@@ -95,6 +97,7 @@ impl UserCtx {
             "guide" => return Ok(AgentToolResult {
                 text: GUIDE.to_owned(),
                 is_error: false,
+                image: None,
             }),
             "list" => {
                 let list: Vec<serde_json::Value> = preview::list(&self.paths, s.id.as_str())

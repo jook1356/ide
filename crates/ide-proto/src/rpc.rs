@@ -165,11 +165,24 @@ pub struct AgentTool {
     pub input_schema: String,
 }
 
-/// What an agent tool call returned (MCP `tools/call`): text, and whether it failed.
+/// What an agent tool call returned (MCP `tools/call`): text, and whether it failed; an image
+/// after the text (browser screenshots, `docs/browser-control.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentToolResult {
     pub text: String,
     pub is_error: bool,
+    /// Absent from older peers: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<AgentImage>,
+}
+
+/// An image of an agent tool result (MCP `{"type": "image", "data", "mimeType"}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentImage {
+    /// Base64 of the image file.
+    pub data: String,
+    /// e.g. `image/png`.
+    pub mime_type: String,
 }
 
 /// Server answer to [`Hello`] (as `Response::Welcome`).

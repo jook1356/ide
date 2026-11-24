@@ -16,6 +16,7 @@
 mod app;
 mod branch_badge;
 mod browser;
+mod browser_agent;
 mod changes_actions;
 mod changes_view;
 mod composer;

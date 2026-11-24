@@ -1,8 +1,8 @@
 # 에이전트 기능 로드맵 (브리지 위에 올릴 것)
 
-상태: 위젯(5), 대화 읽기 + 프롬프트 전달(3), 터미널 조회·입력(1), 미리보기(4)는 구현됨(`docs/widgets.md`,
-`docs/session-family.md`, `docs/terminals.md`, `docs/previews.md`), 브라우저 조작(2)만 **계획만**. 승인 체계는 공통으로
-구현됨(`docs/approvals.md`): 새 기능은 위험 등급과 capability만 정하면 돼요. 기반(에이전트 브리지, 훅, 화면 판독,
+상태: 다섯 기능 모두 구현됨: 터미널 조회·입력(1, `docs/terminals.md`), 브라우저 조작(2, `docs/browser-control.md`),
+대화 읽기 + 프롬프트 전달(3, `docs/session-family.md`), 미리보기(4, `docs/previews.md`), 위젯(5, `docs/widgets.md`).
+승인 체계는 공통(`docs/approvals.md`): 새 기능은 위험 등급과 capability만 정하면 돼요. 기반(에이전트 브리지, 훅, 화면 판독,
 세션 가족)은 끝났으니, 이 문서의 방향대로 하나씩 올리면 돼요. 먼저 `docs/agent-bridge.md`와
 `docs/session-family.md`를 읽으세요.
 
@@ -47,7 +47,9 @@ Desk: `terminal_inspect`(사용자 터미널 읽기), `terminal_input`(텍스트
   사용자 승인(세션·터미널 단위로 기억) — 앱이 답하는 확인 단계를 앞에 두기.
 - **주의**: 실행 중인 명령에 Ctrl+C를 보내는 것도 입력이에요. 작업 대기열(아래 없음, 별도)과는 별개.
 
-## 2. 브라우저(CEF) 조작
+## 2. 브라우저(CEF) 조작 — 구현됨
+
+구현: `docs/browser-control.md`(도구 다섯 개, 사이트별 `browser.act` / `browser.read` 승인, CDP, 스크린샷 이미지 결과). 아래는 처음 계획이에요.
 
 Desk: `browser_inspect`(목록·콘솔·컴포넌트·선택), `browser_act`(이동·클릭·입력·키·스크롤·대기·
 스크린샷·강조·선택·evaluate·cdp·녹화), `browser_diagnose`. 사이트마다 사용자 승인.
@@ -120,5 +122,5 @@ data와 탭 배치를 정해요. "모드"는 CLI의 plan mode 등과, "mod"는 C
    `transcript_path`를 주니 작업이 작아요.
 2. ~~터미널 조회·입력~~ — 구현됨(`docs/terminals.md`).
 3. ~~미리보기~~ — 구현됨(HTML·마크다운·파일·URL).
-4. 브라우저 조작 — 이미지 결과, 사이트 승인, DevTools 연동이 필요해 커요.
+4. ~~브라우저 조작~~ — 구현됨(`docs/browser-control.md`).
 5. ~~모드~~ 위젯 — 구현됨. 미리보기·브라우저가 이 스킴(`ide_web::set_scheme_handler`)을 재사용.

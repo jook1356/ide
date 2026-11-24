@@ -29,7 +29,8 @@ asking for its own tools (shell, edits) as before.
 |---|---|---|
 | Read, own session or its family | `ide_session`, `ide_list_related_sessions`, `ide_read_session`, `ide_sent_messages`, `ide_terminal_list`, `ide_terminal_read` | none |
 | Act within the family, as before | `ide_send_to_session` (queued), create / merge / sync children, write access | none |
-| Act on another session's running turn, or outside ide | `ide_send_to_session` `steer` / `interrupt`; `ide_terminal_input` (`terminal.input`, `docs/terminals.md`); later browser control | **asked** |
+| Act on another session's running turn, or outside ide | `ide_send_to_session` `steer` / `interrupt`; `ide_terminal_input` (`terminal.input`, `docs/terminals.md`) | **asked** |
+| Use a site in ide's browser | `ide_browser_open` / `read` / `act` / `screenshot` (`browser.act` / `browser.read`, target = the site's origin; an act grant also allows reading): `docs/browser-control.md` | **asked** |
 
 Adding a feature means picking its tier and, for asked ones, a capability name and the target
 key.

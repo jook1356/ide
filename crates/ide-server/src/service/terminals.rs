@@ -24,6 +24,7 @@ fn ok(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: false,
+        image: None,
     }
 }
 
@@ -31,6 +32,7 @@ fn err(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: true,
+        image: None,
     }
 }
 

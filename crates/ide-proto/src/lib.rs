@@ -7,6 +7,7 @@
 pub mod agents;
 #[doc(hidden)]
 pub mod bin;
+pub mod browser;
 pub mod error;
 pub mod files;
 pub mod frame;
