@@ -252,7 +252,7 @@ async fn families() {
     ctx.agent_hook(&p.id, ide_proto::AgentHookEvent::Stopped);
     let (bad, _) = tool(&mux_s, &mut rx_s, 22, "ide_request_write_access", serde_json::json!({})).await;
     assert!(!bad);
-    ctx.agent_hook(&s.id, ide_proto::AgentHookEvent::PromptSubmitted);
+    ctx.agent_hook(&s.id, ide_proto::AgentHookEvent::PromptSubmitted { prompt: None });
     let (bad, v) = tool(&mux, &mut rx, 23, "ide_request_write_access", serde_json::json!({})).await;
     assert!(bad && v.as_str().unwrap().contains("is working"), "{v}");
     ctx.agent_hook(&s.id, ide_proto::AgentHookEvent::Stopped);
@@ -312,7 +312,7 @@ async fn send_modes_and_approvals() {
             }
         }
     });
-    let busy = |id: &str| ctx.agent_hook(id, AgentHookEvent::PromptSubmitted);
+    let busy = |id: &str| ctx.agent_hook(id, AgentHookEvent::PromptSubmitted { prompt: None });
     let idle = |id: &str| ctx.agent_hook(id, AgentHookEvent::Stopped);
 
     // Reading: a shell keeps no conversation; only related sessions.

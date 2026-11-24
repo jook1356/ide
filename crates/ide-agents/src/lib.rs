@@ -45,6 +45,7 @@ mod prompt;
 mod registry;
 mod shell;
 mod skills;
+pub mod title;
 
 use std::path::{Path, PathBuf};
 
@@ -260,17 +261,38 @@ pub trait AgentProvider: Send + Sync {
         None
     }
     /// Continue the stored conversation `id` (from [`AgentProvider::new_conversation`] or a
-    /// `SessionStart` hook): add the CLI's resume flags and return `true`, or `false` when it
-    /// cannot be resumed (e.g. the CLI kept no transcript of it); then the launch starts a
-    /// new conversation. `acct` is the account with its [`AgentProvider::account_home`].
-    /// Default: `false`.
+    /// `SessionStart` hook): add the CLI's resume flags and return the id of the conversation
+    /// the launch continues (stored on the session; a provider may resolve a placeholder it
+    /// stored itself into the CLI's real id), or `None` when it cannot be resumed (e.g. the
+    /// CLI kept no transcript of it); then the launch starts a new conversation. `acct` is the
+    /// account with its [`AgentProvider::account_home`]. Default: `None`.
     fn resume_conversation(
         &self,
         _plan: &mut LaunchPlan,
         _id: &str,
         _acct: Option<&AccountDir>,
-    ) -> bool {
+    ) -> Option<String> {
+        None
+    }
+
+    /// A session title from the user's first prompt (`docs/session-titles.md`), made at once
+    /// without a model call. `None`: not a request to name the session by (e.g. one of the
+    /// CLI's own commands); the next prompt is tried. Default: [`title::from_prompt`].
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        title::from_prompt(prompt, &[])
+    }
+
+    /// Whether the CLI names its conversations itself (read with
+    /// [`AgentProvider::conversation_title`]); the prompt title is then provisional. Default:
+    /// no.
+    fn names_conversations(&self) -> bool {
         false
+    }
+
+    /// The CLI's own title of conversation `id` (the stored [`Session::conversation`]), once it
+    /// has one. Default: `None`.
+    fn conversation_title(&self, _acct: Option<&AccountDir>, _id: &str) -> Option<String> {
+        None
     }
 
     /// The last `limit` entries of the stored conversation `id` (`ide_read_session`,
@@ -475,6 +497,9 @@ pub struct SessionInput<'a> {
     pub session_id: &'a str,
     /// Session title (session name for CLIs that support one).
     pub title: &'a str,
+    /// The title may still be replaced automatically ([`ide_core::AutoTitle`] not `Off`): a
+    /// CLI that names its conversations itself is not given it as a fixed name.
+    pub auto_title: bool,
     /// Where the session runs (cwd, repos, scratch dir).
     pub ctx: SessionContext,
     /// The account, if the session uses one.
@@ -527,6 +552,7 @@ impl<'a> SessionInput<'a> {
         SessionInput {
             session_id: session.id.as_str(),
             title: &session.title,
+            auto_title: !session.auto_title.is_off(),
             ctx: SessionContext {
                 mode: session.mode,
                 root: session.root.clone(),
@@ -610,12 +636,13 @@ pub fn assemble(
     provider.begin(&mut plan, account.as_ref());
     let mut resumed = false;
     if provider.capabilities().resume {
-        plan.conversation = match input.conversation {
-            Some(id) if provider.resume_conversation(&mut plan, id, account.as_ref()) => {
-                resumed = true;
-                Some(id.to_owned())
-            }
-            _ => provider.new_conversation(&mut plan),
+        let continued = input
+            .conversation
+            .and_then(|id| provider.resume_conversation(&mut plan, id, account.as_ref()));
+        resumed = continued.is_some();
+        plan.conversation = match continued {
+            Some(id) => Some(id),
+            None => provider.new_conversation(&mut plan),
         };
     }
     let cfg = input.configuration;
