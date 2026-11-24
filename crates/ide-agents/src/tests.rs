@@ -110,6 +110,7 @@ fn input<'a>(
     SessionInput {
         session_id: "s1",
         title: "My session",
+        auto_title: false,
         ctx: SessionContext {
             mode: SessionMode::OriginalRepo,
             root: f.cwd.clone(),
@@ -122,6 +123,7 @@ fn input<'a>(
         configuration: cfg,
         conversation: None,
         bridge: None,
+        first_prompt: None,
     }
 }
 
@@ -310,10 +312,129 @@ fn claude_resume() {
     }
     assert!(!out.spec.env_remove.iter().any(|r| r == "CLAUDE_CONFIG_DIR"));
 
-    // Providers without resume get neither flags nor an id.
+    // Other providers keep their env.
     let out = assemble(&Codex, &inp, &f.env).unwrap();
-    assert_eq!(out.conversation, None);
     assert!(out.spec.env_remove.is_empty());
+}
+
+/// Codex names its thread itself: a placeholder with the start time is stored, resolved to
+/// the rollout Codex wrote in that cwd since; a stored thread id is resumed while its rollout
+/// exists; untrusted ids never become arguments.
+#[test]
+fn codex_resume() {
+    let f = fixture("agents-codex-resume");
+    let acct = account(&f, "codex");
+    let cfg = Configuration::empty("default", "default");
+    let mut inp = input(&f, Some(&acct), &cfg);
+    let no_resume = |a: &Assembled| !a.spec.args.iter().any(|x| x == "resume");
+
+    // Fresh: a placeholder, no flag.
+    let fresh = assemble(&Codex, &inp, &f.env).unwrap();
+    let marker = fresh.conversation.clone().unwrap();
+    assert!(marker.starts_with("started:"), "{marker}");
+    assert!(no_resume(&fresh));
+
+    // No rollout yet (no prompt was sent): a fresh start again.
+    inp.conversation = Some(&marker);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert!(no_resume(&out));
+    assert!(out.conversation.unwrap().starts_with("started:"));
+
+    // Rollouts: another folder's and this cwd's, written after the start.
+    let day = acct.dir.join("sessions").join("2026").join("11").join("24");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = |id: &str, cwd: &Path| {
+        let meta = serde_json::json!({
+            "timestamp": "2026-11-24T10:46:08.624Z",
+            "type": "session_meta",
+            "payload": {"id": id, "session_id": id, "cwd": cwd.display().to_string()},
+        });
+        std::fs::write(day.join(format!("rollout-2026-11-24T19-45-50-{id}.jsonl")), format!("{meta}\n")).unwrap();
+    };
+    let other = "01a20d29-7429-7433-899f-ec62ad9785e0";
+    let mine = "01a20d29-7429-7433-899f-ec62ad9785ed";
+    rollout(other, &f.t.0.join("elsewhere"));
+    rollout(mine, &f.cwd);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation.as_deref(), Some(mine), "resolved to the real id");
+    assert_eq!(out.spec.args[..2], ["resume".to_owned(), mine.to_owned()], "subcommand first");
+    assert!(out.spec.args.contains(&"--no-daemon".to_owned()));
+
+    // A placeholder from after the rollout was written: not this conversation.
+    let hour_ahead = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 3_600_000;
+    let later = format!("started:{hour_ahead}");
+    inp.conversation = Some(&later);
+    assert!(no_resume(&assemble(&Codex, &inp, &f.env).unwrap()));
+
+    // A stored thread id (the SessionStart hook): resumed while Codex keeps its rollout.
+    inp.conversation = Some(mine);
+    let out = assemble(&Codex, &inp, &f.env).unwrap();
+    assert_eq!(out.conversation.as_deref(), Some(mine));
+    assert_eq!(out.spec.args[..2], ["resume".to_owned(), mine.to_owned()]);
+    let gone = "01a20d29-0000-7433-899f-ec62ad9785ed";
+    inp.conversation = Some(gone);
+    assert!(no_resume(&assemble(&Codex, &inp, &f.env).unwrap()));
+    for bad in ["../x", "--help", "started:x", ""] {
+        inp.conversation = Some(bad);
+        let out = assemble(&Codex, &inp, &f.env).unwrap();
+        assert!(no_resume(&out) && !out.spec.args.iter().any(|a| a == bad), "{bad}");
+    }
+
+    // The hook reports the thread id (only a UUID is taken).
+    let p = |v: serde_json::Value| Codex.parse_hook("SessionStart", v.to_string().as_bytes());
+    assert_eq!(
+        p(serde_json::json!({"session_id": mine, "source": "startup"})),
+        Some(HookEvent::SessionStart { conversation: Some(mine.into()) })
+    );
+    assert_eq!(
+        p(serde_json::json!({"session_id": "../../x"})),
+        Some(HookEvent::SessionStart { conversation: None })
+    );
+}
+
+/// A child's first prompt goes last on the command line, after `--` (the start dialogs can no
+/// longer take it, as typed text could: seen 2026-11-24); only for a new conversation.
+#[test]
+fn first_prompt_on_the_command_line() {
+    let f = fixture("agents-first-prompt");
+    let acct = account(&f, "claude");
+    let cfg = Configuration::empty("default", "default");
+    let task = "  --help me\r\nfix \x1b[31mit\x07  ";
+    let inp = input(&f, Some(&acct), &cfg).with_first_prompt(Some(task));
+    for p in [&Claude as &dyn AgentProvider, &Codex] {
+        let out = assemble(p, &inp, &f.env).unwrap();
+        assert!(out.prompt_in_args, "{}", p.id());
+        let n = out.spec.args.len();
+        assert_eq!(out.spec.args[n - 2..], ["--", "--help me\nfix [31mit"], "{}: cleaned, last", p.id());
+    }
+    // None given, empty, or too long: nothing on the command line.
+    let none = input(&f, Some(&acct), &cfg);
+    let blank = input(&f, Some(&acct), &cfg).with_first_prompt(Some(" \r\n"));
+    let long = "x".repeat(crate::MAX_ARG_PROMPT + 1);
+    let too_long = input(&f, Some(&acct), &cfg).with_first_prompt(Some(&long));
+    for i in [&none, &blank, &too_long] {
+        let out = assemble(&Claude, i, &f.env).unwrap();
+        assert!(!out.prompt_in_args);
+        assert!(!out.spec.args.contains(&"--".to_owned()));
+    }
+    // Resuming a conversation: never again.
+    let fresh = assemble(&Claude, &none, &f.env).unwrap();
+    let id = fresh.conversation.unwrap();
+    let project = acct.dir.join("projects").join("C--some-cwd");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{id}.jsonl")), "{}\n").unwrap();
+    let mut resume = input(&f, Some(&acct), &cfg).with_first_prompt(Some("again"));
+    resume.conversation = Some(&id);
+    let out = assemble(&Claude, &resume, &f.env).unwrap();
+    assert!(out.spec.args.contains(&"--resume".to_owned()));
+    assert!(!out.prompt_in_args && !out.spec.args.contains(&"again".to_owned()));
+    // Providers that take none (a shell): typed in later.
+    let out = assemble(&crate::Shell, &inp, &f.env).unwrap();
+    assert!(!out.prompt_in_args);
 }
 
 #[test]
@@ -384,6 +505,11 @@ fn claude_spec() {
     let out = assemble(&Claude, &input(&f, None, &empty), &f.env).unwrap();
     assert_eq!(without_session_id(&out), ["-n", "My session"]);
     assert_eq!(env_of(&out.spec, "CLAUDE_CONFIG_DIR"), None);
+    // An automatic title is no fixed name: Claude Code names the conversation itself.
+    let mut auto = input(&f, None, &empty);
+    auto.auto_title = true;
+    let out = assemble(&Claude, &auto, &f.env).unwrap();
+    assert!(without_session_id(&out).is_empty(), "{:?}", out.spec.args);
     assert!(!scratch.exists(), "stale generated files are removed");
 }
 
@@ -936,7 +1062,8 @@ fn claude_hooks() {
 
     let p = |e: &str, j: serde_json::Value| Claude.parse_hook(e, j.to_string().as_bytes());
     assert_eq!(p("Stop", serde_json::json!({})), Some(HookEvent::Stopped));
-    assert_eq!(p("UserPromptSubmit", serde_json::json!({"prompt": "x"})), Some(HookEvent::PromptSubmitted));
+    assert_eq!(p("UserPromptSubmit", serde_json::json!({"prompt": "x"})), Some(HookEvent::PromptSubmitted { prompt: Some("x".into()) }));
+    assert_eq!(p("UserPromptSubmit", serde_json::json!({})), Some(HookEvent::PromptSubmitted { prompt: None }));
     assert_eq!(
         p("Notification", serde_json::json!({"notification_type": "permission_prompt"})),
         Some(HookEvent::NeedsInput { permission: true })
@@ -1094,6 +1221,67 @@ fn codex_integration() {
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
 }
 
+/// Background tasks still running, from a transcript shaped like Claude Code 2.1.331's.
+#[test]
+fn claude_background_tasks() {
+    let note = |id: &str, status: &str| {
+        format!("<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>{status}</status>\n<summary>x</summary>\n</task-notification>")
+    };
+    let enqueue = |id: &str, status: &str| {
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": note(id, status)}).to_string()
+    };
+    let lines = [
+        // Two background shells (one moved there at its timeout) and a background agent.
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b2","timedOutAfterMs":120000}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"plain foreground"}}"#.to_owned(),
+        // A subagent's own background shell is not the main conversation's.
+        r#"{"type":"user","isSidechain":true,"toolUseResult":{"backgroundTaskId":"s1"}}"#.to_owned(),
+        // Text that only mentions the markers (a command, its output) changes nothing.
+        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "input": {"command": note("b1", "completed")}}]}}).to_string(),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": note("b1", "completed")}]}, "toolUseResult": {"stdout": note("b1", "completed")}}).to_string(),
+    ]
+    .join("\n");
+    let run = crate::claude::background_running;
+    assert_eq!(run(&lines), ["b1", "b2", "a1"]);
+
+    // b1 ends (queued the moment it ends), a1 fails, b2 is stopped with TaskStop.
+    let ended = [
+        lines.clone(),
+        enqueue("b1", "completed"),
+        serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": note("a1", "failed"), "commandMode": "task-notification"}}).to_string(),
+    ]
+    .join("\n");
+    assert_eq!(run(&ended), ["b2"]);
+    let stopped = format!(
+        "{ended}\n{}",
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"message":"Successfully stopped task: b2","task_id":"b2","task_type":"local_bash"}}"#
+    );
+    assert!(run(&stopped).is_empty());
+    // Older CLIs delivered the notification as a user message; "running" is no end.
+    let older = format!(
+        "{lines}\n{}\n{}",
+        serde_json::json!({"type": "user", "message": {"content": note("b2", "completed")}}),
+        enqueue("a1", "running"),
+    );
+    assert_eq!(run(&older), ["b1", "a1"]);
+
+    // The Stop hook reads the transcript it is given; without one it says nothing about tasks.
+    let t = TempDir::new("bgtasks");
+    let file = t.0.join("t.jsonl");
+    std::fs::write(&file, &lines).unwrap();
+    let stop = |j: serde_json::Value| Claude.parse_hook("Stop", j.to_string().as_bytes());
+    assert_eq!(
+        stop(serde_json::json!({"transcript_path": file})),
+        Some(HookEvent::StoppedRunning {
+            background: vec!["b1".into(), "b2".into(), "a1".into()]
+        })
+    );
+    assert_eq!(stop(serde_json::json!({"transcript_path": t.0.join("gone.jsonl")})), Some(HookEvent::Stopped));
+    assert_eq!(stop(serde_json::json!({"transcript_path": ""})), Some(HookEvent::Stopped));
+}
+
 #[test]
 fn claude_transcripts() {
     let lines = [
@@ -1164,4 +1352,74 @@ fn codex_windows_sandbox_readiness() {
     assert!(ready(Some(&acct), true), "the user's other choice");
     cfg("sandbox_mode = \"read-only\"\n");
     assert!(ready(Some(&acct), true), "the user's own sandbox_mode");
+}
+
+#[test]
+fn session_titles() {
+    // Default: the prompt's first line; CLI commands name nothing (Claude, Codex).
+    let decl = DeclarativeProvider::new(
+        DeclarativeSpec::parse("id = \"x\"\nname = \"X\"\nprogram = \"x\"\n").unwrap(),
+    );
+    assert_eq!(decl.prompt_title("/clear").as_deref(), Some("/clear"));
+    assert!(!decl.names_conversations());
+    assert_eq!(decl.conversation_title(None, "id"), None);
+    for p in [&Claude as &dyn AgentProvider, &Codex] {
+        assert_eq!(p.prompt_title("로그인 버그 고쳐줘\n자세히는..").as_deref(), Some("로그인 버그 고쳐줘"));
+        assert_eq!(p.prompt_title("/model"), None, "{}", p.id());
+        assert_eq!(p.prompt_title("!ls"), None, "{}", p.id());
+        assert!(p.names_conversations());
+    }
+
+    // Claude: the last ai-title / custom-title of the transcript (v 2.1.3xx lines).
+    let t = crate::claude::transcript_title(
+        "{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n\
+         {\"type\":\"ai-title\",\"aiTitle\":\"libcef.dll 누락 오류\",\"sessionId\":\"s\"}\n\
+         {\"type\":\"assistant\"}\n",
+    );
+    assert_eq!(t.as_deref(), Some("libcef.dll 누락 오류"));
+    let t = crate::claude::transcript_title(
+        "{\"type\":\"ai-title\",\"aiTitle\":\"a\"}\n{\"type\":\"custom-title\",\"customTitle\":\"b\"}\n",
+    );
+    assert_eq!(t.as_deref(), Some("b"), "a later /rename wins");
+    assert_eq!(crate::claude::transcript_title("{\"type\":\"user\"}\n"), None);
+
+    let dir = TempDir::new("titles");
+    let home = dir.0.join("claude");
+    let id = "0d50bd42-9d2c-4ff8-9e4f-f49fede9cd52";
+    std::fs::create_dir_all(home.join("projects/C--w")).unwrap();
+    std::fs::write(
+        home.join(format!("projects/C--w/{id}.jsonl")),
+        "{\"type\":\"ai-title\",\"aiTitle\":\"세션 제목 자동 요약\"}\n",
+    )
+    .unwrap();
+    let acct = Account { provider: "claude".into(), slug: "a".into(), name: "a".into(), dir: home.clone(), created_at: 0 };
+    assert_eq!(Claude.conversation_title(Some(&acct), id).as_deref(), Some("세션 제목 자동 요약"));
+    assert_eq!(Claude.conversation_title(Some(&acct), "../x"), None, "not a session id");
+
+    // Codex: the thread's last thread_name in session_index.jsonl (v 0.172.0).
+    let index = "{\"id\":\"01a1\",\"thread_name\":\"Fix node-pty build\",\"updated_at\":\"t\"}\n\
+                 {\"id\":\"01a2\",\"thread_name\":\"안녕?\",\"updated_at\":\"t\"}\n\
+                 {\"id\":\"01a1\",\"thread_name\":\"Fix node-pty Python build error\",\"updated_at\":\"t\"}\n";
+    assert_eq!(crate::codex::thread_name(index, "01a1").as_deref(), Some("Fix node-pty Python build error"));
+    assert_eq!(crate::codex::thread_name(index, "01a2").as_deref(), Some("안녕?"));
+    assert_eq!(crate::codex::thread_name(index, "01a"), None);
+    let home = dir.0.join("codex");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("session_index.jsonl"), index).unwrap();
+    let acct = Account { provider: "codex".into(), slug: "a".into(), name: "a".into(), dir: home, created_at: 0 };
+    assert_eq!(Codex.conversation_title(Some(&acct), "01a2").as_deref(), Some("안녕?"));
+    // Only a UUID (Codex's thread ids are): it also becomes `codex resume <id>`.
+    let thread = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
+    assert_eq!(
+        Codex.parse_hook("SessionStart", format!(r#"{{"session_id":"{thread}"}}"#).as_bytes()),
+        Some(HookEvent::SessionStart { conversation: Some(thread.into()) })
+    );
+    assert_eq!(
+        Codex.parse_hook("SessionStart", br#"{"session_id":"01a2-77"}"#),
+        Some(HookEvent::SessionStart { conversation: None })
+    );
+    assert_eq!(
+        Codex.parse_hook("UserPromptSubmit", br#"{"prompt":"hi"}"#),
+        Some(HookEvent::PromptSubmitted { prompt: Some("hi".into()) })
+    );
 }

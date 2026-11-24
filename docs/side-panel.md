@@ -30,8 +30,8 @@ tab (`ExploreTree.tsx`).
 
 | Hermes Desk | ide |
 |---|---|
-| `loadRepositoryHistory`: `changes:log(dir, 0, max(200, shown))` + `github:historyLocal`, again whenever the repo's version changes (watcher / after git actions), also while another tab is shown (badge) | `App::load_history` (`git.log` + `git.unpushed`, `HistoryState::refresh_limit`) from `sync_detail` (first show of the repo, stale after a reconnect), `after_git_change` (`GitChanged` of the shown repo: commits, checkouts, pushes) and opening the History tab; answers of older refreshes are dropped (`seq`) |
-| Picking another repo shows its history | `Detail::set_repo` resets `HistoryState`; `sync_detail` loads it |
+| `loadRepositoryHistory`: `changes:log(dir, 0, max(200, shown))` + `github:historyLocal`, again whenever the repo's version changes (watcher / after git actions), also while another tab is shown (badge) | `App::load_history` (`git.log` + `git.unpushed`, `HistoryState::refresh_limit`) from `sync_detail` (first show of the repo, stale after a reconnect, a kept view marked outdated), `after_git_change` (`GitChanged` of the shown repo: commits, checkouts, pushes) and opening the History tab; answers of older refreshes are dropped (`seq`) |
+| Picking another repo shows its history | `Detail::set_repo` keeps the old repo's view and shows the picked one's kept view at once (see "Per-repo cache" below), else an empty one that `sync_detail` loads |
 | `커밋이 없습니다.` when the list is empty | `detail_view.rs::history_list` (`history-empty`) |
 | `ScrollArea onBottomReached={loadMore}` + `더 보기` button (loader while loading) | `DetailMsg::HistoryScrolled` (24 px from the end) / `HistoryMore` -> `App::load_more_history` (`git.log` with `skip` = shown commits); `HistoryState::append` skips commits already listed |
 | `CommitRow`: bold subject truncated, ↑ in a violet circle when unpushed (tooltip `아직 원격에 올라가지 않은 커밋`), `AuthorAvatar` + `author · relativeTime(date)` (title `short · full date`) | `detail_view.rs::commit_row`; ↑ = Tabler `arrow-up` drawn with stroke 2.5 like Desk; avatar = `history::initials` / `history::avatar_color` (`hsl(hash % 360, 45%, 38%)` of the e-mail, Desk's hash); `history::relative_time` mirrors `lib/relativeTime.ts` (`방금`, `N분 전`, `N시간 전`, `어제`, `N일 전`, `지난달`, `N개월 전`, `작년`, `N년 전`); full date `YYYY-MM-DD HH:MM` in local time |
@@ -53,8 +53,7 @@ tab (`ExploreTree.tsx`).
 - History: commit diffs open as normal items (the ide has no preview tab that the next diff
   replaces, same as Changes); the list shows `불러오는 중…` until the first page arrived (Desk shows
   `커밋이 없습니다.` meanwhile); a failed `git.log` shows `커밋 목록을 불러오지 못했습니다: …` as a toast
-  (Desk: notification); the history is reloaded when the repo is picked again instead of kept per
-  repo; the full date is `YYYY-MM-DD HH:MM` (Desk: the browser's `toLocaleString`).
+  (Desk: notification); the full date is `YYYY-MM-DD HH:MM` (Desk: the browser's `toLocaleString`).
 - History omits (not ported): dragging a commit into the chat and the commit menu's 채팅에 첨부
   (the ide has no chat composer). Desk's merge commits list nothing; ide shows them against the
   first parent (`docs/git-history.md`). The commit menu, the reveal buttons and the stash section
@@ -135,6 +134,28 @@ Shown under the Changes and History tabs (not Explore): 커밋 맡기기, the sy
 `…` menu, with the PR strips / job notice above it. State in `footer.rs` (per session and repo),
 view in `footer_view.rs`, script steps in `script_footer.rs`. Desk mapping, calls, deviations
 and tests: `docs/changes-actions.md` ("Footer UI").
+
+## Per-repo cache (repo dropdown)
+
+Picking another repo in the `repo / branch` picker does not throw the old repo's panel away:
+`Detail::set_repo` moves it into `Detail::cache` (`repo_cache.rs`, `RepoCache<RepoView>`) and
+brings back the picked repo's kept view, so Changes, History and Explore show it at once and
+only what may be outdated is loaded again in the background (stale-while-revalidate;
+`Detail::refresh`, taken by `App::sync_detail`).
+
+- Kept (`detail.rs::RepoView`): the tree (expanded folders, `loaded_dirs`), the Changes list and
+  status, History (pages, unpushed marks, unfolded commits and their files), the changes actions'
+  status / files / checkboxes / stash list (`ChangesActs::kept`; open menus, popovers and the
+  branch list are dropped) and the 스크립트 list.
+- Refreshed when shown again (`Refresh`): `FsChanged` of a hidden repo -> tree folders + status
+  (+ stashes); `GitChanged` -> also History (`App::on_fs_notify`); an answer that arrived while its
+  repo was hidden (dropped) -> what it was for (`Detail::missed`; commit files and script lists are
+  stored into the kept view instead); `Detail::stale` (unwatched while hidden, reconnect) -> every
+  kept view; a repo not watched when shown, or kept longer than `MAX_AGE` (5 min) -> everything.
+- Memory: at most `CACHE_MAX` (8) repos per detail area, least recently stored dropped first;
+  repos detached from the session are dropped in `sync_detail`.
+- Unchanged: opening the History tab still reloads History; Explore's 파일 찾기 runs again for
+  the picked repo.
 
 ## Adding a tab
 

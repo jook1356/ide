@@ -185,6 +185,8 @@ pub struct NewForm {
     pub refresh_base: bool,
     /// Base branch picked per repo id (origin's branch); missing = the repo's default.
     pub bases: std::collections::BTreeMap<String, String>,
+    /// The repo list's search box (shown from `new_session_repos::SEARCH_MIN_REPOS` repos).
+    pub repo_filter: String,
     pub error: Option<String>,
     pub busy: bool,
 }
@@ -710,7 +712,8 @@ type Lists = (
 pub enum Message {
     /// Client event of link generation `.0`.
     Client(u64, ClientEvent),
-    Lists(u64, Result<Lists, ProtoError>),
+    /// Lists of link generation `.0`, request `.1` of [`App::refresh`].
+    Lists(u64, u64, Result<Lists, ProtoError>),
     Attached(u64, String, Result<(), ProtoError>),
     TermInput(String, Vec<u8>),
     TermResize(String, u16, u16),
@@ -737,6 +740,8 @@ pub enum Message {
     NewRepoChecked(String, bool),
     /// The repo of an original-repo session.
     NewOriginalRepo(String),
+    /// The repo list's search box.
+    NewRepoFilter(String),
     NewProvider(String),
     /// Account slug; `""` = the CLI's default login.
     NewAccount(String),
@@ -1093,6 +1098,12 @@ pub struct App {
     pub link: Option<Link>,
     /// Incremented per new [`Link`]; results of older links are ignored.
     pub link_gen: u64,
+    /// The last list request sent ([`App::refresh`]) and the newest one applied: refreshes
+    /// overlap (each `SessionsChanged` starts one) and their answers may arrive out of order,
+    /// so an older answer must not replace a newer list (a just-created session would vanish
+    /// from the list until the next change).
+    pub lists_asked: std::cell::Cell<u64>,
+    pub lists_applied: u64,
     pub conn: Conn,
     /// Provider, account, configuration and session lists arrived at least once.
     pub loaded: bool,
@@ -1283,6 +1294,8 @@ impl App {
             target,
             link: None,
             link_gen: 0,
+            lists_asked: std::cell::Cell::new(0),
+            lists_applied: 0,
             conn,
             loaded: false,
             providers: Vec::new(),
@@ -1691,6 +1704,8 @@ impl App {
             return Task::none();
         };
         let generation = self.link_gen;
+        let seq = self.lists_asked.get() + 1;
+        self.lists_asked.set(seq);
         Task::perform(
             async move {
                 let p = c.providers(false).await?;
@@ -1699,7 +1714,7 @@ impl App {
                 let s = c.sessions().await?;
                 Ok((p, a, k, s))
             },
-            move |r| Message::Lists(generation, r),
+            move |r| Message::Lists(generation, seq, r),
         )
     }
 
@@ -2120,12 +2135,15 @@ impl App {
                 }
                 self.on_client(ev)
             }
-            Message::Lists(generation, r) => {
+            Message::Lists(generation, seq, r) => {
                 if generation != self.link_gen {
                     return Task::none();
                 }
                 match r {
+                    // A newer list was applied already.
+                    Ok(_) if seq < self.lists_applied => Task::none(),
                     Ok(lists) => {
+                        self.lists_applied = seq;
                         let t = self.apply_lists(lists);
                         Task::batch([t, self.integration_checks()])
                     }
@@ -2366,7 +2384,7 @@ impl App {
                     .last_repo
                     .clone()
                     .filter(|r| self.repos.iter().any(|x| &x.id == r))
-                    .or_else(|| self.repos.first().map(|r| r.id.clone()));
+                    .or_else(|| self.repos_by_recent().first().map(|r| r.id.clone()));
                 self.modal = Some(Modal::NewSession(NewForm {
                     account: self.default_account(&provider),
                     provider,
@@ -2377,6 +2395,7 @@ impl App {
                     original_repo,
                     refresh_base: true,
                     bases: Default::default(),
+                    repo_filter: String::new(),
                     error: None,
                     busy: false,
                 }));
@@ -2401,6 +2420,7 @@ impl App {
                 })
             }
             Message::NewOriginalRepo(id) => self.with_new(|f| f.original_repo = Some(id)),
+            Message::NewRepoFilter(v) => self.with_new(|f| f.repo_filter = v),
             Message::NewRefreshBase(v) => self.with_new(|f| f.refresh_base = v),
             Message::NewBase(repo, b) => self.with_new(|f| {
                 f.bases.insert(repo, b);

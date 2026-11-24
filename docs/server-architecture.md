@@ -132,6 +132,18 @@ Deviations and details fixed during implementation:
   `Welcome` also carries `resumed` and `server_instance` (random per server process): terminal
   offsets are only valid within one instance, so after a server restart the client re-attaches
   without an offset (full replay starting with a reset).
+- **Output log across server restarts**: the ring lives in memory, so each session terminal also
+  appends its output to `sessions/<id>/output.log` (`ide-server/src/outlog.rs`; the last 8 MiB,
+  compacted at 12 MiB to a line start; removed with the session folder). A new server seeds the
+  session's ring with it when it first makes the host (the server-side `Term` does not parse it:
+  its queries, titles and bells belong to a gone process), so the replay after the restart puts
+  the old output into the client's scrollback and a stopped session still shows its last screen.
+  The next process start first writes `RESUME_TRAILER`: cancel an open sequence, primary screen,
+  default modes (scroll region, mouse reporting, bracketed paste, app cursor/keypad, kitty
+  keyboard), a dim rule at the bottom row, then `ESC[2J ESC[H` (alacritty moves a cleared
+  screen's lines into the scrollback), so the resumed agent draws on a clean screen below the old
+  output. A program that clears the scrollback itself (`ESC[3J`, e.g. Claude Code's `/clear`)
+  still clears it. User terminals have no log (they end with the server).
 - **RPC messages above one frame** are fragmented: `Rpc` frames with `stream_id` 1 = fragment,
   more follows; 0 = last/complete. Max message 16 MiB.
 - **Stream lifecycle**: `Open` payload = `u32` initial window the opener grants; the accepter
@@ -153,6 +165,14 @@ Deviations and details fixed during implementation:
 - **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `ide-core`
   structs, so a Unix server can serve a Windows client.
 - **PTY size**: the most recent `term.resize` wins (no separate activity tracking).
+- **Locks**: `term.write` / `term.resize` / `term.attach` run on the connection's request loop
+  (in order) and look the terminal up in the host map, never the session store. Every other
+  request runs on a blocking thread and takes the store locks (`sessions`, `repos`, ...) only
+  briefly: git, file IO beyond the store's own JSON and other processes run on a snapshot
+  without a store lock held (on a busy Windows machine one `git` start can take hundreds of ms;
+  `repo.list` once held the session lock across git runs for every repo and stalled every
+  terminal and file request). Agent hooks also run on blocking threads. `repo.list` detects
+  base branches in parallel and reuses them for 20 s.
 - **Colour query replies** (OSC 4/10/11/12) use the client's default dark palette; there is no
   RPC to set the palette yet.
 - **UserInfo**: name from `USERNAME`/`USER`, id `DOMAIN\name` on Windows (not a SID/uid).

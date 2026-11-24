@@ -66,8 +66,10 @@ impl UserCtx {
 
     /// Answer the dialog `a` on `s`'s screen when the user left it on, it names one of the
     /// session's folders (when it names one) and that dialog (the same folder) was not just
-    /// answered. `true`: held back by [`COOLDOWN`] only, so the screen must be read again later
-    /// even if it does not change (one dialog per repository may follow another).
+    /// answered. `true`: answered now or held back by [`COOLDOWN`], so the screen must be read
+    /// again later even if it does not change (one dialog per repository may follow another,
+    /// and keys the CLI missed leave the dialog unchanged: it is answered again after
+    /// [`COOLDOWN`]).
     pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, ans: &Answering<'_>) -> bool {
         let (a, path) = (ans.answer, ans.path.as_deref());
         let on = self.auto_answers.lock().unwrap().enabled(&s.provider, &a.id, a.default);
@@ -100,6 +102,6 @@ impl UserCtx {
             }
         }
         self.audit("auto_answer", &format!("{} {} {}", s.id, a.id, path.unwrap_or("")));
-        false
+        true
     }
 }

@@ -12,6 +12,7 @@ use crate::notices::Tone;
 use std::collections::{BTreeSet, HashSet};
 
 use crate::history::{CommitFiles, HistoryState};
+use crate::repo_cache::{Refresh, RepoCache};
 use std::time::Duration;
 
 use iced::Task;
@@ -376,6 +377,10 @@ pub struct Detail {
     pub stale: bool,
     /// Toasts for the notification centre, moved there after each update (`notice_view.rs`).
     pub toasts: Vec<(crate::notices::Tone, crate::notices::Text)>,
+    /// Views of the repos picked before (`repo_cache.rs`).
+    pub cache: RepoCache<RepoView>,
+    /// What the restored repo view needs loaded again (taken by `App::sync_detail`).
+    pub refresh: Refresh,
     /// Commit / sync / PR footer under Changes and History (`footer.rs`).
     pub footer: crate::footer::Footer,
     /// Checkboxes, stash, discard, commit menu and branch picker (`changes_actions.rs`).
@@ -431,6 +436,8 @@ impl Detail {
             diff_mode: DiffMode::Unified,
             watched: BTreeSet::new(),
             stale: false,
+            cache: RepoCache::default(),
+            refresh: Refresh::default(),
             toasts: Vec::new(),
             footer: Default::default(),
             acts: Default::default(),
@@ -488,27 +495,112 @@ impl Detail {
         self.item(&self.active)
     }
 
-    /// Show another repo in Changes / Explore: its tree and status are loaded afresh.
+    /// Show another repo in Changes / History / Explore. The old repo's view is kept
+    /// (`repo_cache.rs`); a kept view of the new one is shown at once and `refresh` says what
+    /// `App::sync_detail` loads again, otherwise everything is loaded afresh.
     pub fn set_repo(&mut self, repo: String) {
         if self.repo == repo {
             return;
         }
-        self.repo = repo;
-        self.tree = FileTree::new();
-        self.loaded_dirs.clear();
+        let old = std::mem::replace(&mut self.repo, repo);
+        let view = self.take_view(RepoView::empty());
+        let pending = std::mem::take(&mut self.refresh);
+        if !old.is_empty() && view.worth_keeping() {
+            self.cache.put(old, view, pending);
+        }
+        if let Some((view, mut dirty)) = self.cache.take(&self.repo) {
+            // Not watched: changes since it was stored went unnoticed.
+            if !self.watched.contains(&self.repo) {
+                dirty = Refresh::ALL;
+            }
+            self.take_view(view);
+            self.refresh = dirty;
+        }
+    }
+
+    /// Swap the shown repo's view with `view` and return the old one.
+    fn take_view(&mut self, view: RepoView) -> RepoView {
+        let RepoView {
+            tree,
+            loaded_dirs,
+            tree_error,
+            changes,
+            status_loaded,
+            status_error,
+            mut history,
+            acts,
+            scripts_list,
+            scripts_input_key,
+            scripts_loaded_key,
+        } = view;
+        // Loads in flight are not resumed: their answers are dropped while the repo is
+        // hidden (and mark the kept view outdated).
+        history.loading_more = false;
         self.root_loading = false;
-        self.tree_error = None;
-        self.changes = ChangesList::new();
-        self.status_loaded = false;
-        self.status_error = None;
-        self.history = HistoryState::default();
-        self.acts = Default::default();
+        self.scripts.loading = false;
+        RepoView {
+            tree: std::mem::replace(&mut self.tree, tree),
+            loaded_dirs: std::mem::replace(&mut self.loaded_dirs, loaded_dirs),
+            tree_error: std::mem::replace(&mut self.tree_error, tree_error),
+            changes: std::mem::replace(&mut self.changes, changes),
+            status_loaded: std::mem::replace(&mut self.status_loaded, status_loaded),
+            status_error: std::mem::replace(&mut self.status_error, status_error),
+            history: std::mem::replace(&mut self.history, history),
+            acts: std::mem::replace(&mut self.acts, acts).kept(),
+            scripts_list: std::mem::replace(&mut self.scripts.list, scripts_list),
+            scripts_input_key: std::mem::replace(&mut self.scripts.input_key, scripts_input_key),
+            scripts_loaded_key: std::mem::replace(&mut self.scripts.loaded_key, scripts_loaded_key),
+        }
+    }
+
+    /// An answer for hidden `repo` was dropped: its kept view misses it.
+    pub(crate) fn missed(&mut self, repo: &str, what: Refresh) {
+        self.cache.invalidate(repo, what);
     }
 
     /// Show a message for a few seconds (a toast of the notification centre, which also keeps
     /// it in its list).
     pub fn toast(&mut self, tone: Tone, msg: impl Into<crate::notices::Text>) {
         self.toasts.push((tone, msg.into()));
+    }
+}
+
+/// What the side panel shows of one repo; kept per repo while another one is shown
+/// ([`Detail::cache`]).
+pub struct RepoView {
+    tree: FileTree,
+    loaded_dirs: BTreeSet<String>,
+    tree_error: Option<String>,
+    changes: ChangesList,
+    status_loaded: bool,
+    status_error: Option<String>,
+    pub history: HistoryState,
+    acts: crate::changes_actions::ChangesActs,
+    pub scripts_list: Option<(String, Result<Vec<ide_client::ScriptGroup>, String>)>,
+    scripts_input_key: String,
+    pub scripts_loaded_key: Option<(String, String)>,
+}
+
+impl RepoView {
+    fn empty() -> Self {
+        Self {
+            tree: FileTree::new(),
+            loaded_dirs: BTreeSet::new(),
+            tree_error: None,
+            changes: ChangesList::new(),
+            status_loaded: false,
+            status_error: None,
+            history: HistoryState::default(),
+            acts: Default::default(),
+            scripts_list: None,
+            scripts_input_key: String::new(),
+            scripts_loaded_key: None,
+        }
+    }
+
+    /// Something was loaded (or asked for); an untouched view is not worth a cache slot.
+    fn worth_keeping(&self) -> bool {
+        !self.loaded_dirs.is_empty() || self.status_loaded || self.history.requested
     }
 }
 
@@ -879,6 +971,7 @@ impl App {
         };
         let repos: Vec<String> = live.info.repos.iter().map(|r| r.repo.clone()).collect();
         let d = self.detail_mut(&sid).expect("session");
+        d.cache.retain(&repos);
         // The picked repo was detached (or none picked yet): show the first one.
         if !repos.contains(&d.repo) {
             let first = repos.first().cloned().unwrap_or_default();
@@ -895,24 +988,33 @@ impl App {
         }
         let d = self.detail_mut(&sid).expect("session");
         let stale = std::mem::take(&mut d.stale);
+        let mut refresh = std::mem::take(&mut d.refresh);
+        if stale {
+            // Hidden repos missed changes too.
+            d.cache.invalidate_all();
+            refresh = Refresh::ALL;
+        }
+        if refresh.any() {
+            crate::script::log(&format!("detail {sid}: refresh {}: {refresh:?}", d.repo));
+        }
         if d.repo.is_empty() {
             d.tree_error = None;
             d.status_error = None;
         } else if d.loaded_dirs.is_empty() && !d.root_loading {
             d.root_loading = true;
             tasks.push(self.list_dirs(&sid, vec![String::new()]));
-        } else if stale {
+        } else if refresh.files {
             let dirs: Vec<String> = d.loaded_dirs.iter().cloned().collect();
             tasks.push(self.list_dirs(&sid, dirs));
         }
         let d = self.detail_mut(&sid).expect("session");
-        if !d.repo.is_empty() && (!d.status_loaded || stale) {
+        if !d.repo.is_empty() && (!d.status_loaded || refresh.files) {
             d.status_loaded = true;
             tasks.push(self.load_status(&sid));
         }
         let d = self.detail_mut(&sid).expect("session");
         // History (also for the tab's unpushed badge while another tab is shown, like Desk).
-        if !d.repo.is_empty() && (!d.history.requested || stale) {
+        if !d.repo.is_empty() && (!d.history.requested || refresh.history) {
             tasks.push(self.load_history(&sid));
         }
         if stale {
@@ -1441,6 +1543,17 @@ impl App {
             return Task::none();
         }
         crate::script::log(&format!("watch {sid}/{repo}: {paths:?}"));
+        // A hidden repo's kept view is refreshed when it is shown again.
+        let d = self.detail_mut(sid).expect("session");
+        if d.repo != repo {
+            d.missed(
+                repo,
+                Refresh {
+                    files: true,
+                    history: paths.is_none(),
+                },
+            );
+        }
         match paths {
             Some((p, rescan)) => self.after_fs_change(sid, repo, &p, rescan),
             None => self.after_git_change(sid, repo),
@@ -1536,6 +1649,7 @@ impl App {
             DetailMsg::Listed(repo, dir, r) => {
                 let d = self.detail_mut(sid).expect("session");
                 if d.repo != repo {
+                    d.missed(&repo, Refresh::FILES);
                     return Task::none();
                 }
                 if dir.is_empty() {
@@ -1594,6 +1708,7 @@ impl App {
             DetailMsg::Status(repo, r) => {
                 let d = self.detail_mut(sid).expect("session");
                 if d.repo != repo {
+                    d.missed(&repo, Refresh::FILES);
                     return Task::none();
                 }
                 match r {
@@ -1848,7 +1963,11 @@ impl App {
             }
             DetailMsg::HistoryLoaded(repo, seq, r) => {
                 let d = self.detail_mut(sid).expect("session");
-                if d.repo != repo || d.history.seq != seq {
+                if d.repo != repo {
+                    d.missed(&repo, Refresh::HISTORY);
+                    return Task::none();
+                }
+                if d.history.seq != seq {
                     return Task::none();
                 }
                 let h = &mut d.history;
@@ -1872,7 +1991,11 @@ impl App {
             }
             DetailMsg::Unpushed(repo, seq, r) => {
                 let d = self.detail_mut(sid).expect("session");
-                if d.repo != repo || d.history.seq != seq {
+                if d.repo != repo {
+                    d.missed(&repo, Refresh::HISTORY);
+                    return Task::none();
+                }
+                if d.history.seq != seq {
                     return Task::none();
                 }
                 // Desk: a failed query marks nothing.
@@ -1892,7 +2015,11 @@ impl App {
             }
             DetailMsg::HistoryMoreLoaded(repo, seq, r) => {
                 let d = self.detail_mut(sid).expect("session");
-                if d.repo != repo || d.history.seq != seq {
+                if d.repo != repo {
+                    d.missed(&repo, Refresh::HISTORY);
+                    return Task::none();
+                }
+                if d.history.seq != seq {
                     return Task::none();
                 }
                 d.history.loading_more = false;
@@ -1929,9 +2056,6 @@ impl App {
             }
             DetailMsg::CommitFilesLoaded(repo, sha, r) => {
                 let d = self.detail_mut(sid).expect("session");
-                if d.repo != repo {
-                    return Task::none();
-                }
                 let files = match r {
                     Ok(f) => {
                         crate::script::log(&format!("commit {sha}: {} file(s)", f.len()));
@@ -1939,7 +2063,15 @@ impl App {
                     }
                     Err(e) => CommitFiles::Failed(i18n::proto_error(&e)),
                 };
-                d.history.files.insert(sha, files);
+                // Commits never change: a hidden repo's kept History takes the files too.
+                let history = if d.repo == repo {
+                    Some(&mut d.history)
+                } else {
+                    d.cache.get_mut(&repo).map(|v| &mut v.history)
+                };
+                if let Some(h) = history {
+                    h.files.insert(sha, files);
+                }
                 Task::none()
             }
             DetailMsg::OpenCommit(sha, path) => {
@@ -2702,6 +2834,46 @@ mod tests {
         assert_eq!(SideTab::parse(SideTab::Changes.code()), SideTab::Changes);
         assert_eq!(SideTab::parse(SideTab::Explore.code()), SideTab::Explore);
         assert_eq!(SideTab::parse(SideTab::History.code()), SideTab::History);
+    }
+
+    #[test]
+    fn picked_repos_are_kept() {
+        let (a, b) = ("aaaaaaaa", "bbbbbbbb");
+        let mut d = Detail::new(None, Some(a));
+        d.watched.extend([a.to_owned(), b.to_owned()]);
+        // Repo A loaded.
+        d.loaded_dirs.insert(String::new());
+        d.status_loaded = true;
+        d.history.requested = true;
+        d.history.seq = 3;
+        d.acts.unchecked.insert("x.txt".into());
+        d.acts.menu = Some((ChangeGroup::Unstaged, "x.txt".into()));
+        // B was never shown: loaded afresh.
+        d.set_repo(b.into());
+        assert!(d.loaded_dirs.is_empty() && !d.status_loaded && !d.history.requested);
+        assert!(d.acts.unchecked.is_empty());
+        d.status_loaded = true;
+        // Back to A: its view at once, nothing to load again.
+        d.set_repo(a.into());
+        assert!(d.loaded_dirs.contains("") && d.status_loaded && d.history.requested);
+        assert_eq!(d.history.seq, 3);
+        assert!(d.acts.is_checked("y.txt") && !d.acts.is_checked("x.txt"));
+        // Open menus are not kept.
+        assert!(d.acts.menu.is_none());
+        assert_eq!(d.refresh, Refresh::default());
+        // B changed while hidden (`FsChanged`), and then its History answer was dropped.
+        d.missed(b, Refresh::FILES);
+        d.missed(b, Refresh::HISTORY);
+        d.set_repo(b.into());
+        assert!(d.status_loaded);
+        assert_eq!(d.refresh, Refresh::ALL);
+        // A pending refresh stays with the repo it is for.
+        d.set_repo(a.into());
+        assert_eq!(d.refresh, Refresh::default());
+        // Not watched any more: everything is loaded again.
+        d.watched.remove(b);
+        d.set_repo(b.into());
+        assert_eq!(d.refresh, Refresh::ALL);
     }
 
     #[test]

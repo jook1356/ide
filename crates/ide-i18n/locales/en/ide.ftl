@@ -644,6 +644,13 @@ workspace-label = WORKSPACE
 use-worktrees = Use worktrees
 use-worktrees-note = The session gets its own folder with a worktree of each repository (branch ide/<session-id>), separate from the originals.
 worktree-repos-label = Repositories to create worktrees for
+new-repos-search = Search repositories (name or path)
+new-repos-search-none = No repositories match.
+new-repos-selected = { $count ->
+    [one] 1 selected
+   *[other] { $count } selected
+}
+new-repo-chip-remove = Uncheck
 no-repos-empty-workspace = No repositories registered: the session starts with an empty workspace.
 empty-workspace-note = No repository checked: the session starts with an empty workspace.
 worktree-repos-note = The first selection is the profile's default repositories; repositories can be added later from the session's ⚙.

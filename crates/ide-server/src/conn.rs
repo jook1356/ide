@@ -412,7 +412,12 @@ async fn serve_agent(
                         let _ = mux.send_rpc(&RpcMessage::Response { id, result }.encode());
                     });
                 } else {
-                    let deny = ctx.agent_hook(&agent.session, event);
+                    // Takes the session store's lock (blocking): off the async workers, which
+                    // also carry every terminal stream.
+                    let (c, session) = (ctx.clone(), agent.session.clone());
+                    let deny = tokio::task::spawn_blocking(move || c.agent_hook(&session, event))
+                        .await
+                        .unwrap_or(None);
                     send(id, Ok(Response::AgentHookDecision(deny)));
                 }
             }

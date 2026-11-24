@@ -142,7 +142,11 @@ pub enum AgentHookEvent {
         #[serde(default)]
         conversation: Option<String>,
     },
-    PromptSubmitted,
+    /// A turn started; `prompt`: the user's text, if the CLI reported it (`docs/session-titles.md`).
+    PromptSubmitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
     Stopped,
     NeedsInput { permission: bool },
     /// About to edit these files.
@@ -159,6 +163,9 @@ pub enum AgentHookEvent {
     /// Work that can outlive the turn started / ended (`id`: the CLI's, opaque).
     BackgroundStarted { id: String },
     BackgroundEnded { id: String },
+    /// The turn finished; exactly these background ids still run (the CLI's own record; a
+    /// variant of its own so `Stopped` keeps its wire form).
+    StoppedRunning { background: Vec<String> },
 }
 
 /// A tool the agent bridge offers (MCP `tools/list`).

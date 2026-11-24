@@ -11,7 +11,7 @@ use crate::paths::{Paths, ensure_dir};
 use crate::base::{BasePlan, plan_base, repo_default_base, short_branch};
 use crate::registry::{RegisteredRepo, RepoId, RepoStore, detect_base};
 use crate::repo::{Repo, normalize_path};
-use crate::session::{Session, SessionId, SessionKind, SessionMode, SessionTarget, SessionWorktree};
+use crate::session::{AutoTitle, Session, SessionId, SessionKind, SessionMode, SessionTarget, SessionWorktree};
 use crate::worktree::BRANCH_PREFIX;
 
 /// Input of [`create_session`] (what the new-session dialog collects).
@@ -103,6 +103,9 @@ pub fn create_session(
             SessionMode::OriginalRepo,
             r.path.clone(),
         );
+        if req.title.trim().is_empty() {
+            s.auto_title = AutoTitle::Pending;
+        }
         s.worktrees.push(SessionWorktree {
             repo: r.id.clone(),
             name: r.name.clone(),
@@ -143,6 +146,9 @@ pub fn create_session(
         SessionMode::Workspace,
         root.clone(),
     );
+    if req.title.trim().is_empty() {
+        s.auto_title = AutoTitle::Pending;
+    }
     precheck(&s)?;
     if root.exists() {
         return Err(Error::WorktreeExists(root));

@@ -62,7 +62,7 @@ provider's file:
 | Step | Trait method | Claude Code (`claude.rs`) |
 |---|---|---|
 | register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<ide-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
-| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> Stopped, `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (every tool) -> PreTool (Edit {paths} for `Edit|Write|MultiEdit|NotebookEdit`), `SubagentStart` / `SubagentStop` (`agent_id`) -> BackgroundStarted / BackgroundEnded {id} |
+| events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> StoppedRunning {background: the main conversation's background tasks still running, read from the hook input's `transcript_path`} (no readable transcript: Stopped), `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (every tool) -> PreTool (Edit {paths} for `Edit|Write|MultiEdit|NotebookEdit`), `SubagentStart` / `SubagentStop` (`agent_id`) -> BackgroundStarted / BackgroundEnded {id} |
 | answer | `hook_reply(event, decision) -> HookReply` | deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":...}}`, exit 0; no opinion: nothing, exit 0 (never "allow": that would skip Claude's permission prompts) (d) |
 | caps | `hook_caps()` | status, edit guard: native; shell guard: unsupported |
 
@@ -81,8 +81,23 @@ provider's file:
   end inside a running turn (a foreground subagent) or of an unknown id changes nothing; tool
   calls (also a background agent's) -> Working without reopening the turn (a CLI resuming on
   its own with a result sends no prompt event); an idle screen while work runs is Working.
-  Contract: a provider that reports a start reports its end for the same id. SessionStart and
-  a new process forget running ids (a lost end cannot hold a session for good). The app shows the
+  Contract: a provider that reports a start reports its end for the same id, or reports
+  `StoppedRunning {background}` at the turn's end: the CLI's own list of what still runs, which
+  replaces the counted ids (work whose end no hook reports). SessionStart and
+  a new process forget running ids (a lost end cannot hold a session for good).
+- Claude Code's background tasks (v: 2.1.331 transcripts): no hook reports a background
+  shell (`run_in_background`, or a command moved to the background at its timeout) or its end;
+  `SubagentStart` / `SubagentStop` cover agents only. The transcript has both: the tool
+  result's `toolUseResult.backgroundTaskId` (shell) / `status: "async_launched"` + `agentId`
+  (background agent) starts one; its `<task-notification>` (`<task-id>`, `<status>completed|failed|…`),
+  written as a `queue-operation` enqueue the moment the task ends, or a TaskStop result
+  (`task_id` + `task_type`) ends it. Each end makes the CLI run a turn for the notification
+  (no `UserPromptSubmit`; tool calls and `Stop` fire), so the next `Stop` carries the new
+  list and the last end turns the session idle. Sidechains (subagents' own records) are not
+  read. Not covered: a background agent resumed by a message after it finished (only
+  `SubagentStart` / `SubagentStop`), Monitor / Workflow tasks. Screen rules were not used: the
+  footer's task count text is unchecked and changes between versions; the transcript is the
+  CLI's own record. The app shows the
   phase on the session row and Desk's 새 답변 for a turn that ended while another session was
   shown (cleared when selected).
 - Decisions: `agent.hook` answers `Some(reason)` to refuse a tool call: the shared folder's write

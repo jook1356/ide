@@ -54,6 +54,15 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 - [ ] **Restart an incompatible server.** `old_server::kill_tree` ends the daemon's process
   group with `kill -TERM -<pid>` (assumes `spawn_daemon` made it a group leader). Check: run an
   old daemon, start a newer-protocol app, press 서버 재시작 in the connection status.
+- [ ] **Codex resume without the hook** (`ide-agents/src/codex.rs` `started_rollout`): a
+  rollout's age is its creation time, else its last write (file systems without a birth
+  time). Assumption: Codex's rollouts and `session_meta.cwd` look the same as on Windows.
+  Check: start a Codex session, send one prompt, restart the server, open the session: it
+  shows `codex resume <uuid>` with the conversation.
+- [ ] **Scrollback after a server restart** (`ide-server/tests/restart_scrollback_e2e.rs`). The
+  output log is OS-neutral; the test's Unix branch prints with an `sh` `while` loop (assumption:
+  the shell provider's `sh` runs it as typed through the PTY). Check: `cargo test -p ide-server
+  --test restart_scrollback_e2e` on Linux / macOS.
 
 ## macOS: to do
 
@@ -190,6 +199,14 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-25: `restart_scrollback_e2e` Unix branch (`sh` loop printing the old lines); unrun on
+  macOS / Linux.
+- 2026-11-24: Codex resumes after a server restart (`codex.rs` rollout lookup by creation /
+  write time and cwd); checked on Windows only.
+- 2026-11-24: a child's first prompt on the agent's command line (`ide_agents::assemble`,
+  `first_prompt_args`): left out on Windows when the CLI is a batch file run through `cmd.exe`;
+  elsewhere always passed as one argv entry (assumed safe: no shell in between). Unchecked on
+  macOS / Linux.
 - 2026-11-24: previews: CEF custom scheme `ide-preview://` next to `ide-widget://` (same list in
   `main`); checked on Windows only.
 - 2026-11-24: browser control by agents (`ide-web` `devtools.rs`: CDP through `send_dev_tools_message`, `post_task` to CEF's UI thread; `browser_agent.rs`): no OS-specific code, checked on Windows only.

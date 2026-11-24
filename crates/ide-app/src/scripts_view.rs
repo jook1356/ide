@@ -237,6 +237,14 @@ impl App {
             }
             ScriptsMsg::Refresh => self.load_scripts(sid),
             ScriptsMsg::Loaded(repo, key, r) => {
+                if d.repo != repo {
+                    // Listed for a repo hidden since: its kept view takes the list.
+                    if let Some(v) = d.cache.get_mut(&repo) {
+                        v.scripts_list = Some((repo.clone(), r.map_err(|e| i18n::proto_error(&e))));
+                        v.scripts_loaded_key = Some((repo, key));
+                    }
+                    return Task::none();
+                }
                 s.loading = false;
                 s.list = Some((repo.clone(), r.map_err(|e| i18n::proto_error(&e))));
                 s.loaded_key = Some((repo, key));

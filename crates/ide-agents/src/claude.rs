@@ -10,6 +10,7 @@
 //! | Instructions | `<scratch>/instructions.md` via `--append-system-prompt-file` |
 //! | Outside dirs | `--add-dir` (legacy worktrees, the repositories' git dirs) |
 //! | Session name | `-n <title>` |
+//! | First prompt | `-- "<prompt>"` (last; a child session's task, new conversations only) |
 //! | Hooks | `<scratch>/settings.json` (`{"hooks": ...}`) via `--settings`; exec form (`command` = the hook program, `args`), no shell (d) |
 //! | Resume | fresh: `--session-id <uuid>`; next start: `--resume <uuid>` if `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` follows `/clear` and `/resume` |
 //! | Inherited env | markers of a Claude Code that started the server (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, ...) are removed: with them the CLI runs as a child session and keeps no transcript (v 2.1.330) |
@@ -119,6 +120,25 @@ fn transcript_file(home: &std::path::Path, id: &str) -> Option<std::path::PathBu
         .find(|p| p.is_file())
 }
 
+/// The conversation's title in a transcript: the last `{"type":"ai-title","aiTitle":..}` or
+/// `{"type":"custom-title","customTitle":..}` line (v 2.1.3xx: `ai-title` only appears when
+/// the CLI was started without `-n`).
+pub(crate) fn transcript_title(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("-title\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find_map(|v| {
+            let key = match v.get("type")?.as_str()? {
+                "ai-title" => "aiTitle",
+                "custom-title" => "customTitle",
+                _ => return None,
+            };
+            let t = v.get(key)?.as_str()?.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        })
+}
+
 /// Longest text of one entry, and of a tool call / result.
 const TEXT_MAX: usize = 4000;
 const TOOL_MAX: usize = 300;
@@ -204,6 +224,71 @@ pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::Transcri
     out.split_off(skip)
 }
 
+/// The background tasks of the main conversation that still run, by the transcript (v 2.1.331):
+/// a tool result (`toolUseResult`) with `backgroundTaskId` (a Bash / PowerShell command run in
+/// the background or moved there at its timeout) or `status: "async_launched"` + `agentId` (a
+/// background agent) starts one; its `<task-notification>` (`<task-id>`, a `<status>` other
+/// than running; recorded as a `queue-operation` enqueue the moment the task ends, then as the
+/// delivered `attachment` / user message) or a stop result (`task_id` + `task_type`, TaskStop)
+/// ends it. Subagents' own files (sidechains) are not read: their tasks end before they do.
+pub(crate) fn background_running(jsonl: &str) -> Vec<String> {
+    const MARKS: [&str; 4] = ["backgroundTaskId", "async_launched", "<task-notification>", "\"task_type\""];
+    let mut running: Vec<String> = Vec::new();
+    for line in jsonl.lines() {
+        if !MARKS.iter().any(|m| line.contains(m)) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
+        let str_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // A notification's text: queued, delivered as an attachment, or (older) a user message.
+        let note = match kind {
+            "queue-operation" if str_of(&v, "operation").as_deref() == Some("enqueue") => str_of(&v, "content"),
+            "attachment" => v.get("attachment").and_then(|a| str_of(a, "prompt")),
+            "user" => v.get("message").and_then(|m| str_of(m, "content")),
+            _ => None,
+        };
+        if let Some(note) = note.filter(|n| n.trim_start().starts_with("<task-notification>")) {
+            let tag = |t: &str| {
+                let open = format!("<{t}>");
+                let at = note.find(&open)? + open.len();
+                let len = note[at..].find(&format!("</{t}>"))?;
+                Some(note[at..at + len].trim().to_owned())
+            };
+            if let Some(id) = tag("task-id")
+                && !matches!(tag("status").as_deref(), Some("running" | "pending"))
+            {
+                running.retain(|r| *r != id);
+            }
+            continue;
+        }
+        if kind != "user" {
+            continue;
+        }
+        let Some(r) = v.get("toolUseResult").filter(|r| r.is_object()) else {
+            continue;
+        };
+        let started = str_of(r, "backgroundTaskId").or_else(|| {
+            (str_of(r, "status").as_deref() == Some("async_launched"))
+                .then(|| str_of(r, "agentId"))
+                .flatten()
+        });
+        if let Some(id) = started.filter(|i| !i.is_empty()) {
+            if !running.contains(&id) {
+                running.push(id);
+            }
+        } else if let Some(id) = str_of(r, "task_id").filter(|_| r.get("task_type").is_some()) {
+            running.retain(|x| *x != id);
+        }
+    }
+    running
+}
+
 /// Claude Code's file-editing tools (their `tool_input.file_path` / `notebook_path`).
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
@@ -253,6 +338,31 @@ impl AgentProvider for Claude {
         crate::PromptInput::Paste {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
+    }
+    fn first_prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        // `claude [options] -- "<prompt>"`: the positional prompt starts the first turn once
+        // the start dialogs (folder trust) are answered. `--` ends the options: `--add-dir`
+        // takes several values and would swallow the prompt (as Orca does, issue #48072).
+        Some(vec!["--".into(), prompt.to_owned()])
+    }
+
+    /// Slash commands (`/clear`, `/model`, custom commands) and bash mode (`!ls`) name nothing.
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        crate::title::from_prompt(prompt, &["/", "!"])
+    }
+
+    fn names_conversations(&self) -> bool {
+        true
+    }
+
+    /// The last `custom-title` (`/rename`, `-n`) or `ai-title` (Claude Code's own name of the
+    /// conversation) in the transcript.
+    fn conversation_title(&self, acct: Option<&AccountDir>, id: &str) -> Option<String> {
+        if !is_session_id(id) {
+            return None;
+        }
+        let file = transcript_file(&config_home(acct)?, id)?;
+        transcript_title(&std::fs::read_to_string(file).ok()?)
     }
 
     fn transcript(
@@ -331,7 +441,9 @@ impl AgentProvider for Claude {
         if let Some(a) = acct {
             plan.env.extend(self.account_env(a));
         }
-        if !plan.title.trim().is_empty() {
+        // A fixed name (`-n`) keeps Claude Code from naming the conversation itself (no
+        // `ai-title` in the transcript): an automatic title is not passed.
+        if !plan.auto_title && !plan.title.trim().is_empty() {
             let title = plan.title.trim().to_owned();
             plan.arg("-n").arg(title);
         }
@@ -348,13 +460,13 @@ impl AgentProvider for Claude {
         plan: &mut LaunchPlan,
         id: &str,
         acct: Option<&AccountDir>,
-    ) -> bool {
+    ) -> Option<String> {
         // `--resume` with an unknown id ends the CLI with an error: resume only what it kept.
         if !is_session_id(id) || !config_home(acct).is_some_and(|h| has_transcript(&h, id)) {
-            return false;
+            return None;
         }
         plan.arg("--resume").arg(id);
-        true
+        Some(id.to_owned())
     }
 
     fn apply_skills(&self, plan: &mut LaunchPlan, skills: &[Skill]) -> Result<()> {
@@ -484,8 +596,21 @@ impl AgentProvider for Claude {
                     .filter(|id| is_session_id(id))
                     .map(str::to_owned),
             }),
-            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
-            "Stop" => Some(HookEvent::Stopped),
+            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted {
+                prompt: Some(s("prompt")).filter(|p| !p.is_empty()).map(str::to_owned),
+            }),
+            // No hook reports the end of a background shell: the transcript says what still runs.
+            "Stop" => Some(
+                match Some(s("transcript_path"))
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                {
+                    Some(jsonl) => HookEvent::StoppedRunning {
+                        background: background_running(&jsonl),
+                    },
+                    None => HookEvent::Stopped,
+                },
+            ),
             // Without an id the start and its end cannot be paired: ignored.
             "SubagentStart" => Some(HookEvent::BackgroundStarted {
                 id: Some(s("agent_id")).filter(|i| !i.is_empty())?.to_owned(),

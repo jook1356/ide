@@ -42,6 +42,10 @@ mod write_guard;
 mod previews;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an agent CLI must wait at its input (and no dialog of it be auto-answered)
+/// before a queued prompt is typed in: start dialogs come one after the other, with a blank
+/// screen between them (`UserCtx::input_settled`).
+const INPUT_SETTLE: Duration = Duration::from_millis(1500);
 /// Env var naming the `gh` program ([`ServerConfig::gh`]).
 pub const GH_ENV: &str = "IDE_GH";
 const DEFAULT_COLS: u16 = 120;
@@ -318,6 +322,9 @@ pub struct UserCtx {
     /// session's dialog was last answered.
     auto_answers: Mutex<ide_core::auto_answer::AutoAnswers>,
     answered: Mutex<HashMap<String, std::time::Instant>>,
+    /// Since when each running agent session's screen shows its CLI at its input
+    /// ([`ide_agents::screen::ScreenManifest::at_input`]); queued prompts wait for it.
+    at_input: Mutex<HashMap<String, std::time::Instant>>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
     /// Sessions whose pending worktrees a background job is creating
@@ -325,7 +332,14 @@ pub struct UserCtx {
     preparing: Mutex<HashSet<String>>,
     /// The session list's branch badges, kept across restarts (`branch_badges.rs`).
     branch_badges: branch_badges::BranchBadges,
+    /// Detected base branches of repos without a configured one, by repo folder, with when
+    /// they were detected ([`BASE_CACHE_TTL`]): `repo.list` follows every `ReposChanged`.
+    detected_bases: Mutex<HashMap<PathBuf, (std::time::Instant, String)>>,
 }
+
+/// How long a detected base branch is reused by `repo.list` (detection runs several git
+/// commands per repo, seconds per repo on a busy machine).
+const BASE_CACHE_TTL: Duration = Duration::from_secs(20);
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
 struct GithubSetup {
@@ -407,9 +421,11 @@ impl UserCtx {
             grants: Mutex::new(grants),
             auto_answers: Mutex::new(auto_answers),
             answered: Mutex::new(HashMap::new()),
-            this: std::sync::OnceLock::new(),
+            at_input: Mutex::new(HashMap::new()),
+            this:std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
             branch_badges,
+            detected_bases: Mutex::new(HashMap::new()),
         })
     }
 
@@ -479,6 +495,8 @@ impl UserCtx {
                             "shared_folder": x.shared,
                             "running": info.state == SessionState::Running,
                             "activity": format!("{:?}", info.activity),
+                            // Messages (a child's first prompt too) not typed in yet.
+                            "queued_messages": self.bridge.pending(x.id.as_str()),
                             "repositories": x.worktrees.iter().map(|w| serde_json::json!({
                                 "name": repos.get(&w.repo).map_or_else(|| w.name.clone(), |r| r.name.clone()),
                                 "branch": w.branch,
@@ -509,10 +527,13 @@ impl UserCtx {
                         None => return Some(err(format!("this session has no repository `{want}`"))),
                     }
                 }
-                match self.session_create_child(session, shared, &ids, &text("title"), true, (0, 0)) {
-                    Ok(Response::SessionCreated { session: c, failures, .. }) => {
-                        let prompt = text("prompt");
-                        if !prompt.is_empty() {
+                let prompt = text("prompt");
+                let first = Some(prompt.as_str()).filter(|p| !p.is_empty());
+                match self.create_child(session, shared, &ids, &text("title"), Some(first), (0, 0)) {
+                    Ok((Response::SessionCreated { session: c, failures, .. }, in_args)) => {
+                        // On its command line the CLI submits it itself after its start
+                        // dialogs; otherwise it is typed in once the CLI is at its input.
+                        if first.is_some() && !in_args {
                             self.bridge.enqueue(&c.id, Some(s.id.as_str()), prompt.clone());
                             self.deliver_pending(&c.id);
                         }
@@ -525,7 +546,11 @@ impl UserCtx {
                                 "name": r.name, "branch": r.branch, "base": r.base, "folder": r.path,
                             })).collect::<Vec<_>>(),
                             "failed_repositories": failures.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-                            "first_prompt": if prompt.is_empty() { "none" } else { "queued until it is ready" },
+                            "first_prompt": match (first, in_args) {
+                                (None, _) => "none",
+                                (Some(_), true) => "passed on its command line: its agent starts on it",
+                                (Some(_), false) => "queued until it is ready",
+                            },
                         }))
                     }
                     Ok(_) => err("unexpected answer".into()),
@@ -550,9 +575,11 @@ impl UserCtx {
                 let tid = target.id.as_str();
                 // A session that was running when the server went away and has not been
                 // opened since (`SessionInfo::resume_on_open`) is woken by the message: its
-                // conversation resumes and the message is typed in once it is ready.
+                // conversation resumes and the message is typed in once it is ready. So is a
+                // stopped child of the sender (its CLI ended, e.g. it exited at a start dialog):
+                // the parent hands it work and nobody else would start it again.
                 let mut woken = false;
-                if target.autostart
+                if (target.autostart || target.parent.as_ref() == Some(&s.id))
                     && target.kind == SessionKind::Agent
                     && !self.existing_host(tid).is_some_and(|h| h.is_running())
                 {
@@ -818,17 +845,59 @@ impl UserCtx {
         ) {
             return;
         }
+        if self.bridge.pending(session) == 0 || !self.input_settled(session) {
+            return;
+        }
         let Some(msg) = self.bridge.dequeue(session) else {
             return;
         };
         match self.send_prompt(session, &msg.text) {
             Ok(()) => {
                 // Typed in: the turn starts (hooks / the screen confirm it).
+                self.at_input.lock().unwrap().remove(session);
                 self.set_activity(session, AgentActivity::Working);
             }
-            Err(e) if e.id == "prompt-not-ready" => self.bridge.requeue(session, msg),
+            // Not ready, or not running (yet / any more): it waits for the next start.
+            Err(e) if e.id == "prompt-not-ready" || e.id == "session-not-running" => {
+                self.bridge.requeue(session, msg)
+            }
             Err(e) => tracing::warn!("session {session}: a queued message was dropped: {e}"),
         }
+    }
+
+    /// `session`'s CLI can take a typed prompt: its screen rules show it at its input
+    /// (no start dialog, no auto-answered dialog) for [`INPUT_SETTLE`], and none of its
+    /// dialogs was auto-answered within that time (the next one may not be drawn yet).
+    /// Providers without screen rules: only the terminal's paste mode decides
+    /// (`ide_agents::prompt_writes`).
+    fn input_settled(&self, session: &str) -> bool {
+        let Ok(s) = self.resolve_session(session) else {
+            return true;
+        };
+        let Some(m) = self.providers.get(&s.provider).and_then(|p| p.screen_manifest()) else {
+            return true;
+        };
+        let Some(host) = self.existing_host(session) else {
+            return true; // `send_prompt` says it is not running
+        };
+        let lines = host.screen_text();
+        let title = host.title();
+        let since = {
+            let mut at = self.at_input.lock().unwrap();
+            if !m.at_input(&ide_agents::screen::ScreenInput { lines: &lines, title: &title }) {
+                at.remove(session);
+                return false;
+            }
+            *at.entry(session.to_owned()).or_insert_with(std::time::Instant::now)
+        };
+        let prefix = format!("{session} ");
+        let answered_now = self
+            .answered
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(k, t)| k.starts_with(&prefix) && t.elapsed() < INPUT_SETTLE);
+        since.elapsed() >= INPUT_SETTLE && !answered_now
     }
 
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
@@ -915,10 +984,79 @@ impl UserCtx {
         if let Some(a) = self.bridge.hook_activity(session, &event) {
             self.set_activity(session, a);
         }
+        self.auto_title(session, &event);
         match &event {
             ide_proto::AgentHookEvent::PreEdit { paths, .. } => self.edit_refusal(session, paths),
             _ => None,
         }
+    }
+
+    /// Automatic session titles (`docs/session-titles.md`): a session with a default title is
+    /// named by its provider from the first prompt; a CLI that names its conversations
+    /// itself replaces that with its own name at the end of a turn. Provider-agnostic: only
+    /// trait methods.
+    fn auto_title(&self, session: &str, event: &ide_proto::AgentHookEvent) {
+        use ide_core::AutoTitle;
+        use ide_proto::AgentHookEvent as E;
+        let Ok(s) = self.resolve_session(session) else {
+            return;
+        };
+        if s.auto_title.is_off() {
+            return;
+        }
+        let Ok(provider) = self.provider(&s.provider) else {
+            return;
+        };
+        let (title, next) = match (s.auto_title, event) {
+            (AutoTitle::Pending, E::PromptSubmitted { prompt: Some(p) }) => {
+                let Some(t) = provider.prompt_title(p) else {
+                    return;
+                };
+                let next = if provider.names_conversations() {
+                    AutoTitle::Provisional
+                } else {
+                    AutoTitle::Off
+                };
+                (t, next)
+            }
+            // A turn ended (with or without the CLI's list of background work).
+            (_, E::Stopped | E::StoppedRunning { .. }) if provider.names_conversations() => {
+                let Some(conversation) = s.conversation.as_deref() else {
+                    return;
+                };
+                let account = s.account.as_ref().and_then(|slug| {
+                    self.accounts
+                        .lock()
+                        .unwrap()
+                        .require(&s.provider, slug)
+                        .ok()
+                        .cloned()
+                });
+                let Some(t) = provider.conversation_title(account.as_ref(), conversation) else {
+                    return;
+                };
+                (t, AutoTitle::Off)
+            }
+            _ => return,
+        };
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return;
+        }
+        if self
+            .sessions
+            .lock()
+            .unwrap()
+            .set_auto_title(&s.id, title.clone(), next)
+            .is_err()
+        {
+            return;
+        }
+        self.audit(
+            "session.auto_title",
+            &format!("{} {next:?} {title:?}", s.id),
+        );
+        self.notify(Notify::SessionsChanged);
     }
 
     /// A tool hook (`PreEdit` / `PreShell`): the shared-folder lease, then the write guard,
@@ -928,7 +1066,12 @@ impl UserCtx {
         session: &str,
         event: ide_proto::AgentHookEvent,
     ) -> Option<String> {
-        if let Some(reason) = self.agent_hook(session, event.clone()) {
+        // Blocking (the session store's lock): off the async workers.
+        let (me, sid, ev) = (self.clone(), session.to_owned(), event.clone());
+        let refused = tokio::task::spawn_blocking(move || me.agent_hook(&sid, ev))
+            .await
+            .unwrap_or(None);
+        if let Some(reason) = refused {
             return Some(reason);
         }
         self.write_refusal(session, &event).await
@@ -1017,49 +1160,68 @@ impl UserCtx {
             .map(|(k, h)| (k.clone(), h.clone()))
             .collect();
         seen.retain(|k, _| hosts.iter().any(|(id, _)| id == k));
+        self.at_input
+            .lock()
+            .unwrap()
+            .retain(|k, _| hosts.iter().any(|(id, _)| id == k));
         for (id, host) in hosts {
+            self.screen_read(&id, &host, seen);
+            // After the screen was read: a queued message waits for the CLI's input.
             if self.bridge.pending(&id) > 0 {
                 self.deliver_pending(&id);
             }
-            let key = (host.end(), host.title());
-            if seen.get(&id) == Some(&key) {
-                continue;
+        }
+    }
+
+    /// One session's part of [`Self::screen_tick`].
+    fn screen_read(&self, id: &str, host: &TermHost, seen: &mut HashMap<String, (u64, String)>) {
+        let key = (host.end(), host.title());
+        if seen.get(id) == Some(&key) {
+            return;
+        }
+        seen.insert(id.to_owned(), key.clone());
+        let Ok(s) = self.resolve_session(id) else {
+            return;
+        };
+        if s.kind != SessionKind::Agent {
+            return;
+        }
+        let Some(m) = self
+            .providers
+            .get(&s.provider)
+            .and_then(|p| p.screen_manifest())
+        else {
+            return;
+        };
+        let lines = host.screen_text();
+        let input = ide_agents::screen::ScreenInput {
+            lines: &lines,
+            title: &key.1,
+        };
+        {
+            let mut at = self.at_input.lock().unwrap();
+            if m.at_input(&input) {
+                at.entry(id.to_owned()).or_insert_with(std::time::Instant::now);
+            } else {
+                at.remove(id);
             }
-            seen.insert(id.clone(), key.clone());
-            let Ok(s) = self.resolve_session(&id) else {
-                continue;
-            };
-            if s.kind != SessionKind::Agent {
-                continue;
-            }
-            let Some(m) = self
-                .providers
-                .get(&s.provider)
-                .and_then(|p| p.screen_manifest())
-            else {
-                continue;
-            };
-            let lines = host.screen_text();
-            let input = ide_agents::screen::ScreenInput {
-                lines: &lines,
-                title: &key.1,
-            };
-            // A dialog ide answers by itself (`docs/auto-answers.md`).
-            if let Some(ans) = m.answer(&input)
-                && self.auto_answer(&s, &host, &ans)
-            {
-                // Held back for now: read this screen again on the next tick.
-                seen.remove(&id);
-            }
-            let Some(state) = m.detect(&input) else {
-                continue;
-            };
-            if let Some(a) = self
-                .bridge
-                .screen_says(&id, crate::bridge::screen_activity(state))
-            {
-                self.set_activity(&id, a);
-            }
+        }
+        // A dialog ide answers by itself (`docs/auto-answers.md`).
+        if let Some(ans) = m.answer(&input)
+            && self.auto_answer(&s, host, &ans)
+        {
+            // Answered or held back: read this screen again on the next tick even if it does
+            // not change (keys the CLI missed leave the dialog as it was).
+            seen.remove(id);
+        }
+        let Some(state) = m.detect(&input) else {
+            return;
+        };
+        if let Some(a) = self
+            .bridge
+            .screen_says(id, crate::bridge::screen_activity(state))
+        {
+            self.set_activity(id, a);
         }
     }
 
@@ -1238,12 +1400,19 @@ impl UserCtx {
         self.host_sized(session.id.as_str(), DEFAULT_COLS, DEFAULT_ROWS)
     }
 
+    /// Session hosts keep their output in `sessions/<id>/output.log`
+    /// ([`TermHost::attach_log`]): a host made after a server restart replays what the session
+    /// printed before it.
     fn host_sized(&self, id: &str, cols: u16, rows: u16) -> Arc<TermHost> {
         self.hosts
             .lock()
             .unwrap()
             .entry(id.to_owned())
-            .or_insert_with(|| TermHost::new(id, cols, rows, self.events.clone()))
+            .or_insert_with(|| {
+                let host = TermHost::new(id, cols, rows, self.events.clone());
+                host.attach_log(&self.paths.session_output_log(id));
+                host
+            })
             .clone()
     }
 
@@ -1308,21 +1477,86 @@ impl UserCtx {
         }
     }
 
-    fn repo_info(&self, r: &RegisteredRepo, sessions: &SessionStore) -> RepoInfo {
-        let default_base = ide_core::repo_default_base(r);
-        let base = match &default_base {
-            Some(b) => b.clone(),
-            None => ide_core::Repo::open(&r.path)
+    fn repo_info(&self, r: &RegisteredRepo) -> RepoInfo {
+        self.repo_infos(std::slice::from_ref(r)).remove(0)
+    }
+
+    /// The infos of `list`. Base detection runs git (several commands per repo): it runs
+    /// without holding any store lock (every session request needs the session store), in
+    /// parallel, and reuses results younger than [`BASE_CACHE_TTL`].
+    fn repo_infos(&self, list: &[RegisteredRepo]) -> Vec<RepoInfo> {
+        let counts: Vec<u32> = {
+            let sessions = self.sessions.lock().unwrap();
+            list.iter()
+                .map(|r| sessions.count_using_repo(&r.id) as u32)
+                .collect()
+        };
+        let defaults: Vec<Option<String>> = list.iter().map(ide_core::repo_default_base).collect();
+        let mut bases: Vec<Option<String>> = defaults.clone();
+        {
+            let cache = self.detected_bases.lock().unwrap();
+            for (i, r) in list.iter().enumerate() {
+                if bases[i].is_none()
+                    && let Some((at, b)) = cache.get(&r.path)
+                    && at.elapsed() < BASE_CACHE_TTL
+                {
+                    bases[i] = Some(b.clone());
+                }
+            }
+        }
+        let todo: Vec<usize> = (0..list.len()).filter(|&i| bases[i].is_none()).collect();
+        let detect = |r: &RegisteredRepo| {
+            ide_core::Repo::open(&r.path)
                 .and_then(|repo| ide_core::detect_base(&repo, None))
                 .map(|b| b.name)
-                .unwrap_or_default(),
+                .unwrap_or_default()
         };
+        let found: Vec<(usize, String)> = if todo.len() <= 1 {
+            todo.iter().map(|&i| (i, detect(&list[i]))).collect()
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = todo
+                    .iter()
+                    .map(|&i| {
+                        let r = &list[i];
+                        (i, scope.spawn(move || detect(r)))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(i, h)| (i, h.join().unwrap_or_default()))
+                    .collect()
+            })
+        };
+        if !found.is_empty() {
+            let now = std::time::Instant::now();
+            let mut cache = self.detected_bases.lock().unwrap();
+            cache.retain(|_, (at, _)| at.elapsed() < BASE_CACHE_TTL);
+            for (i, b) in found {
+                cache.insert(list[i].path.clone(), (now, b.clone()));
+                bases[i] = Some(b);
+            }
+        }
+        list.iter()
+            .zip(defaults)
+            .zip(bases.into_iter().zip(counts))
+            .map(|((r, default_base), (base, count))| self.repo_info_with(r, default_base, base.unwrap_or_default(), count))
+            .collect()
+    }
+
+    fn repo_info_with(
+        &self,
+        r: &RegisteredRepo,
+        default_base: Option<String>,
+        base: String,
+        sessions: u32,
+    ) -> RepoInfo {
         RepoInfo {
             id: r.id.to_string(),
             name: r.name.clone(),
             path: r.path.display().to_string(),
             base,
-            sessions: sessions.count_using_repo(&r.id) as u32,
+            sessions,
             base_branch: r.base_branch.clone(),
             base_rule: r.base_branch_rule.as_ref().map(|x| BaseRuleInfo {
                 remote: x.remote.clone(),
@@ -1357,10 +1591,7 @@ impl UserCtx {
         match req {
             Request::RepoList => {
                 let list: Vec<RegisteredRepo> = self.repos.lock().unwrap().list().to_vec();
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repos(
-                    list.iter().map(|r| self.repo_info(r, &sessions)).collect(),
-                ))
+                Ok(Response::Repos(self.repo_infos(&list)))
             }
             Request::RepoRegister { path, init } => {
                 // Any folder the user picks (the folder picker is not limited). A git
@@ -1374,9 +1605,10 @@ impl UserCtx {
                     "repo.register",
                     &format!("{} {}{}", r.id, r.path.display(), if init { " init" } else { "" }),
                 );
+                // A folder registered again (e.g. after `init`): detect its base afresh.
+                self.detected_bases.lock().unwrap().remove(&r.path);
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoUnregister { id } => {
                 let rid = self.parse_repo(&id)?;
@@ -1403,8 +1635,7 @@ impl UserCtx {
                     .map_err(core)?;
                 self.audit("repo.set_base_branch", &format!("{id} {}", base.as_deref().unwrap_or("-")));
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoSetBaseRule { id, rule } => {
                 let rid = self.parse_repo(&id)?;
@@ -1431,8 +1662,7 @@ impl UserCtx {
                     &format!("{id} {}", rule.as_ref().map_or("-", |x| x.pattern.as_str())),
                 );
                 self.notify(Notify::ReposChanged);
-                let sessions = self.sessions.lock().unwrap();
-                Ok(Response::Repo(self.repo_info(&r, &sessions)))
+                Ok(Response::Repo(self.repo_info(&r)))
             }
             Request::RepoPreviewBaseRule { id, rule } => {
                 let (_, repo) = self.repo_git(&id)?;
@@ -1584,8 +1814,24 @@ impl UserCtx {
         repos: &[String],
         title: &str,
         start: bool,
-        (cols, rows): (u16, u16),
+        size: (u16, u16),
     ) -> Result<Response, ProtoError> {
+        self.create_child(parent, shared, repos, title, start.then_some(None), size)
+            .map(|(r, _)| r)
+    }
+
+    /// [`Self::session_create_child`]; `start`: `Some(first prompt)` starts the child (the
+    /// prompt, when there is one, on its command line if its provider takes it there). The
+    /// `bool`: the prompt went on the command line (else the caller queues it).
+    fn create_child(
+        &self,
+        parent: &str,
+        shared: bool,
+        repos: &[String],
+        title: &str,
+        start: Option<Option<&str>>,
+        (cols, rows): (u16, u16),
+    ) -> Result<(Response, bool), ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let ps = self.resolve_session(parent)?;
         Self::not_preparing(&ps)?;
@@ -1633,14 +1879,16 @@ impl UserCtx {
         );
         self.notify(Notify::SessionsChanged);
         self.notify(Notify::ReposChanged);
-        if start {
-            self.start(&session)?;
-        } else {
-            self.refresh_root(&session);
-        }
+        let prompt_in_args = match start {
+            Some(prompt) => self.start_with(&session, prompt)?,
+            None => {
+                self.refresh_root(&session);
+                false
+            }
+        };
         // The parent's guidance lists its children.
         self.refresh_root(&ps);
-        Ok(Response::SessionCreated {
+        let r = Response::SessionCreated {
             base_changes: Vec::new(),
             session: self.info(&session),
             failures: failures
@@ -1651,7 +1899,8 @@ impl UserCtx {
                     error: core_error(&f.error),
                 })
                 .collect(),
-        })
+        };
+        Ok((r, prompt_in_args))
     }
 
     /// A child and its parent (`bad-request` for a session without a parent).
@@ -2149,13 +2398,16 @@ impl UserCtx {
         if let Some(h) = self.uterm_host(session) {
             return h.write(bytes);
         }
-        let s = self.resolve_session(session)?;
-        self.existing_host(s.id.as_str())
-            .ok_or_else(|| ProtoError::new("session-not-running").arg("id", session))?
-            .write(bytes)?;
+        // Runs on the connection's request loop: the host map only (hosts are this user's
+        // sessions), never the session store, whose lock a slow request may hold.
+        let Some(h) = self.existing_host(session) else {
+            self.resolve_session(session)?;
+            return Err(ProtoError::new("session-not-running").arg("id", session));
+        };
+        h.write(bytes)?;
         // The user answered a permission prompt / question: the turn goes on.
-        if self.bridge.activity(s.id.as_str()) == ide_proto::AgentActivity::NeedsInput {
-            self.set_activity(s.id.as_str(), ide_proto::AgentActivity::Working);
+        if self.bridge.activity(session) == ide_proto::AgentActivity::NeedsInput {
+            self.set_activity(session, ide_proto::AgentActivity::Working);
         }
         Ok(())
     }
@@ -2166,8 +2418,12 @@ impl UserCtx {
             h.resize(cols, rows);
             return Ok(());
         }
-        let s = self.resolve_session(session)?;
-        self.host(&s).resize(cols, rows);
+        // See `term_write`: the session store only for a session without a host yet.
+        let h = match self.existing_host(session) {
+            Some(h) => h,
+            None => self.host(&self.resolve_session(session)?),
+        };
+        h.resize(cols, rows);
         Ok(())
     }
 
@@ -2267,8 +2523,14 @@ impl UserCtx {
                 self.uterm_remove_session(s.id.as_str());
                 // Watchers hold the worktree folders open: stop them before deleting.
                 self.watchers.remove(s.id.as_str());
+                // The output log is in the session's folder: close it first.
+                if let Some(h) = self.existing_host(s.id.as_str()) {
+                    h.detach_log();
+                }
                 {
-                    let repos = self.repos.lock().unwrap();
+                    // A snapshot: removing worktrees runs git, and every session list needs
+                    // the registry.
+                    let repos = self.repos.lock().unwrap().clone();
                     ide_core::remove_session_files(&self.paths, &s, &repos, remove_worktree)
                         .map_err(core)?;
                 }
@@ -2962,11 +3224,12 @@ impl UserCtx {
 
     /// The launch spec of a session (generates its scratch files).
     pub fn launch_spec(&self, s: &Session) -> Result<LaunchSpec, ProtoError> {
-        Ok(self.assemble(s)?.spec)
+        Ok(self.assemble(s, None)?.spec)
     }
 
-    /// The assembled launch of a session: spec + the conversation it starts or resumes.
-    fn assemble(&self, s: &Session) -> Result<ide_agents::Assembled, ProtoError> {
+    /// The assembled launch of a session: spec + the conversation it starts or resumes (+ the
+    /// first prompt on the command line, when the provider takes it there).
+    fn assemble(&self, s: &Session, first_prompt: Option<&str>) -> Result<ide_agents::Assembled, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let p = self.provider(&s.provider)?;
         let account = match &s.account {
@@ -2988,6 +3251,7 @@ impl UserCtx {
                     spec,
                     notes: Vec::new(),
                     conversation: None,
+                    prompt_in_args: false,
                 })
                 .map_err(core);
         }
@@ -3017,7 +3281,8 @@ impl UserCtx {
             &repos,
             guidance,
         )
-        .with_bridge(self.bridge.for_session(s.id.as_str()));
+        .with_bridge(self.bridge.for_session(s.id.as_str()))
+        .with_first_prompt(first_prompt);
         drop(repos);
         let built = ide_agents::assemble(p, &input, &self.launch_env).map_err(core)?;
         for n in &built.notes {
@@ -3028,13 +3293,19 @@ impl UserCtx {
     }
 
     fn start(&self, s: &Session) -> Result<(), ProtoError> {
+        self.start_with(s, None).map(drop)
+    }
+
+    /// [`Self::start`] with a first prompt: `true` when it went on the command line
+    /// ([`ide_agents::Assembled::prompt_in_args`]); otherwise the caller queues it.
+    fn start_with(&self, s: &Session, first_prompt: Option<&str>) -> Result<bool, ProtoError> {
         if self
             .existing_host(s.id.as_str())
             .is_some_and(|h| matches!(h.state(), SessionState::Exited(_)))
         {
             self.after_exit(s);
         }
-        let built = self.assemble(s)?;
+        let built = self.assemble(s, first_prompt)?;
         // A new process: nothing reported yet.
         self.bridge.reset(s.id.as_str());
         let host = self.host(s);
@@ -3054,7 +3325,11 @@ impl UserCtx {
             }
         }
         self.audit("session.start", s.id.as_str());
-        Ok(())
+        if built.prompt_in_args {
+            let bytes = first_prompt.map_or(0, str::len);
+            self.audit("session.first_prompt_arg", &format!("{} {bytes} bytes", s.id));
+        }
+        Ok(built.prompt_in_args)
     }
 
     /// The session's provider resumes conversations (only those sessions are offered for a
@@ -3546,6 +3821,10 @@ impl UserCtx {
     /// The terminal behind a `term.*` id: a user terminal, else a session.
     pub fn term_host(&self, id: &str) -> Result<Arc<TermHost>, ProtoError> {
         if let Some(h) = self.uterm_host(id) {
+            return Ok(h);
+        }
+        // See `term_write`: the session store only for a session without a host yet.
+        if let Some(h) = self.existing_host(id) {
             return Ok(h);
         }
         let s = self.resolve_session(id)?;

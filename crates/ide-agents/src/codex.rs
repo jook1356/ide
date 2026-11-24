@@ -8,11 +8,13 @@
 //! | Skills | workspace: `<session folder>/.agents/skills/<name>/` (discovered from the cwd, also outside git: verified); original repo: fallback, listed in the developer instructions (nothing may be written into the repo; see docs/agent-providers.md for the rejected CODEX_HOME overlay) |
 //! | Guidance | workspace: `<session folder>/AGENTS.md` (verified: read from a non-git cwd) |
 //! | Outside dirs | `--add-dir` (writable: legacy worktrees, the repositories' git dirs) |
+//! | First prompt | `-- "<prompt>"` (last; a child session's task, new sessions only) |
 //! | Sandbox | `--sandbox workspace-write` unless the account's `config.toml` sets `sandbox_mode` (a session folder is not a trusted project: Codex would start read-only and refuse `--add-dir`, v 0.172.0) |
 //! | MCP | `-c mcp_servers.<name>={command="..", args=[..], env={..}}` |
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
 //! | Hooks | account integration (user-installed): ide's entries in `CODEX_HOME/hooks.json`, approved once in Codex with `/hooks` (d) |
 //! | Windows sandbox | account integration also runs `codex sandbox setup --elevated --current-user` once per Codex home (UAC; it writes `[windows] sandbox = "elevated"` and `.sandbox/setup_marker.json`, v 0.172.0): without it Codex is read-only and refuses `--add-dir` |
+//! | Resume | Codex picks its own id: a fresh start stores the placeholder `started:<unix ms>`; the `SessionStart` hook's `session_id` (with the integration) replaces it. Next start: `codex resume <uuid> ...` (the subcommand first; it takes every option used here, v 0.172.0) when `<CODEX_HOME>/sessions/**/rollout-*-<uuid>.jsonl[.zst]` exists; a placeholder resolves to the earliest rollout of the same cwd written since that start. Codex writes the rollout with the first prompt: an untouched session starts fresh |
 
 use ide_core::{McpServer, Result};
 
@@ -44,6 +46,20 @@ fn codex_home(acct: Option<&AccountDir>) -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME"))
         .filter(|h| !h.is_empty())
         .map(|h| std::path::PathBuf::from(h).join(".codex"))
+}
+
+/// The last non-empty `thread_name` of thread `id` in `session_index.jsonl` text (lines
+/// `{"id":"<thread>","thread_name":"..","updated_at":".."}`).
+pub(crate) fn thread_name(text: &str, id: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .filter(|l| l.contains(id))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("id").and_then(|x| x.as_str()) == Some(id))
+        .find_map(|v| {
+            let t = v.get("thread_name")?.as_str()?.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        })
 }
 
 /// The user set `sandbox_mode` in Codex's `config.toml` (read only; an unreadable file counts
@@ -180,6 +196,12 @@ impl AgentProvider for Codex {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
     }
+    fn first_prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        // `codex [options] -- "<prompt>"` (the TUI's optional `[PROMPT]`): submitted as the
+        // first turn after the trust question. `--` ends the options (`--add-dir` and
+        // `-c` take values; a prompt may start with `-`).
+        Some(vec!["--".into(), prompt.to_owned()])
+    }
 
     /// Esc stops Codex's turn ("esc to interrupt" on its screen) (a).
     fn interrupt_keys(&self) -> Option<&'static [u8]> {
@@ -198,7 +220,7 @@ impl AgentProvider for Codex {
             mcp: Support::Native,
             instructions: Support::Native,
             hooks: Support::Unsupported,
-            resume: false,
+            resume: true,
             session_name: false,
             integration: true,
             original_repo: ModeSupport {
@@ -211,6 +233,22 @@ impl AgentProvider for Codex {
 
     fn screen_manifest(&self) -> Option<&'static crate::screen::ScreenManifest> {
         Some(&SCREEN)
+    }
+
+    /// Slash commands (`/model`) and shell commands (`!ls`) name nothing.
+    fn prompt_title(&self, prompt: &str) -> Option<String> {
+        crate::title::from_prompt(prompt, &["/", "!"])
+    }
+
+    fn names_conversations(&self) -> bool {
+        true
+    }
+
+    /// Codex names its threads itself: the last `thread_name` of thread `id` in
+    /// `$CODEX_HOME/session_index.jsonl` (v 0.172.0).
+    fn conversation_title(&self, acct: Option<&AccountDir>, id: &str) -> Option<String> {
+        let text = std::fs::read_to_string(codex_home(acct)?.join("session_index.jsonl")).ok()?;
+        thread_name(&text, id)
     }
 
     fn hook_caps(&self) -> HookCaps {
@@ -328,8 +366,16 @@ impl AgentProvider for Codex {
         let v: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
         match event {
-            "SessionStart" => Some(HookEvent::SessionStart { conversation: None }),
-            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted),
+            // `session_id` (d): the thread Codex started or resumed (`/new`, `/resume`). Hook
+            // input is untrusted: only a UUID is kept (it becomes an argument and a file name).
+            "SessionStart" => Some(HookEvent::SessionStart {
+                conversation: Some(s("session_id"))
+                    .filter(|id| crate::claude::is_session_id(id))
+                    .map(str::to_owned),
+            }),
+            "UserPromptSubmit" => Some(HookEvent::PromptSubmitted {
+                prompt: Some(s("prompt")).filter(|p| !p.is_empty()).map(str::to_owned),
+            }),
             "Stop" => Some(HookEvent::Stopped),
             "PermissionRequest" => Some(HookEvent::NeedsInput { permission: true }),
             "PreToolUse" => {
@@ -426,6 +472,30 @@ impl AgentProvider for Codex {
         }
     }
 
+    /// Codex takes no id up front: remember when this conversation started, so a later start
+    /// can find its rollout without the `SessionStart` hook.
+    fn new_conversation(&self, _plan: &mut LaunchPlan) -> Option<String> {
+        Some(format!("{STARTED}{}", now_ms()))
+    }
+
+    fn resume_conversation(
+        &self,
+        plan: &mut LaunchPlan,
+        id: &str,
+        acct: Option<&AccountDir>,
+    ) -> Option<String> {
+        let sessions = codex_home(acct)?.join("sessions");
+        let id = match id.strip_prefix(STARTED) {
+            Some(ms) => started_rollout(&sessions, &plan.cwd, ms.parse().ok()?)?,
+            // `codex resume` with an unknown id ends the CLI: resume only what it kept.
+            None if crate::claude::is_session_id(id) && has_rollout(&sessions, id) => id.to_owned(),
+            None => return None,
+        };
+        // The subcommand goes first: every option after it belongs to `codex resume`.
+        plan.args.splice(0..0, ["resume".to_owned(), id.clone()]);
+        Some(id)
+    }
+
     fn prepare_root(
         &self,
         plan: &mut LaunchPlan,
@@ -464,6 +534,104 @@ impl AgentProvider for Codex {
         plan.write_file("instructions.md", text.as_bytes())?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------- conversations (resume)
+
+/// The stored placeholder of a conversation Codex has not named to ide yet:
+/// `started:<unix ms of the launch>`.
+const STARTED: &str = "started:";
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+}
+
+/// Codex's rollout files under `sessions` (`YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`, older
+/// ones also `.jsonl.zst`).
+fn rollouts(sessions: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, depth: u8, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                if depth < 4 {
+                    walk(&path, depth + 1, out);
+                }
+            } else if e.file_name().to_string_lossy().starts_with("rollout-") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(sessions, 0, &mut out);
+    out
+}
+
+/// Did Codex keep a rollout of thread `id`?
+fn has_rollout(sessions: &std::path::Path, id: &str) -> bool {
+    let (plain, packed) = (format!("-{id}.jsonl"), format!("-{id}.jsonl.zst"));
+    rollouts(sessions).iter().any(|p| {
+        let n = p.file_name().unwrap_or_default().to_string_lossy();
+        n.ends_with(&plain) || n.ends_with(&packed)
+    })
+}
+
+/// The same folder as Codex wrote it in a rollout (`\\?\` prefix, separators, trailing
+/// separator and, on Windows, letter case do not matter).
+fn same_dir(a: &str, b: &std::path::Path) -> bool {
+    let norm = |s: &str| {
+        let s = s.strip_prefix(r"\\?\").unwrap_or(s);
+        let s = if cfg!(windows) { s.replace('/', "\\").to_lowercase() } else { s.to_owned() };
+        s.trim_end_matches(['\\', '/']).to_owned()
+    };
+    norm(a) == norm(&b.display().to_string())
+}
+
+/// The thread of a conversation stored as a placeholder: the earliest rollout (Codex writes
+/// it with the first prompt) whose `session_meta` names `cwd`, written since the launch at
+/// `since_ms`. Without the hook's exact id two Codex sessions in one folder may swap
+/// threads (shared-folder children); a later `/new` inside the TUI is not followed.
+fn started_rollout(sessions: &std::path::Path, cwd: &std::path::Path, since_ms: u128) -> Option<String> {
+    use std::io::BufRead;
+    let since = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(since_ms.try_into().ok()?))?;
+    let mut found: Option<(std::time::SystemTime, String)> = None;
+    for path in rollouts(sessions) {
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        // Creation time where the file system keeps one, else the last write (never earlier).
+        let Some(born) = meta.created().or_else(|_| meta.modified()).ok().filter(|t| *t >= since) else {
+            continue;
+        };
+        if found.as_ref().is_some_and(|(t, _)| *t <= born) {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut first = String::new();
+        if std::io::BufReader::new(file).read_line(&mut first).is_err() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
+        let p = &v["payload"];
+        let id = p["id"].as_str().unwrap_or_default();
+        if v["type"] == "session_meta"
+            && crate::claude::is_session_id(id)
+            && p["cwd"].as_str().is_some_and(|c| same_dir(c, cwd))
+        {
+            found = Some((born, id.to_owned()));
+        }
+    }
+    found.map(|(_, id)| id)
 }
 
 // ---------------------------------------------------------------- hooks (account integration)

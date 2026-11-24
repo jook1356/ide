@@ -124,6 +124,28 @@ impl ChangesActs {
         self.status = Some(s.clone());
     }
 
+    /// What is kept while the repo is hidden (`repo_cache.rs`): the status, files, checkboxes
+    /// and stash list; open menus, popovers and actions in flight are dropped, the branch list
+    /// is loaded again when the picker opens.
+    pub fn kept(self) -> Self {
+        Self {
+            status: self.status,
+            files: self.files,
+            unchecked: self.unchecked,
+            menu: None,
+            stash: StashUi {
+                list: self.stash.list,
+                seq: self.stash.seq,
+                section_open: self.stash.section_open,
+                show_all: self.stash.show_all,
+                expanded: self.stash.expanded,
+                ..StashUi::default()
+            },
+            commit_menu: None,
+            branch: BranchUi::default(),
+        }
+    }
+
     /// The checked-out branch (`None`: detached or not loaded).
     pub fn branch_name(&self) -> Option<&str> {
         self.status.as_ref().and_then(|s| s.branch.as_deref())
@@ -590,7 +612,12 @@ impl App {
                 self.refresh_repo(sid)
             }
             ActMsg::Stashes(repo, seq, res) => {
-                if d.repo != repo || a.stash.seq != seq {
+                if d.repo != repo {
+                    // Hidden now: its kept view lists the stashes again when shown.
+                    d.cache.invalidate(&repo, crate::repo_cache::Refresh::FILES);
+                    return Task::none();
+                }
+                if a.stash.seq != seq {
                     return Task::none();
                 }
                 // Desk's `useStashes`: a failure leaves the list empty.

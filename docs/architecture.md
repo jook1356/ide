@@ -65,7 +65,9 @@ composited as a GPU texture (cef-rs `accelerated_osr`, wgpu 30 = iced master's w
 4. Session switching keeps every PTY alive (background sessions keep running, in the server; they
    also survive closing the app and are replayed on reopen).
 5. Detail area: one CEF tab per session showing a URL (preview placeholder).
-6. Persistence: accounts, configurations and session list (not scrollback) survive restart; worktrees are reused.
+6. Persistence: accounts, configurations and session list survive restart; worktrees are reused. A
+   session terminal's output tail (`sessions/<id>/output.log`) is replayed into the scrollback after
+   a server restart (`docs/server-architecture.md`, "Output log across server restarts").
 
 Later: file viewer/editor (iced `text_editor` + highlighter), diff viewer, previews (bundled
 tsx/vue/svelte), mods, structured agent output, settings UI, packaging (bundle CEF).

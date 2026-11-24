@@ -21,10 +21,16 @@ pub enum HookEvent {
     /// The CLI started (or resumed / cleared) its conversation; `conversation` is the CLI's id
     /// of it, if reported (stored on the session, resumed on the next start).
     SessionStart { conversation: Option<String> },
-    /// The user's prompt was submitted: a turn started.
-    PromptSubmitted,
+    /// The user's prompt was submitted: a turn started. `prompt`: its text, if the CLI reports
+    /// it (a session with a default title is named from it, `docs/session-titles.md`).
+    PromptSubmitted { prompt: Option<String> },
     /// The turn finished.
     Stopped,
+    /// The turn finished, and the CLI's own record says exactly these ids of work that can
+    /// outlive the turn still run (the same id space as [`HookEvent::BackgroundStarted`]). For
+    /// work whose end no hook reports (Claude Code's background shells): it replaces what the
+    /// IDE counted, so an end it never saw cannot hold the session.
+    StoppedRunning { background: Vec<String> },
     /// The CLI waits for the user: a permission prompt (`permission`) or idle input.
     NeedsInput { permission: bool },
     /// The agent is about to use a tool.
