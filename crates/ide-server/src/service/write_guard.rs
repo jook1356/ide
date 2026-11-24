@@ -31,9 +31,11 @@ impl UserCtx {
             self.paths.root().join("accounts"),
             std::env::temp_dir(),
         ];
-        if let Some(h) = home_dir() {
-            free.push(h.join(".claude"));
-            free.push(h.join(".codex"));
+        if s.account.is_none()
+            && let Ok(p) = self.provider(&s.provider)
+        {
+            // No account: the CLI keeps its state in its default config home.
+            free.extend(p.default_state_dirs());
         }
         let mut scope_repos = Vec::new();
         for w in &s.worktrees {

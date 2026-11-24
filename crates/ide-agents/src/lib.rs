@@ -342,6 +342,12 @@ pub trait AgentProvider: Send + Sync {
     fn hook_caps(&self) -> HookCaps {
         HookCaps::NONE
     }
+    /// The folders the CLI keeps its own state in (memory, plans, settings) when a session
+    /// runs without an account; with one, that is the account dir. The write guard
+    /// (`docs/write-guard.md`) lets agents write there. Default: none.
+    fn default_state_dirs(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// The CLI's hook input (`event`: the name [`AgentProvider::apply_hooks`] registered,
     /// `input`: what the CLI wrote to stdin) as an event; `None` = not one the IDE uses.
     fn parse_hook(&self, _event: &str, _input: &[u8]) -> Option<HookEvent> {

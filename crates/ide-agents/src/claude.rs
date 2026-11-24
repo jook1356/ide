@@ -431,6 +431,10 @@ impl AgentProvider for Claude {
         }
     }
 
+    fn default_state_dirs(&self) -> Vec<std::path::PathBuf> {
+        config_home(None).into_iter().collect()
+    }
+
     fn apply_hooks(&self, plan: &mut LaunchPlan, hooks: &HookTargets) -> Result<()> {
         let Some(program) = &hooks.program else {
             return Ok(());

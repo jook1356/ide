@@ -120,6 +120,19 @@ impl AgentProvider for Codex {
         }
     }
 
+    fn default_state_dirs(&self) -> Vec<std::path::PathBuf> {
+        // Codex's config home without an account: `CODEX_HOME`, else `~/.codex`.
+        if let Some(d) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+            return vec![d.into()];
+        }
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .filter(|h| !h.is_empty())
+            .map(|h| std::path::PathBuf::from(h).join(".codex"))
+            .into_iter()
+            .collect()
+    }
+
     fn integration_status(&self, acct: &AccountDir, hooks: &HookTargets) -> IntegrationStatus {
         let Some(program) = &hooks.program else {
             return IntegrationStatus::NotNeeded;

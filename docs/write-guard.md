@@ -20,8 +20,9 @@ the user.
 - Git writes in the session's worktrees **on the session's branch** (`ide/<id>`); an
   original-repo session on the repository's **current** branch.
 - The session's data folder (`<data>/sessions/<id>`: scratch files, attachments), the agents'
-  account folders (`<data>/accounts`, `~/.claude`, `~/.codex`: memory, plans, settings) and the
-  OS temp folder.
+  account folders (`<data>/accounts`; without an account, the CLI's default config home that
+  its provider names, `AgentProvider::default_state_dirs`: memory, plans, settings) and the OS
+  temp folder.
 
 ## What needs approval
 
