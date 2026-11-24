@@ -31,6 +31,7 @@ asking for its own tools (shell, edits) as before.
 | Act within the family, as before | `ide_send_to_session` (queued), create / merge / sync children, write access | none |
 | Act on another session's running turn, or outside ide | `ide_send_to_session` `steer` / `interrupt`; `ide_terminal_input` (`terminal.input`, `docs/terminals.md`) | **asked** |
 | Use a site in ide's browser | `ide_browser_open` / `read` / `act` / `screenshot` (`browser.act` / `browser.read`, target = the site's origin; an act grant also allows reading): `docs/browser-control.md` | **asked** |
+| Write outside the session (another checkout, another branch, another folder) | file edits and shell commands caught by the CLI's tool hook (`docs/write-guard.md`) | **asked**, per folder (`folder.write`) |
 
 Adding a feature means picking its tier and, for asked ones, a capability name and the target
 key.

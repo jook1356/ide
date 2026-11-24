@@ -29,6 +29,15 @@ impl UserCtx {
         }
     }
 
+    /// What a grant's target is called: a session's title, or the folder itself.
+    fn target_title(&self, capability: &str, target: &str) -> String {
+        if capability == super::write_guard::CAP_WRITE {
+            target.to_owned()
+        } else {
+            self.title_of(target)
+        }
+    }
+
     /// May `requester` do `capability` to `target`? A kept grant answers at once; otherwise
     /// the user is asked in the app (`detail`: what exactly, shown in the question). `Err`:
     /// why not, for the agent.
@@ -47,7 +56,7 @@ impl UserCtx {
             "requester": requester,
             "requester_title": self.title_of(requester),
             "target": target,
-            "target_title": self.title_of(target),
+            "target_title": self.target_title(capability, target),
             "detail": detail,
         });
         let apps = self.subscriber_count() > 0;
@@ -90,7 +99,7 @@ impl UserCtx {
             list.into_iter()
                 .map(|g| ApprovalInfo {
                     requester_title: self.title_of(&g.requester),
-                    target_title: self.title_of(&g.target),
+                    target_title: self.target_title(&g.capability, &g.target),
                     id: g.id,
                     capability: g.capability,
                     requester: g.requester,

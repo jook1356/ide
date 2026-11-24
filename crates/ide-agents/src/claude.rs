@@ -213,7 +213,7 @@ fn hook_entry(program: &str, event: &str) -> serde_json::Value {
         "type": "command",
         "command": program,
         "args": HookTargets::args("claude", event),
-        "timeout": 10,
+        "timeout": crate::hooks::hook_timeout_secs(event),
     })
 }
 
@@ -427,8 +427,12 @@ impl AgentProvider for Claude {
         HookCaps {
             status: Support::Native,
             guard_edits: Support::Native,
-            guard_shell: Support::Unsupported,
+            guard_shell: Support::Native,
         }
+    }
+
+    fn default_state_dirs(&self) -> Vec<std::path::PathBuf> {
+        config_home(None).into_iter().collect()
     }
 
     fn apply_hooks(&self, plan: &mut LaunchPlan, hooks: &HookTargets) -> Result<()> {
@@ -504,10 +508,11 @@ impl AgentProvider for Claude {
                         .into_iter()
                         .collect();
                     ToolUse::Edit { tool, paths }
-                } else if tool == "Bash" {
+                } else if tool == "Bash" || tool == "PowerShell" {
                     ToolUse::Shell {
                         tool,
                         command: field("command").unwrap_or_default(),
+                        cwd: Some(s("cwd")).filter(|c| !c.is_empty()).map(str::to_owned),
                     }
                 } else {
                     ToolUse::Other { tool }

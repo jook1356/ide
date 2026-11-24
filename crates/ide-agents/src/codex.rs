@@ -116,8 +116,21 @@ impl AgentProvider for Codex {
         HookCaps {
             status: Support::Native,
             guard_edits: Support::Native,
-            guard_shell: Support::Unsupported,
+            guard_shell: Support::Native,
         }
+    }
+
+    fn default_state_dirs(&self) -> Vec<std::path::PathBuf> {
+        // Codex's config home without an account: `CODEX_HOME`, else `~/.codex`.
+        if let Some(d) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+            return vec![d.into()];
+        }
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .filter(|h| !h.is_empty())
+            .map(|h| std::path::PathBuf::from(h).join(".codex"))
+            .into_iter()
+            .collect()
     }
 
     fn integration_status(&self, acct: &AccountDir, hooks: &HookTargets) -> IntegrationStatus {
@@ -158,7 +171,7 @@ impl AgentProvider for Codex {
                 "hooks": [{
                     "type": "command",
                     "command": hook_command(program, event),
-                    "timeout": 10,
+                    "timeout": crate::hooks::hook_timeout_secs(event),
                 }]
             });
             if let Some(m) = matcher {
@@ -229,7 +242,8 @@ impl AgentProvider for Codex {
                             .collect();
                         ToolUse::Edit { tool, paths }
                     }
-                    "Bash" | "exec_command" | "shell" => ToolUse::Shell {
+                    "Bash" | "exec_command" | "shell" | "PowerShell" => ToolUse::Shell {
+                        cwd: Some(s("cwd")).filter(|c| !c.is_empty()).map(str::to_owned),
                         command: ti
                             .get("command")
                             .map(|c| match c {
@@ -338,8 +352,9 @@ const HOOK_EVENTS: [(&str, Option<&str>); 5] = [
     ("UserPromptSubmit", None),
     ("Stop", None),
     ("PermissionRequest", None),
-    // File edits only (every hook run is a process start; shells are not guarded).
-    ("PreToolUse", Some("apply_patch|Edit|Write")),
+    // File edits and shell commands (writes outside the session need the user's approval,
+    // `docs/write-guard.md`; every hook run is a process start).
+    ("PreToolUse", Some("apply_patch|Edit|Write|Bash|exec_command|shell|PowerShell")),
 ];
 
 /// What marks ide's entries in `hooks.json` (their command runs the hook program for Codex).

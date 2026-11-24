@@ -489,7 +489,10 @@ async fn mcp_stdio_against_a_daemon() {
     .await
     .expect("activity notified");
     assert_eq!(working, ide_proto::AgentActivity::Working);
-    let edit = r#"{"tool_name":"Write","tool_input":{"file_path":"C:/x/a.rs"}}"#;
+    // Inside the session folder: no opinion (outside it the write guard asks the user).
+    let inside = format!("{}/a.rs", s.root.replace('\\', "/"));
+    let edit = serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": inside}}).to_string();
+    let edit = edit.as_str();
     assert_eq!(hook("PreToolUse", edit, true).await, (0, String::new()));
     // Without the session env (or with nothing the IDE uses): no opinion, never an error.
     assert_eq!(hook("PreToolUse", edit, false).await, (0, String::new()));
@@ -634,5 +637,109 @@ async fn account_integration() {
         "bad-request"
     );
     drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The write guard (`docs/write-guard.md`): tool hooks that write inside the session pass
+/// without a question; another checkout, another branch or another folder asks the user per
+/// folder (refused -> the agent gets the reason; allowed for the session -> kept, and covers
+/// everything below that folder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_guard_asks_per_folder() {
+    use ide_proto::AgentHookEvent;
+    let dir = tmp_dir("bridge-write-guard");
+    let repo = dir.join("repo");
+    init_repo(&repo);
+    let other = dir.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let server = bridged_server(&dir.join("data"), &dir.join("bin"));
+    let app = Client::connect(memory(&server), opts()).await.unwrap();
+    let repo_id = app.register_repo(&repo.display().to_string()).await.unwrap().id;
+    let (s, _) = app.create_session(new_session("shell", None, vec![repo_id])).await.unwrap();
+    let wt = s.repos[0].path.clone();
+    let ctx = server.authorize(server.user()).unwrap();
+    let token = env_of(
+        &ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap().env,
+        TOKEN_ENV,
+    )
+    .unwrap();
+    let (mux, mut rx, r) = agent_conn(&server, &s.id, &token).await;
+    assert!(r.is_ok());
+
+    // The app answers approval questions from a script and records them.
+    let answers = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<Result<String, String>>::new()));
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let mut events = app.events().unwrap();
+    let (app2, answers2, asked2) = (app.clone(), answers.clone(), asked.clone());
+    tokio::spawn(async move {
+        while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::AgentRequest { request, tool, args, .. }) = e
+                && tool == ide_proto::APPROVAL_REQUEST
+            {
+                asked2.lock().unwrap().push(serde_json::from_str(&args).unwrap());
+                let a = answers2.lock().unwrap().pop_front().unwrap_or(Err("no answer".into()));
+                let _ = app2.agent_reply(request, a).await;
+            }
+        }
+    });
+    let mut id = 10;
+    let mut hook = async |event: AgentHookEvent| {
+        id += 1;
+        match agent_req(&mux, &mut rx, id, Request::AgentHook { event }).await {
+            Ok(Response::AgentHookDecision(d)) => d,
+            other => panic!("{other:?}"),
+        }
+    };
+    let shell = |command: &str, cwd: &str| AgentHookEvent::PreShell {
+        tool: "Bash".into(),
+        command: command.into(),
+        cwd: Some(cwd.into()),
+    };
+    let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
+    let repo_s = fwd(&repo);
+
+    // Inside: the worktree on its own branch, the session folder, reads anywhere.
+    assert_eq!(hook(shell("git commit -am x && git push -u origin HEAD", &wt)).await, None);
+    assert_eq!(hook(shell("echo a > notes.md && git -C ../.. status", &s.root)).await, None);
+    assert_eq!(hook(shell(&format!("cd {repo_s} && git log --oneline -3"), &s.root)).await, None);
+    assert!(asked.lock().unwrap().is_empty());
+
+    // The original checkout: asked for its folder; refused -> the agent is told.
+    answers.lock().unwrap().push_back(Err("refused".into()));
+    let deny = hook(shell(&format!("cd {repo_s} && git merge --no-ff ide/x"), &s.root)).await;
+    let deny = deny.expect("refused");
+    assert!(deny.contains(&repo_s) && deny.contains("refused"), "{deny}");
+    {
+        let a = asked.lock().unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0]["capability"], "folder.write");
+        assert_eq!(a[0]["target"].as_str(), Some(repo_s.as_str()));
+        assert_eq!(a[0]["target_title"].as_str(), Some(repo_s.as_str()));
+        assert!(a[0]["detail"].as_str().unwrap().contains("git merge"), "{}", a[0]);
+    }
+
+    // Another branch from the session's own worktree: the same folder (the repository).
+    answers.lock().unwrap().push_back(Ok("session".into()));
+    assert_eq!(hook(shell("git push origin HEAD:main", &wt)).await, None);
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert!(asked.lock().unwrap()[1]["detail"].as_str().unwrap().contains("branch main"));
+    // Kept for the session: no more questions for that folder and what is below it.
+    assert_eq!(hook(shell(&format!("cd {repo_s} && git merge ide/x"), &s.root)).await, None);
+    let edit = AgentHookEvent::PreEdit { tool: "Write".into(), paths: vec![format!("{repo_s}/src/a.rs")] };
+    assert_eq!(hook(edit).await, None);
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    let kept = app.approval_list().await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].capability.as_str(), kept[0].target_title.as_str()), ("folder.write", repo_s.as_str()));
+
+    // Another folder is asked for separately.
+    answers.lock().unwrap().push_back(Ok("once".into()));
+    let edit = AgentHookEvent::PreEdit { tool: "Write".into(), paths: vec![format!("{}/x.txt", fwd(&other))] };
+    assert_eq!(hook(edit).await, None);
+    let a = asked.lock().unwrap().clone();
+    assert_eq!(a.len(), 3);
+    assert_eq!(a[2]["target"].as_str(), Some(fwd(&other).as_str()));
+
+    app.delete_session(&s.id, true).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

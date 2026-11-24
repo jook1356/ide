@@ -37,6 +37,7 @@ mod auto_answers;
 pub(crate) mod browser;
 mod terminals;
 mod widgets;
+mod write_guard;
 mod previews;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -879,6 +880,19 @@ impl UserCtx {
             ide_proto::AgentHookEvent::PreEdit { paths, .. } => self.edit_refusal(session, paths),
             _ => None,
         }
+    }
+
+    /// A tool hook (`PreEdit` / `PreShell`): the shared-folder lease, then the write guard,
+    /// which may wait for the user's answer (`docs/write-guard.md`).
+    pub async fn agent_tool_hook(
+        self: &Arc<Self>,
+        session: &str,
+        event: ide_proto::AgentHookEvent,
+    ) -> Option<String> {
+        if let Some(reason) = self.agent_hook(session, event.clone()) {
+            return Some(reason);
+        }
+        self.write_refusal(session, &event).await
     }
 
     /// The session whose folder `s` works in (a shared child's owner, else itself).

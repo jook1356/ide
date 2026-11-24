@@ -147,8 +147,13 @@ pub enum AgentHookEvent {
     NeedsInput { permission: bool },
     /// About to edit these files.
     PreEdit { tool: String, paths: Vec<String> },
-    /// About to run a shell command.
-    PreShell { tool: String, command: String },
+    /// About to run a shell command (in `cwd`, when the CLI says).
+    PreShell {
+        tool: String,
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     /// About to use another tool.
     PreTool { tool: String },
     /// Work that can outlive the turn started / ended (`id`: the CLI's, opaque).
