@@ -332,6 +332,10 @@ pub struct SessionInfo {
     /// Its worktrees are still being created in the background (`NewSession::background`).
     #[serde(default)]
     pub preparing: bool,
+    /// Writes outside the session are not guarded: the provider's hooks come from an account
+    /// integration (`AccountIntegration`) that is missing or outdated (`docs/write-guard.md`).
+    #[serde(default)]
+    pub unguarded: bool,
 }
 
 /// What merging one repo of a session family did (`session.merge_child` / `sync_parent`).

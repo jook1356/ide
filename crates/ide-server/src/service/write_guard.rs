@@ -21,6 +21,38 @@ fn folder_key(p: &Path) -> String {
 }
 
 impl UserCtx {
+    /// Whether `s`'s writes go unguarded because its provider's hooks need an account
+    /// integration that is not in place (missing or outdated, or no account to hold it).
+    /// Providers that inject their hooks per session, or have none, are not reported here.
+    pub(crate) fn unguarded(&self, s: &Session) -> bool {
+        use ide_agents::IntegrationStatus as S;
+        if s.kind != SessionKind::Agent {
+            return false;
+        }
+        let Ok(p) = self.provider(&s.provider) else {
+            return false;
+        };
+        let caps = p.hook_caps();
+        if !p.capabilities().integration
+            || (caps.guard_edits == ide_agents::Support::Unsupported
+                && caps.guard_shell == ide_agents::Support::Unsupported)
+        {
+            return false;
+        }
+        let targets = self.bridge.hook_targets();
+        if targets.program.is_none() {
+            // No bridge: no hooks for any provider.
+            return false;
+        }
+        let Some(slug) = &s.account else {
+            return true;
+        };
+        let Some(acct) = self.accounts.lock().unwrap().get(&s.provider, slug).cloned() else {
+            return false;
+        };
+        matches!(p.integration_status(&acct, &targets), S::Missing | S::Outdated)
+    }
+
     /// Where `s` writes without asking.
     fn write_scope(&self, s: &Session) -> Scope {
         let repos = self.repos.lock().unwrap().clone();

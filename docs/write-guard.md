@@ -62,5 +62,9 @@ folder as target.
 A guard, not a sandbox: a shell can always write in ways a command line does not show
 (variables, scripts, programs writing files themselves, `git` aliases). Unknown paths (a
 variable, a relative path without a cwd) are not asked for. Sessions without hooks (the plain
-shell provider, a Codex account without ide's hooks installed) are not guarded. ide's own git
+shell provider, a Codex account without ide's hooks installed) are not guarded. A provider
+whose hooks come from an account integration (`AgentProvider::integration_status`) marks its
+sessions `SessionInfo::unguarded` while that integration is missing or outdated (or the session
+has no account): the session list shows a warning mark after the title, pointing to the
+account's settings; installing or removing an integration refreshes the list. ide's own git
 actions (footer commit / PR / merge, child merges) run in the daemon and are not affected.
