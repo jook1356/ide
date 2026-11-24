@@ -153,6 +153,17 @@ impl Caps {
     };
 }
 
+/// One entry of a conversation transcript ([`AgentProvider::transcript`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptEntry {
+    /// `user`, `assistant` or `tool` (a tool call or its result).
+    pub role: String,
+    /// The text (long texts and tool results shortened).
+    pub text: String,
+    /// When, as the CLI wrote it (empty when unknown).
+    pub at: String,
+}
+
 /// Logged-in state of an account, as reported by the CLI itself (best effort).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -251,6 +262,30 @@ pub trait AgentProvider: Send + Sync {
         _id: &str,
         _acct: Option<&AccountDir>,
     ) -> bool {
+        false
+    }
+
+    /// The last `limit` entries of the stored conversation `id` (`ide_read_session`,
+    /// `docs/session-family.md`). `None`: this CLI's transcripts cannot be read. Default: `None`.
+    fn transcript(
+        &self,
+        _acct: Option<&AccountDir>,
+        _id: &str,
+        _limit: usize,
+    ) -> Option<std::result::Result<Vec<TranscriptEntry>, String>> {
+        None
+    }
+
+    // ---- Turn control (`ide_send_to_session` modes) ----
+
+    /// Bytes that stop the agent's current turn (typed into its terminal). `None`: no way to
+    /// interrupt. Default: `None`.
+    fn interrupt_keys(&self) -> Option<&'static [u8]> {
+        None
+    }
+    /// A prompt typed while the agent works reaches it in that turn (steering) instead of
+    /// waiting. Default: `false`.
+    fn steers(&self) -> bool {
         false
     }
 

@@ -28,6 +28,10 @@ pub(super) enum WStep {
     WaitPage(u64),
     /// Forget the page's lines.
     ClearConsole,
+    /// The daemon asks for an approval of this capability (as it hands it over).
+    AskApproval(&'static str),
+    /// The approval dialog shows this capability (`None`: no dialog), with this many waiting.
+    ApprovalShown(Option<&'static str>, usize),
     /// The agent's `ide_widget` (`register` / `open` / `close`) as the server hands it over.
     Agent(&'static str),
 }
@@ -193,6 +197,26 @@ fn steps() -> Vec<Step> {
         w(WStep::WaitListed(false, 10_000)),
         w(WStep::WaitTab(false, 5_000)),
         GoPage(Page::Work),
+        // Approvals (`approvals_ui.rs`, docs/approvals.md): two questions, one at a time.
+        Log("--- approvals: the question, its queue, closing refuses, the settings list"),
+        w(WStep::AskApproval("session.steer")),
+        w(WStep::AskApproval("session.interrupt")),
+        w(WStep::ApprovalShown(Some("session.steer"), 1)),
+        SetLang(LanguagePref::Fixed(Lang::Ko)),
+        Wait(300),
+        Shot("ko_approval_01_question"),
+        Pause("ko_approval_01_question"),
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        Wait(200),
+        Shot("approval_01_question"),
+        A(Message::Approval(crate::approvals_ui::ApprovalMsg::Answer("once"))),
+        w(WStep::ApprovalShown(Some("session.interrupt"), 0)),
+        A(Message::CloseModal),
+        w(WStep::ApprovalShown(None, 0)),
+        GoPage(Page::Settings),
+        Wait(800),
+        Shot("approval_02_settings"),
+        GoPage(Page::Work),
     ]
 }
 
@@ -299,6 +323,31 @@ pub(super) fn run(sc: &mut Script, app: &mut App, st: WStep, el: Duration) -> (b
         }
         WStep::ClearConsole => {
             crate::widgets_ui::clear_console();
+            true
+        }
+        WStep::AskApproval(capability) => {
+            let args = serde_json::json!({
+                "capability": capability,
+                "requester": "p1",
+                "requester_title": "planner",
+                "target": sid,
+                "target_title": "widgets",
+                "detail": "Stop here: the API changed, rebase on the parent first.",
+            });
+            // The answer goes to an unknown request: ignored by the server.
+            task = app.on_agent_request(u64::MAX, sid.clone(), ide_client::APPROVAL_REQUEST.into(), args.to_string());
+            true
+        }
+        WStep::ApprovalShown(want, waiting) => {
+            let shown = match &app.modal {
+                Some(Modal::Approval(f)) => Some(f.capability.clone()),
+                _ => None,
+            };
+            let n = app.approvals.queue.len();
+            sc.check(
+                shown.as_deref() == want && n == waiting,
+                &format!("approval dialog {shown:?} with {n} waiting (want {want:?}, {waiting})"),
+            );
             true
         }
         WStep::Agent(action) => {

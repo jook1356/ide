@@ -754,6 +754,7 @@ err-repo-not-in-parent = The parent session has no repository “{ $name }”.
 err-widget = Widget: { $detail }
 err-widget-changed = The draft of the “{ $widget }” widget changed since you were asked. Ask the agent to register it again.
 err-widget-not-allowed = The widget may not use { $tool } (not declared or not allowed).
+err-approval-not-found = That approval is gone already.
 err-session-has-children = { $count ->
     [one] This session has a child session; delete it first.
    *[other] This session has { $count } child sessions; delete them first.
@@ -1450,3 +1451,23 @@ widget-register-uses = It uses these ide features:
 widget-register-no-tools = It uses no ide features.
 widget-register-allow = Allow
 widget-register-refuse = Refuse
+
+## Approvals (approvals_ui.rs)
+approval-title = Approval
+approval-steer = The agent of “{ $who }” wants to type a message into “{ $whom }” now, while its agent is working.
+approval-interrupt = The agent of “{ $who }” wants to stop the current work of “{ $whom }” and send it a message.
+approval-other = The agent of “{ $who }” asks for “{ $what }” on “{ $whom }”.
+approval-note = ide carries this out only after you allow it. Allowed for this session, it lasts until the ide server restarts.
+approval-refuse = Refuse
+approval-once = Allow once
+approval-session = Allow for this session
+approval-always = Always allow
+approval-cap-steer = message during work
+approval-cap-interrupt = interrupt and message
+approvals-label = PERMISSIONS
+approvals-note = What you allowed agents to do beyond their own session.
+approvals-none = Nothing allowed yet.
+approvals-row = { $who } → { $whom }: { $what }
+approvals-always = Always
+approvals-until-restart = Until the ide server restarts
+approvals-revoke = Revoke

@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 17;
+pub const PROTO_VERSION: u32 = 18;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -65,6 +65,25 @@ pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
 /// registrations without a question are answered by the daemon; `open` / `close` and the
 /// registration question are carried out by an app (`Notify::AgentRequest`).
 pub const AGENT_TOOL_WIDGET: &str = "ide_widget";
+/// Not an agent tool: the daemon asks the apps for an approval (`docs/approvals.md`) as an
+/// `Notify::AgentRequest` with this name; the answer is `once` / `session` / `always`, or an error
+/// (refused).
+pub const APPROVAL_REQUEST: &str = "ide.approval";
+
+/// A kept approval (`approval.list`; `docs/approvals.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalInfo {
+    pub id: String,
+    /// What it allows (`session.steer`, `session.interrupt`, ...).
+    pub capability: String,
+    pub requester: String,
+    pub requester_title: String,
+    pub target: String,
+    pub target_title: String,
+    /// Kept across daemon restarts (else: until the daemon restarts).
+    pub always: bool,
+    pub created: u64,
+}
 
 /// A registered widget (`widget.list`; `docs/widgets.md`): every session can open it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1116,6 +1135,12 @@ pub enum Request {
         widget: String,
         open: bool,
     },
+    /// The kept approvals (protocol 18, `docs/approvals.md`) -> `Approvals`.
+    ApprovalList,
+    /// Remove a kept approval -> `Unit`.
+    ApprovalRevoke {
+        id: String,
+    },
     /// A widget calls an ide tool it declared and the user approved -> `AgentResult`.
     WidgetCall {
         session: String,
@@ -1260,6 +1285,8 @@ impl Request {
             Request::WidgetRegister { .. } => "widget.register",
             Request::WidgetDelete { .. } => "widget.delete",
             Request::WidgetSetOpen { .. } => "widget.set_open",
+            Request::ApprovalList => "approval.list",
+            Request::ApprovalRevoke { .. } => "approval.revoke",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
         }
@@ -1399,6 +1426,7 @@ pub enum Response {
     },
     /// `Get`: the value as JSON text (`None`: not set); `Keys`: a JSON array; else `None`.
     WidgetData(Option<String>),
+    Approvals(Vec<ApprovalInfo>),
     /// `None`: no opinion; `Some(reason)`: refuse the tool call.
     AgentHookDecision(Option<String>),
     Merges(Vec<RepoMerge>),

@@ -1,6 +1,7 @@
 # 에이전트 기능 로드맵 (브리지 위에 올릴 것)
 
-상태: 위젯(5)은 구현됨(`docs/widgets.md`), 나머지 넷은 **계획만**. 기반(에이전트 브리지, 훅, 화면 판독,
+상태: 위젯(5), 대화 읽기 + 프롬프트 전달(3)은 구현됨(`docs/widgets.md`, `docs/session-family.md`), 나머지
+셋은 **계획만**. 승인 체계는 공통으로 구현됨(`docs/approvals.md`): 새 기능은 위험 등급과 capability만 정하면 돼요. 기반(에이전트 브리지, 훅, 화면 판독,
 세션 가족)은 끝났으니, 이 문서의 방향대로 하나씩 올리면 돼요. 먼저 `docs/agent-bridge.md`와
 `docs/session-family.md`를 읽으세요.
 
@@ -18,7 +19,8 @@
 
 공통 규칙:
 - 도구 이름은 `ide_` 접두사, MCP 서버 이름은 `ide-bridge`(`ide`는 Claude Code의 IDE 연동과 충돌).
-- 위험한 동작(남의 터미널 입력, 브라우저 조작, 사이트 접근)은 Desk처럼 **사용자 승인**을 거쳐요: 앱이
+- 위험한 동작(남의 터미널 입력, 브라우저 조작, 사이트 접근)은 **사용자 승인**을 거쳐요(`docs/approvals.md`의
+  `UserCtx::approve(requester, capability, target, detail)`; 아래 옛 설명 대신 이것을 써요): 앱이
   답하는 도구로 만들고 앱이 확인 대화상자를 띄운 뒤 `agent.reply`로 결과를 돌려줘요.
 - 모든 도구 호출은 이미 감사 로그(`agent.call`)에 남아요.
 - 테스트는 실제 CLI에 프롬프트를 보내지 않고, 에이전트 연결(메모리 전송)이나 실제 `ide-server mcp`
@@ -59,7 +61,7 @@ Desk: `browser_inspect`(목록·콘솔·컴포넌트·선택), `browser_act`(이
 - **주의**: OSR 웹뷰라 실제 OS 입력이 아니어도 돼요(AGENTS.md: OS 입력 금지). 상세 창이 분리돼 있으면
   그 창의 웹뷰를 대상으로.
 
-## 3. 관련 세션 대화 읽기 + 프롬프트 전달
+## 3. 관련 세션 대화 읽기 + 프롬프트 전달 — 구현됨 (Claude Code 대화만; Codex 대화 읽기는 남음)
 
 Desk: `read_session`(관련 세션의 저장된 대화), `send_to_session`(`queue` / `steer`),
 `session.interrupt` / `redirect`.
@@ -105,7 +107,7 @@ data와 탭 배치를 정해요. "모드"는 CLI의 plan mode 등과, "mod"는 C
 
 ## 권장 순서
 
-1. 대화 읽기 + 프롬프트 전달 확장 — 세션 가족을 실제로 쓰려면 가장 먼저 필요하고, 훅이 이미
+1. ~~대화 읽기 + 프롬프트 전달 확장~~ — 구현됨(승인 체계와 함께). 세션 가족을 실제로 쓰려면 가장 먼저 필요하고, 훅이 이미
    `transcript_path`를 주니 작업이 작아요.
 2. 터미널 조회·입력 — 서버에 재료가 다 있어요.
 3. 미리보기 — HTML부터.

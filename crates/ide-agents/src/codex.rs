@@ -78,6 +78,16 @@ impl AgentProvider for Codex {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
     }
+
+    /// Esc stops Codex's turn ("esc to interrupt" on its screen) (a).
+    fn interrupt_keys(&self) -> Option<&'static [u8]> {
+        Some(b"\x1b")
+    }
+
+    /// A prompt sent while Codex works is sent to it in that turn (a).
+    fn steers(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Caps {
         Caps {
             accounts: true,

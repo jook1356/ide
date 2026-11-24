@@ -1861,6 +1861,7 @@ impl App {
                     card(self.font_section()),
                     card(self.server_section(f, online)),
                     card(self.on_close_section()),
+                    card(self.approvals_section()),
                 ],
             ),
         };
@@ -2971,6 +2972,7 @@ impl App {
             Modal::SelfUpdate => self.update_card(),
             Modal::RestartOldServer(f) => self.old_server_card(f),
             Modal::WidgetRegister(f) => self.widget_register_card(f),
+            Modal::Approval(f) => self.approval_card(f),
             Modal::PickRoot(f) => self.pick_root_card(f),
             Modal::SessionRepos(f) => self.session_repos_card(f),
             Modal::InitRepo(f) => {

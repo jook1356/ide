@@ -273,3 +273,111 @@ async fn families() {
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ide_send_to_session` modes, `ide_sent_messages`, `ide_read_session` and the approvals
+/// (`docs/approvals.md`) of `steer` / `interrupt`, answered by an app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_modes_and_approvals() {
+    use ide_client::{ClientEvent, Notify};
+    use ide_proto::AgentHookEvent;
+
+    let dir = tmp_dir("family-send");
+    let r1 = dir.join("r1");
+    init_repo(&r1);
+    let server = bridged(&dir.join("data"));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
+    let (p, _) = c.create_session(shell_session(vec![id1.clone()], true)).await.unwrap();
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", true, 80, 24).await.unwrap();
+    let ctx = server.authorize(server.user()).unwrap();
+    let (mux, mut rx) = agent(&server, &p.id).await;
+
+    // The app answers approval questions from a script of answers; it counts them.
+    let answers = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<Result<String, String>>::new()));
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let mut events = c.events().unwrap();
+    let (c2, answers2, asked2) = (c.clone(), answers.clone(), asked.clone());
+    tokio::spawn(async move {
+        while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::AgentRequest { request, tool, args, .. }) = e
+                && tool == ide_proto::APPROVAL_REQUEST
+            {
+                asked2.lock().unwrap().push(serde_json::from_str(&args).unwrap());
+                let a = answers2.lock().unwrap().pop_front().unwrap_or(Err("no answer".into()));
+                let _ = c2.agent_reply(request, a).await;
+            }
+        }
+    });
+    let busy = |id: &str| ctx.agent_hook(id, AgentHookEvent::PromptSubmitted);
+    let idle = |id: &str| ctx.agent_hook(id, AgentHookEvent::Stopped);
+
+    // Reading: a shell keeps no conversation; only related sessions.
+    let (bad, v) = tool(&mux, &mut rx, 10, "ide_read_session", serde_json::json!({"session": s.id})).await;
+    assert!(bad && v.as_str().unwrap().contains("no recorded conversation"), "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 11, "ide_read_session", serde_json::json!({"session": p.id})).await;
+    assert!(bad && v.as_str().unwrap().contains("not a related session"), "{v}");
+
+    // Queue while busy: waiting, listed, cancelled.
+    busy(&s.id);
+    let (bad, v) = tool(&mux, &mut rx, 12, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "echo q"})).await;
+    assert!(!bad && v["delivered"] == false, "{v}");
+    let mid = v["message_id"].as_u64().unwrap();
+    let (_, v) = tool(&mux, &mut rx, 13, "ide_sent_messages", serde_json::json!({})).await;
+    assert_eq!(v["waiting"][0]["id"].as_u64(), Some(mid), "{v}");
+    assert_eq!(v["waiting"][0]["to_title"], "S");
+    let (bad, _) = tool(&mux, &mut rx, 14, "ide_sent_messages", serde_json::json!({"action": "cancel", "id": mid})).await;
+    assert!(!bad);
+    assert_eq!(ctx.queued(&s.id), 0);
+    let (bad, _) = tool(&mux, &mut rx, 15, "ide_sent_messages", serde_json::json!({"action": "cancel", "id": mid})).await;
+    assert!(bad, "already gone");
+    let (bad, v) = tool(&mux, &mut rx, 16, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "x", "mode": "shout"})).await;
+    assert!(bad && v.as_str().unwrap().contains("unknown mode"), "{v}");
+
+    // Steer while busy: asked; refused -> nothing done.
+    answers.lock().unwrap().push_back(Err("refused".into()));
+    let (bad, v) = tool(&mux, &mut rx, 17, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "now", "mode": "steer"})).await;
+    assert!(bad && v.as_str().unwrap().contains("did not allow"), "{v}");
+    {
+        let a = asked.lock().unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0]["capability"].as_str(), a[0]["target"].as_str()), (Some("session.steer"), Some(s.id.as_str())));
+        assert_eq!((a[0]["requester_title"].as_str(), a[0]["target_title"].as_str(), a[0]["detail"].as_str()), (Some("P"), Some("S"), Some("now")));
+    }
+    assert_eq!(ctx.queued(&s.id), 0);
+    // Allowed for the session: kept; a shell cannot take messages during a turn, though.
+    answers.lock().unwrap().push_back(Ok("session".into()));
+    let (bad, v) = tool(&mux, &mut rx, 18, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "now", "mode": "steer"})).await;
+    assert!(bad && v.as_str().unwrap().contains("cannot take messages"), "{v}");
+    let (bad, _) = tool(&mux, &mut rx, 19, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "now", "mode": "steer"})).await;
+    assert!(bad);
+    assert_eq!(asked.lock().unwrap().len(), 2, "the kept grant answers the third call");
+    let list = c.approval_list().await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].capability.as_str(), list[0].requester_title.as_str(), list[0].target_title.as_str(), list[0].always), ("session.steer", "P", "S", false));
+    // Interrupt: its own capability; a shell has no interrupt keys.
+    answers.lock().unwrap().push_back(Ok("always".into()));
+    let (bad, v) = tool(&mux, &mut rx, 20, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "stop", "mode": "interrupt"})).await;
+    assert!(bad && v.as_str().unwrap().contains("cannot interrupt"), "{v}");
+    assert_eq!(c.approval_list().await.unwrap().len(), 2);
+    assert!(std::fs::read_to_string(dir.join("data").join("approvals.json")).unwrap().contains("session.interrupt"));
+
+    // Revoke.
+    let steer = c.approval_list().await.unwrap().into_iter().find(|g| g.capability == "session.steer").unwrap();
+    c.approval_revoke(&steer.id).await.unwrap();
+    assert_eq!(c.approval_revoke(&steer.id).await.unwrap_err().id, "approval-not-found");
+
+    // Not in a turn: steer acts like queue, nothing is asked.
+    idle(&s.id);
+    let n = asked.lock().unwrap().len();
+    let (bad, v) = tool(&mux, &mut rx, 21, "ide_send_to_session", serde_json::json!({"session": s.id, "message": "echo idle", "mode": "steer"})).await;
+    assert!(!bad && v["delivered"] == true, "{v}");
+    assert_eq!(asked.lock().unwrap().len(), n);
+
+    // A deleted session takes the grants on it along.
+    c.delete_session(&s.id, true).await.unwrap();
+    assert!(c.approval_list().await.unwrap().is_empty());
+    assert!(!std::fs::read_to_string(dir.join("data").join("approvals.json")).unwrap().contains("session.interrupt"));
+    c.delete_session(&p.id, true).await.unwrap();
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}

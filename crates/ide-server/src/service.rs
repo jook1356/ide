@@ -32,6 +32,7 @@ use crate::{def, fsops, git, scripts, search};
 /// migration to the repository registry (folders that are git repos get registered).
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
+mod approvals;
 mod widgets;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -294,6 +295,8 @@ pub struct UserCtx {
     github: GithubSetup,
     /// The agent bridge: sessions' tokens, app calls in flight.
     bridge: crate::bridge::BridgeState,
+    /// What the user allowed agents to do beyond their session (`docs/approvals.md`).
+    grants: Mutex<ide_core::approval::Grants>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
     /// Sessions whose pending worktrees a background job is creating
@@ -355,6 +358,7 @@ impl UserCtx {
             sessions.persist().map_err(|e| core_error(&e))?;
         }
         let providers = Providers::load(&paths.providers_dir());
+        let grants = ide_core::approval::Grants::load(&paths);
         Ok(UserCtx {
             user,
             paths,
@@ -374,6 +378,7 @@ impl UserCtx {
             write_lock: Mutex::new(()),
             github,
             bridge: crate::bridge::BridgeState::new(bridge),
+            grants: Mutex::new(grants),
             this: std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
         })
@@ -474,7 +479,7 @@ impl UserCtx {
                     Ok(Response::SessionCreated { session: c, failures, .. }) => {
                         let prompt = text("prompt");
                         if !prompt.is_empty() {
-                            self.bridge.enqueue(&c.id, prompt.clone());
+                            self.bridge.enqueue(&c.id, Some(s.id.as_str()), prompt.clone());
                             self.deliver_pending(&c.id);
                         }
                         ok(serde_json::json!({
@@ -494,34 +499,162 @@ impl UserCtx {
                 }
             }
             TOOL_SEND => {
-                let to = text("session");
+                // `steer` / `interrupt` were approved by the user before (`agent_call`).
                 let message = text("message");
                 if message.is_empty() {
                     return Some(err("`message` is required".into()));
                 }
-                let Some(target) = ide_core::family::related(&all, &s)
-                    .into_iter()
-                    .find(|x| x.id.as_str() == to)
-                    .cloned()
-                else {
-                    return Some(err(format!(
-                        "`{to}` is not a related session (see ide_list_related_sessions)"
-                    )));
+                let mode = send_mode(args).map_err(err);
+                let mode = match mode {
+                    Ok(m) => m,
+                    Err(e) => return Some(e),
                 };
-                if self.existing_host(target.id.as_str()).is_none_or(|h| !h.is_running()) {
-                    return Some(err(format!("session `{to}` is not running")));
-                }
+                let target = match self.related_target(&s, &text("session")) {
+                    Ok(t) => t,
+                    Err(e) => return Some(err(e)),
+                };
+                let tid = target.id.as_str();
+                let Some(host) = self.existing_host(tid).filter(|h| h.is_running()) else {
+                    return Some(err(format!("session `{tid}` is not running")));
+                };
+                let provider = match self.provider(&target.provider) {
+                    Ok(p) => p,
+                    Err(e) => return Some(err(e.to_string())),
+                };
                 let full = format!(
                     "[ide] Message from session \"{}\" ({}):\n{message}",
                     s.title, s.id
                 );
-                self.bridge.enqueue(target.id.as_str(), full);
-                self.deliver_pending(target.id.as_str());
-                let queued = self.bridge.pending(target.id.as_str()) > 0;
+                let busy = matches!(
+                    self.bridge.activity(tid),
+                    ide_proto::AgentActivity::Working | ide_proto::AgentActivity::NeedsInput
+                );
+                let mut note = None;
+                match mode {
+                    "steer" if busy => {
+                        if !provider.steers() {
+                            return Some(err(format!(
+                                "{}'s agent cannot take messages during its turn: use `queue` or `interrupt`",
+                                target.title
+                            )));
+                        }
+                        match self.send_prompt(tid, &full) {
+                            Ok(()) => {
+                                return Some(ok(serde_json::json!({
+                                    "delivered": true,
+                                    "note": "typed in during its turn: its agent sees it while working",
+                                })));
+                            }
+                            // A dialog of the CLI is open: wait like `queue`.
+                            Err(e) if e.id == "prompt-not-ready" => {
+                                note = Some("it could not take it now (waiting for the user?): queued instead");
+                            }
+                            Err(e) => return Some(err(format!("could not type it in: {e}"))),
+                        }
+                    }
+                    "interrupt" if busy => {
+                        let Some(keys) = provider.interrupt_keys() else {
+                            return Some(err(format!(
+                                "ide cannot interrupt {}'s agent: use `queue`",
+                                target.title
+                            )));
+                        };
+                        if let Err(e) = host.write(keys.to_vec()) {
+                            return Some(err(format!("could not interrupt it: {e}")));
+                        }
+                        self.audit("agent.interrupt", &format!("{} -> {tid}", s.id));
+                        note = Some("its turn was interrupted: the message is typed in when its agent is back at its input");
+                    }
+                    _ => {}
+                }
+                let id = self.bridge.enqueue(tid, Some(s.id.as_str()), full);
+                self.deliver_pending(tid);
+                let queued = self.bridge.pending(tid) > 0;
                 ok(serde_json::json!({
                     "delivered": !queued,
-                    "note": if queued { "queued: delivered when its current turn ends" } else { "typed into its terminal" },
+                    "message_id": id,
+                    "note": note.unwrap_or(if queued {
+                        "queued: delivered when its current turn ends (see ide_sent_messages)"
+                    } else {
+                        "typed into its terminal"
+                    }),
                 }))
+            }
+            crate::bridge::TOOL_READ_SESSION => {
+                let target = match self.related_target(&s, &text("session")) {
+                    Ok(t) => t,
+                    Err(e) => return Some(err(e)),
+                };
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30)
+                    .clamp(1, 200) as usize;
+                let Some(conversation) = target.conversation.clone() else {
+                    return Some(err(format!(
+                        "{} has no recorded conversation yet (its agent has not started, or its CLI does not report one)",
+                        target.title
+                    )));
+                };
+                let provider = match self.provider(&target.provider) {
+                    Ok(p) => p,
+                    Err(e) => return Some(err(e.to_string())),
+                };
+                let account = target.account.as_ref().and_then(|slug| {
+                    self.accounts
+                        .lock()
+                        .unwrap()
+                        .require(&target.provider, slug)
+                        .ok()
+                        .cloned()
+                });
+                match provider.transcript(account.as_ref(), &conversation, limit) {
+                    None => err(format!(
+                        "ide cannot read {}'s conversations",
+                        provider.display_name()
+                    )),
+                    Some(Err(e)) => err(format!("could not read its conversation: {e}")),
+                    Some(Ok(entries)) => ok(serde_json::json!({
+                        "session": target.id.to_string(),
+                        "title": target.title,
+                        "activity": format!("{:?}", self.bridge.activity(target.id.as_str())),
+                        "entries": entries.iter().map(|e| serde_json::json!({
+                            "role": e.role, "text": e.text, "at": e.at,
+                        })).collect::<Vec<_>>(),
+                    })),
+                }
+            }
+            crate::bridge::TOOL_SENT_MESSAGES => {
+                let title = |id: &str| {
+                    all.iter()
+                        .find(|x| x.id.as_str() == id)
+                        .map_or_else(String::new, |x| x.title.clone())
+                };
+                match text("action").as_str() {
+                    "" | "list" => ok(serde_json::json!({
+                        "waiting": self.bridge.sent_by(s.id.as_str()).iter().map(|(to, m)| {
+                            let preview: String = m.text.chars().take(200).collect();
+                            serde_json::json!({
+                                "id": m.id,
+                                "to": to,
+                                "to_title": title(to),
+                                "text": preview,
+                                "queued_at": m.at,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })),
+                    "cancel" => {
+                        let Some(id) = args.get("id").and_then(|v| v.as_u64()) else {
+                            return Some(err("`id` is required".into()));
+                        };
+                        if self.bridge.cancel(s.id.as_str(), id) {
+                            ok(serde_json::json!({ "cancelled": id }))
+                        } else {
+                            err(format!("no waiting message {id} of this session (already typed in?)"))
+                        }
+                    }
+                    other => err(format!("unknown action `{other}` (list, cancel)")),
+                }
             }
             TOOL_MERGE_CHILD => {
                 let child = text("child");
@@ -582,6 +715,42 @@ impl UserCtx {
         })
     }
 
+    /// The related session `to` of `s` (parent, child, sibling), or why not.
+    fn related_target(&self, s: &Session, to: &str) -> Result<Session, String> {
+        let all = self.sessions.lock().unwrap().list().to_vec();
+        ide_core::family::related(&all, s)
+            .into_iter()
+            .find(|x| x.id.as_str() == to)
+            .cloned()
+            .ok_or_else(|| format!("`{to}` is not a related session (see ide_list_related_sessions)"))
+    }
+
+    /// `ide_send_to_session` `steer` / `interrupt`: the user's approval (`docs/approvals.md`),
+    /// asked before the family tool runs. `Ok` for other tools and modes.
+    async fn approve_family(self: &Arc<Self>, session: &str, tool: &str, args: &serde_json::Value) -> Result<(), String> {
+        if tool != crate::bridge::TOOL_SEND {
+            return Ok(());
+        }
+        let capability = match send_mode(args)? {
+            "steer" => approvals::CAP_STEER,
+            "interrupt" => approvals::CAP_INTERRUPT,
+            _ => return Ok(()),
+        };
+        let s = self.resolve_session(session).map_err(|e| e.to_string())?;
+        let to = args.get("session").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+        let target = self.related_target(&s, &to)?;
+        // Not in a turn: both act like `queue`, nothing to ask.
+        if !matches!(
+            self.bridge.activity(target.id.as_str()),
+            ide_proto::AgentActivity::Working | ide_proto::AgentActivity::NeedsInput
+        ) {
+            return Ok(());
+        }
+        let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let detail: String = message.chars().take(400).collect();
+        self.approve(s.id.as_str(), capability, target.id.as_str(), &detail).await
+    }
+
     /// Messages queued for `session` (tests, diagnostics).
     pub fn queued(&self, session: &str) -> usize {
         self.bridge.pending(session)
@@ -600,7 +769,7 @@ impl UserCtx {
         let Some(msg) = self.bridge.dequeue(session) else {
             return;
         };
-        match self.send_prompt(session, &msg) {
+        match self.send_prompt(session, &msg.text) {
             Ok(()) => {
                 // Typed in: the turn starts (hooks / the screen confirm it).
                 self.set_activity(session, AgentActivity::Working);
@@ -632,6 +801,12 @@ impl UserCtx {
                     };
                 }
             };
+            if let Err(why) = self.approve_family(session, tool, &parsed).await {
+                return ide_proto::AgentToolResult {
+                    text: why,
+                    is_error: true,
+                };
+            }
             let (me, session, tool) = (self.clone(), session.to_owned(), tool.to_owned());
             return tokio::task::spawn_blocking(move || me.family_tool(&session, &tool, &parsed))
                 .await
@@ -1923,6 +2098,8 @@ impl UserCtx {
             Request::WidgetDelete { widget } => self.widget_delete(&widget),
             Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
+            Request::ApprovalList => Ok(self.approval_list()),
+            Request::ApprovalRevoke { id } => self.approval_revoke(&id),
             Request::ScriptsList { session, repo } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 Ok(Response::Scripts(scripts::discover(j.root())))
@@ -1985,6 +2162,7 @@ impl UserCtx {
                 self.hosts.lock().unwrap().remove(s.id.as_str());
                 self.bridge.forget(s.id.as_str());
                 self.widget_forget_session(s.id.as_str());
+                self.approvals_forget_session(s.id.as_str());
                 // The parent's guidance lists its children.
                 if let Some(p) = s.parent.as_ref().and_then(|p| self.resolve_session(p.as_str()).ok()) {
                     self.refresh_root(&p);
@@ -2925,6 +3103,16 @@ impl UserCtx {
         crate::pr::send_prompt(&host, input, text)?;
         self.audit("session.send_prompt", &format!("{session} {} bytes", text.len()));
         Ok(())
+    }
+}
+
+/// `ide_send_to_session`'s `mode` (default `queue`).
+fn send_mode(args: &serde_json::Value) -> Result<&'static str, String> {
+    match args.get("mode").and_then(|v| v.as_str()).unwrap_or("").trim() {
+        "" | "queue" => Ok("queue"),
+        "steer" => Ok("steer"),
+        "interrupt" => Ok("interrupt"),
+        other => Err(format!("unknown mode `{other}` (queue, steer, interrupt)")),
     }
 }
 

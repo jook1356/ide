@@ -90,6 +90,7 @@ pub fn proto_error(e: &ProtoError) -> String {
         "widget" => tr::err_widget(&a("detail")),
         "widget-changed" => tr::err_widget_changed(&a("widget")),
         "widget-not-allowed" => tr::err_widget_not_allowed(&a("tool")),
+        "approval-not-found" => tr::err_approval_not_found(),
         "session-has-children" => tr::err_session_has_children(n("count")),
         "repo-used-by-children" => tr::err_repo_used_by_children(n("count"), &a("name")),
         "shared-child-repos" => tr::err_shared_child_repos(),

@@ -273,6 +273,8 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_list_related_sessions",
             "ide_create_child_session",
             "ide_send_to_session",
+            "ide_read_session",
+            "ide_sent_messages",
             "ide_merge_child",
             "ide_request_write_access",
             "ide_release_write_access",
