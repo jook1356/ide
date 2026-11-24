@@ -31,6 +31,12 @@ keys = ["\u001b[B", "\r"]         # written one after the other, 150 ms apart
 
 Gates are the state rules' (`contains`, `regex`, `line_regex`, `all`, `any`, `not`).
 
+An `id` names the **kind** of dialog, not the agent's wording: the app shows one provider-neutral
+name per kind (`trust_workspace`: the session's own folder; `trust_added_dir`: a folder added to
+the session). A provider answering the same kind reuses the id; a new kind needs its UI text in
+`auto_answers_ui.rs` and the locales (an unknown id is shown as is). Everything agent-specific
+(texts on the screen, keys) stays in the provider's manifest, never in core, server or app.
+
 ## Safety
 
 - A rule with `path_after` answers only when the named folder is the session's folder, one of

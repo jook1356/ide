@@ -48,7 +48,9 @@ pub struct ScreenManifest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AutoAnswer {
-    /// Stable id (the user's on / off setting and the UI text are keyed by it).
+    /// Stable id naming the kind of dialog (`trust_workspace`, `trust_added_dir`): the user's
+    /// on / off setting and the UI text (provider-neutral, in the app) are keyed by it, so
+    /// providers answering the same kind of dialog share an id.
     pub id: String,
     /// On unless the user turned it off.
     #[serde(default = "yes")]

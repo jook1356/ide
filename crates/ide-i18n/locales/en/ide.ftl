@@ -1474,9 +1474,9 @@ approvals-revoke = Revoke
 auto-answers-label = AUTO ANSWERS
 auto-answers-note = Dialogs of an agent that ide answers by itself. Folder questions are answered only for the folders ide set up for the session.
 auto-answer-trust-workspace = Trust the session's folder
-auto-answer-trust-workspace-note = Claude Code's “Accessing workspace … Yes, I trust this folder” when a session starts in a new folder.
+auto-answer-trust-workspace-note = The agent asks whether to trust the folder when a session starts in a new one.
 auto-answer-trust-added-dir = Trust the session's added folders
-auto-answer-trust-added-dir-note = Claude Code's “Adding a new directory … Yes, add it”, e.g. for a repository's git folder.
+auto-answer-trust-added-dir-note = The agent asks before it uses a folder added to the session, e.g. a repository's git folder.
 
 ## Previews (docs/previews.md)
 preview-tip = A preview from the session's agent

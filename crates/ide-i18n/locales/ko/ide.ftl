@@ -1253,9 +1253,9 @@ approvals-revoke = 취소
 auto-answers-label = 에이전트 자동 응답
 auto-answers-note = 에이전트가 묻는 질문 중 ide가 대신 답할 것들이에요. 폴더를 묻는 질문은 ide가 그 세션에 만든 폴더일 때만 답해요.
 auto-answer-trust-workspace = 세션 폴더 신뢰
-auto-answer-trust-workspace-note = 새 폴더에서 세션을 시작할 때 Claude Code가 묻는 “Accessing workspace … Yes, I trust this folder”예요.
+auto-answer-trust-workspace-note = 새 폴더에서 세션을 시작할 때 에이전트가 그 폴더를 신뢰할지 물어요.
 auto-answer-trust-added-dir = 세션에 추가된 폴더 신뢰
-auto-answer-trust-added-dir-note = 레포지토리의 git 폴더처럼 추가 폴더에 대해 Claude Code가 묻는 “Adding a new directory … Yes, add it”예요.
+auto-answer-trust-added-dir-note = 레포지토리의 git 폴더처럼 세션에 추가된 폴더를 쓰기 전에 에이전트가 물어요.
 
 ## Previews (docs/previews.md)
 preview-tip = 세션의 에이전트가 보여 주는 미리보기예요

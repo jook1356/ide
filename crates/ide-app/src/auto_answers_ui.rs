@@ -1,5 +1,6 @@
 //! Settings -> 에이전트 자동 응답 (`docs/auto-answers.md`): per agent, the dialogs ide answers
-//! by itself (e.g. Claude Code's folder trust questions), each on or off.
+//! by itself, each on or off. The rules (dialog texts, keys) are the providers' (`ide-agents`
+//! screen manifests); the app only names the answer kinds, provider-neutral.
 
 use iced::widget::{Column, checkbox, column, text};
 use iced::{Element, Task, Widget as _};
@@ -18,7 +19,7 @@ pub enum AutoAnswerMsg {
     Saved(Result<(), ProtoError>),
 }
 
-/// An answer's name and what it does (unknown ids: the id).
+/// An answer kind's name and what it does, the same for every agent (unknown ids: the id).
 fn names(id: &str) -> (String, String) {
     match id {
         "trust_workspace" => (tr::auto_answer_trust_workspace(), tr::auto_answer_trust_workspace_note()),
