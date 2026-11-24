@@ -240,6 +240,8 @@ async fn pr_and_prompts_through_the_client() {
     .unwrap();
     let mut cfg = ServerConfig::for_paths(Paths::new(&data));
     cfg.gh = Some(gh.program.clone());
+    // The fake gh answers in order: no background branch badge checks in between.
+    cfg.branch_badges = false;
     // git has no credential token for github.com here: every call goes through the fake gh.
     let no_token = credential_config(&dir, "no-token.gitconfig", QUIT_HELPER);
     cfg.git_credential_env = vec![
@@ -444,6 +446,7 @@ async fn credential_token_first_in_a_server_child() {
             .env("IDE_DATA_DIR", dir.join(data).display().to_string())
             .env("IDE_GH", gh_path.display().to_string())
             .env("IDE_GITHUB_API", api.clone())
+            .env("IDE_BRANCH_BADGES", "0")
             .env("GIT_CONFIG_GLOBAL", git_config.display().to_string())
             .env("GIT_CONFIG_NOSYSTEM", "1")
     };

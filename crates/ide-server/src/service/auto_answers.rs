@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ide_agents::AgentProvider;
-use ide_agents::screen::AutoAnswer;
+use ide_agents::screen::Answering;
 use ide_core::Session;
 use ide_proto::{AutoAnswerInfo, ProtoError, Response};
 
@@ -65,35 +65,41 @@ impl UserCtx {
     }
 
     /// Answer the dialog `a` on `s`'s screen when the user left it on, it names one of the
-    /// session's folders (when it names one) and it was not just answered.
-    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, a: &AutoAnswer, path: Option<&str>) {
+    /// session's folders (when it names one) and that dialog (the same folder) was not just
+    /// answered. `true`: held back by [`COOLDOWN`] only, so the screen must be read again later
+    /// even if it does not change (one dialog per repository may follow another).
+    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, ans: &Answering<'_>) -> bool {
+        let (a, path) = (ans.answer, ans.path.as_deref());
         let on = self.auto_answers.lock().unwrap().enabled(&s.provider, &a.id, a.default);
         if !on {
-            return;
+            return false;
         }
         if let Some(p) = path
             && !ide_core::auto_answer::inside_any(p, &self.own_folders(s))
         {
             tracing::info!("session {}: {} not answered: {p} is not one of its folders", s.id, a.id);
-            return;
+            return false;
         }
         {
             let mut last = self.answered.lock().unwrap();
-            let key = format!("{} {}", s.id, a.id);
+            // Per folder: each repository's git dir is its own dialog.
+            let key = format!("{} {} {}", s.id, a.id, path.unwrap_or(""));
             if last.get(&key).is_some_and(|t| t.elapsed() < COOLDOWN) {
-                return;
+                return true;
             }
+            last.retain(|_, t| t.elapsed() < COOLDOWN);
             last.insert(key, Instant::now());
         }
-        for (i, k) in a.keys.iter().enumerate() {
+        for (i, k) in ans.keys.iter().enumerate() {
             if i > 0 {
                 std::thread::sleep(KEY_GAP);
             }
             if let Err(e) = host.write(k.as_bytes().to_vec()) {
                 tracing::warn!("session {}: auto answer {}: {e}", s.id, a.id);
-                return;
+                return false;
             }
         }
         self.audit("auto_answer", &format!("{} {} {}", s.id, a.id, path.unwrap_or("")));
+        false
     }
 }

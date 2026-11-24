@@ -975,9 +975,6 @@ pub enum Message {
     PickTermFolder,
     /// Where a Changes row or commit was right-clicked (window coordinates).
     SideMenuAt(Point),
-    /// Check the sessions' branches again (`branch_badge.rs`), and one session's answer.
-    BadgeTick,
-    Badge(String, Result<crate::branch_badge::BranchInd, String>),
     /// Explore's 파일 찾기 설정 popover, and its gitignore setting.
     ExploreSettings(bool),
     ExploreHideIgnored(bool),
@@ -1157,6 +1154,9 @@ pub struct App {
     /// Sessions whose agent finished a turn while another session was shown (Desk's 새 답변);
     /// cleared when the session is selected.
     pub new_answers: std::collections::HashSet<String>,
+    /// Sessions this app asked the server to resume on open (`SessionInfo::resume_on_open`)
+    /// and that have not run since: asked once, so a failing start is not repeated.
+    pub resumed: std::collections::HashSet<String>,
     /// Notification centre (`notices.rs`, `notice_view.rs`).
     pub notices: crate::notice_view::AppNotices,
     /// The bell's list is open.
@@ -1225,8 +1225,6 @@ pub struct App {
     /// Where the side panel's open menu was asked for.
     pub side_menu_at: Option<Point>,
     pub explore_settings: bool,
-    /// The session list's branch badges by session id.
-    pub badges: crate::branch_badge::Badges,
     /// The session list's sort menu is open.
     pub sort_open: bool,
     /// The session list's edit mode (`session_edit.rs`).
@@ -1318,6 +1316,7 @@ impl App {
             rail_hover: false,
             session_hover: None,
             new_answers: Default::default(),
+            resumed: Default::default(),
             update_available: false,
             server_outdated: false,
             update_status: None,
@@ -1359,7 +1358,6 @@ impl App {
             next_browser: 0,
             side_menu_at: None,
             explore_settings: false,
-            badges: Default::default(),
             sort_open: false,
             session_edit: Default::default(),
         }
@@ -1793,7 +1791,26 @@ impl App {
                 .map(|l| l.info.id.clone());
         }
         // Widgets: their open tabs are restored once the sessions are known.
-        Task::batch([self.after_select(), self.refresh_badges(true), self.load_widgets()])
+        // The shown session continues where it was when the server went away.
+        let resume = match self.selected.clone() {
+            Some(id) => self.resume_on_open(&id),
+            None => Task::none(),
+        };
+        Task::batch([self.after_select(), resume, self.load_widgets()])
+    }
+
+    /// Resume a session that was running when the server last went away, now that it is
+    /// opened: the server does not restart every session by itself when it starts (each agent
+    /// CLI costs memory and CPU), so only the sessions the user opens run again.
+    fn resume_on_open(&mut self, id: &str) -> Task<Message> {
+        let due = self
+            .live(id)
+            .is_some_and(|l| l.info.resume_on_open && l.state == RunState::Stopped);
+        if !due || !self.resumed.insert(id.to_owned()) {
+            return Task::none();
+        }
+        crate::script::log(&format!("session {id} resumed on open"));
+        self.update_inner(Message::Start(id.to_owned()))
     }
 
     /// Attach the terminal of every shown or running session, and of sessions with output
@@ -1934,7 +1951,11 @@ impl App {
                     l.state = state.into();
                     if state == SessionState::Running {
                         l.error = None;
+                        l.info.resume_on_open = false;
                     }
+                }
+                if state == SessionState::Running {
+                    self.resumed.remove(&session);
                 }
                 // The process ended by itself (not stopped from the ide).
                 let flash = match (was, state) {
@@ -1976,6 +1997,12 @@ impl App {
                 Task::none()
             }
             Notify::Bell { session } => self.bell_notice(&session),
+            Notify::Branch { session, badge } => {
+                if let Some(l) = self.live_mut(&session) {
+                    l.info.branch = Some(badge);
+                }
+                Task::none()
+            }
             Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
                 self.refresh()
             }
@@ -2169,9 +2196,9 @@ impl App {
                 }
                 self.new_answers.remove(&id);
                 self.notices_seen(&id);
-                self.selected = Some(id);
+                self.selected = Some(id.clone());
                 self.save_ui();
-                self.after_select()
+                Task::batch([self.after_select(), self.resume_on_open(&id)])
             }
             Message::Start(id) => {
                 let Some(c) = self.online() else {
@@ -3840,8 +3867,6 @@ impl App {
                 Task::none()
             }
             Message::ExploreHideIgnored(hide) => self.set_explore_hide_ignored(hide),
-            Message::BadgeTick => self.refresh_badges(false),
-            Message::Badge(sid, r) => self.on_badge(sid, r),
             Message::SideMenuAt(p) => {
                 self.side_menu_at = Some(p);
                 Task::none()
@@ -4508,9 +4533,6 @@ impl App {
                 iced::time::every(Duration::from_secs(3))
                     .map(|_| Message::UTerm(crate::uterm::UTermMsg::PortsTick)),
             );
-        }
-        if self.connected() {
-            subs.push(iced::time::every(crate::branch_badge::EVERY).map(|_| Message::BadgeTick));
         }
         if self.update_polling() {
             subs.push(

@@ -902,7 +902,7 @@ impl App {
         // Desk's order: the branch badge (변경 없음, 커밋 있음, ...) first, never wrapped; the
         // phase and the text take what is left (cut with …).
         let mut sub = Row::<El<'a>>::new().spacing(4).align_y(Alignment::Center);
-        if let Some(b) = self.branch_badge(&s.id, !s.repos.is_empty()) {
+        if let Some(b) = self.branch_badge(s.branch.as_ref(), !s.repos.is_empty()) {
             sub = sub.push(b);
         }
         if let Some((label, color)) = phase {

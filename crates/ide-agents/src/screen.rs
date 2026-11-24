@@ -62,8 +62,15 @@ pub struct AutoAnswer {
     /// text (case-insensitive): it is answered only for folders ide set up for the session.
     #[serde(default)]
     pub path_after: Option<String>,
-    /// What to type, one write after the other (a short pause between them).
+    /// What to type, one write after the other (a short pause between them). Either this or
+    /// `choose`.
+    #[serde(default)]
     pub keys: Vec<String>,
+    /// Pick the list entry containing this text (case-insensitive): the keys come from where
+    /// the cursor (`❯`) is: Down / Up to it, then Enter; only Enter when it is already there
+    /// (an Enter the CLI missed is sent again). Either this or `keys`.
+    #[serde(default)]
+    pub choose: Option<String>,
     #[serde(flatten)]
     pub gate: Gate,
 }
@@ -72,10 +79,45 @@ fn yes() -> bool {
     true
 }
 
-/// The first non-blank line after the line containing `needle` (case-insensitive), trimmed.
+/// A dialog on the screen that an answer matches, and how to answer it now.
+#[derive(Debug)]
+pub struct Answering<'a> {
+    pub answer: &'a AutoAnswer,
+    /// The folder the dialog names (answers with `path_after`).
+    pub path: Option<String>,
+    /// What to type, one write after the other.
+    pub keys: Vec<String>,
+}
+
+/// A list's cursor mark at the start of a line.
+fn is_cursor(l: &str) -> bool {
+    l.trim_start().starts_with('❯')
+}
+
+/// The keys that pick the entry containing `choose` (case-insensitive) of the list under the
+/// cursor: Down / Up from the cursor's line to the entry's, then Enter (`None`: no such entry
+/// with a cursor next to it, or other text between them). The entries are consecutive lines.
+fn choose_keys(lines: &[String], choose: &str) -> Option<Vec<String>> {
+    let want = choose.to_lowercase();
+    let target = lines.iter().rposition(|l| l.to_lowercase().contains(&want))?;
+    let near = |i: usize| i.abs_diff(target) <= 8;
+    let cursor = (0..lines.len()).filter(|&i| near(i) && is_cursor(&lines[i])).min_by_key(|&i| i.abs_diff(target))?;
+    let (lo, hi) = (cursor.min(target), cursor.max(target));
+    // A list: no blank line between the cursor and the entry.
+    if lines[lo..=hi].iter().any(|l| l.trim().is_empty()) {
+        return None;
+    }
+    let step = if target > cursor { "\u{1b}[B" } else { "\u{1b}[A" };
+    let mut keys = vec![step.to_owned(); hi - lo];
+    keys.push("\r".to_owned());
+    Some(keys)
+}
+
+/// The first non-blank line after the last line containing `needle` (case-insensitive),
+/// trimmed (the last: a redraw may leave an earlier copy of the dialog's title above).
 fn path_after(lines: &[String], needle: &str) -> Option<String> {
     let needle = needle.to_lowercase();
-    let at = lines.iter().position(|l| l.to_lowercase().contains(&needle))?;
+    let at = lines.iter().rposition(|l| l.to_lowercase().contains(&needle))?;
     lines[at + 1..]
         .iter()
         .map(|l| l.trim())
@@ -184,8 +226,11 @@ impl ScreenManifest {
             if region(&a.region, &ScreenInput { lines: &[], title: "" }).is_none() {
                 return Err(format!("answer {}: unknown region {:?}", a.id, a.region));
             }
-            if a.keys.is_empty() || a.keys.iter().any(|k| k.is_empty()) {
-                return Err(format!("answer {}: no keys", a.id));
+            match (&a.choose, a.keys.is_empty()) {
+                (Some(c), true) if !c.trim().is_empty() => {}
+                (None, false) if a.keys.iter().all(|k| !k.is_empty()) => {}
+                (Some(_), false) => return Err(format!("answer {}: keys or choose, not both", a.id)),
+                _ => return Err(format!("answer {}: no keys", a.id)),
             }
         }
         Ok(m)
@@ -193,16 +238,21 @@ impl ScreenManifest {
 
     /// A dialog on the screen ide could answer, and the folder it names (when the answer
     /// asks for one; an answer whose folder is not found does not match).
-    pub fn answer(&self, input: &ScreenInput<'_>) -> Option<(&AutoAnswer, Option<String>)> {
+    pub fn answer(&self, input: &ScreenInput<'_>) -> Option<Answering<'_>> {
         self.answers.iter().find_map(|a| {
             let text = region(&a.region, input)?;
             if text.is_empty() || !a.gate.matches(&text, &text.to_lowercase()) {
                 return None;
             }
-            match &a.path_after {
-                Some(n) => Some((a, Some(path_after(input.lines, n)?))),
-                None => Some((a, None)),
-            }
+            let path = match &a.path_after {
+                Some(n) => Some(path_after(input.lines, n)?),
+                None => None,
+            };
+            let keys = match &a.choose {
+                Some(c) => choose_keys(input.lines, c)?,
+                None => a.keys.clone(),
+            };
+            Some(Answering { answer: a, path, keys })
         })
     }
 
@@ -509,12 +559,12 @@ regex=['(']").is_err());
             "",
             " Enter to confirm · Esc to cancel",
         ]);
-        let input = ScreenInput { lines: &ws, title: "" };
-        let (a, path) = m.answer(&input).expect("workspace trust");
-        assert_eq!(a.id, "trust_workspace");
-        assert_eq!(path.as_deref(), Some("C:/Users/jook1/AppData/Roaming/ide/ide/data/workspaces/0mwudwwxbug"));
-        assert_eq!(a.keys, ["\x1b[B", "\r"]);
-        assert!(a.default);
+        let ans = |rows: &[String]| m.answer(&ScreenInput { lines: rows, title: "" });
+        let got = ans(&ws).expect("workspace trust");
+        assert_eq!(got.answer.id, "trust_workspace");
+        assert_eq!(got.path.as_deref(), Some("C:/Users/jook1/AppData/Roaming/ide/ide/data/workspaces/0mwudwwxbug"));
+        assert_eq!(got.keys, ["\x1b[B", "\r"], "Down to Yes, Enter");
+        assert!(got.answer.default);
         let dir = screen(&[
             " Adding a new directory:",
             "",
@@ -525,19 +575,70 @@ regex=['(']").is_err());
             "   Yes, add it",
             " Enter to confirm · Esc to cancel",
         ]);
-        let (a, path) = m.answer(&ScreenInput { lines: &dir, title: "" }).expect("added dir");
-        assert_eq!((a.id.as_str(), path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/ide/.git")));
+        let got = ans(&dir).expect("added dir");
+        assert_eq!((got.answer.id.as_str(), got.path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/ide/.git")));
+        // The other footer (seen 2026-11-24, the second repository's git dir).
+        let other_footer = screen(&[
+            " Adding a new directory:",
+            "",
+            " C:/Users/jook1/Desktop/powered_ide/.git",
+            "",
+            " This directory is part of the repository at C:/Users/jook1/Desktop/powered_ide.",
+            " Security guide",
+            "",
+            " ❯ No, exit",
+            "   Yes, add it",
+            "",
+            " Esc to exit · To add it, press ↓ to Yes, then Enter",
+        ]);
+        let got = ans(&other_footer).expect("other footer");
+        assert_eq!((got.answer.id.as_str(), got.path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/powered_ide/.git")));
+        // Seen 2026-11-24: a redraw left an earlier title above, and the cursor is on Yes (the
+        // Down arrived, the Enter did not): the folder is read after the last title, and only
+        // Enter is sent.
+        let stuck = screen(&[
+            "────────────────────",
+            " Adding a new directory:",
+            "",
+            "──────────────────────────────────────────",
+            " Adding a new directory:",
+            "",
+            " C:/Users/jook1/Desktop/ide/.git",
+            "",
+            " This directory is part of the repository at C:/Users/jook1/Desktop/ide.",
+            " Security guide",
+            "",
+            "   No, exit",
+            " ❯ Yes, add it",
+            "",
+            " Esc to exit · To add it, press ↓ to Yes, then Enter",
+        ]);
+        let got = ans(&stuck).expect("stuck on Yes");
+        assert_eq!(got.path.as_deref(), Some("C:/Users/jook1/Desktop/ide/.git"));
+        assert_eq!(got.keys, ["\r"], "only Enter: never Down past Yes");
         // Other dialogs and a missing folder line are not answered.
         let perm = screen(&[" Do you want to run this command?", " ❯ 1. Yes", " Enter to confirm · Esc to cancel"]);
-        assert!(m.answer(&ScreenInput { lines: &perm, title: "" }).is_none());
-        let cut = screen(&[" Accessing workspace:", "", "   Yes, I trust this folder", " Enter to confirm"]);
-        assert_eq!(m.answer(&ScreenInput { lines: &cut, title: "" }).map(|(a, p)| (a.id.clone(), p)), Some(("trust_workspace".into(), Some("Yes, I trust this folder".into()))), "the server checks the folder");
-        let bad = r#"id = "x"
-[[answers]]
-id = "a"
-keys = []
-contains = ["y"]
-"#;
-        assert!(ScreenManifest::parse(bad).unwrap_err().contains("no keys"));
+        assert!(ans(&perm).is_none());
+        let cut = screen(&[" Accessing workspace:", "", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm"]);
+        assert_eq!(ans(&cut).map(|g| g.path), Some(Some("❯ No, exit".into())), "the server checks the folder");
+        // No cursor next to the entry: nothing typed.
+        let no_cursor = screen(&[" Adding a new directory:", "", " C:/x/.git", "   No, exit", "   Yes, add it", " then Enter"]);
+        assert!(ans(&no_cursor).is_none());
+        let bad = |extra: &str| ScreenManifest::parse(&format!("id = \"x\"\n[[answers]]\nid = \"a\"\ncontains = [\"y\"]\n{extra}")).unwrap_err();
+        assert!(bad("keys = []").contains("no keys"));
+        assert!(bad("keys = [\"\\r\"]\nchoose = \"yes\"").contains("not both"));
+    }
+
+    #[test]
+    fn choosing_list_entries() {
+        let rows = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let three = rows(&[" title", " ❯ 1. A", "   2. B", "   3. C", ""]);
+        assert_eq!(choose_keys(&three, "3. c").unwrap(), ["\x1b[B", "\x1b[B", "\r"]);
+        assert_eq!(choose_keys(&three, "1. a").unwrap(), ["\r"]);
+        let up = rows(&["   1. A", "   2. B", " ❯ 3. C"]);
+        assert_eq!(choose_keys(&up, "1. a").unwrap(), ["\x1b[A", "\x1b[A", "\r"]);
+        assert!(choose_keys(&three, "nope").is_none());
+        let apart = rows(&[" ❯ No", "", "   Yes"]);
+        assert!(choose_keys(&apart, "yes").is_none(), "not one list");
     }
 }
