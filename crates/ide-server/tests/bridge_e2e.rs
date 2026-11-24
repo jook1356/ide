@@ -279,6 +279,11 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_release_write_access",
             "ide_widget",
             "ide_sync_from_parent",
+            "ide_browser_list",
+            "ide_browser_open",
+            "ide_browser_read",
+            "ide_browser_act",
+            "ide_browser_screenshot",
         ]
     );
     for t in &tools {

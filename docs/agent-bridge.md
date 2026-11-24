@@ -183,6 +183,7 @@ start go to stderr.
 | `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
 | `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_sent_messages`, `ide_read_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon (the user's approval of `steer` / `interrupt` through the app: `docs/approvals.md`) | session families: `docs/session-family.md` |
 | `ide_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
+| `ide_browser_list`, `ide_browser_open`, `ide_browser_read`, `ide_browser_act`, `ide_browser_screenshot` | app (CEF pages through DevTools), after the daemon's per-site approval (`browser.act` / `browser.read`) | browser control: `docs/browser-control.md`; screenshots come back as MCP image content (`AgentToolResult.image`) |
 
 Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
 this session; use the `ide_*` tools instead of guessing.

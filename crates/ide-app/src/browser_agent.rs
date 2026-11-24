@@ -24,6 +24,17 @@ const LOAD_WAIT: Duration = Duration::from_secs(15);
 /// Poll interval of waits.
 const POLL: Duration = Duration::from_millis(150);
 
+/// The app script (`script_browser.rs`) calls the tools with request ids from here up; their
+/// answers are kept for it (the server ignores replies to requests it did not send).
+pub(crate) const SCRIPT_REQUESTS: u64 = u64::MAX - 1_000_000;
+static SCRIPT_REPLIES: std::sync::Mutex<Vec<(u64, Result<String, String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The answer to a script request, once there.
+pub(crate) fn script_reply(request: u64) -> Option<Result<String, String>> {
+    let r = SCRIPT_REPLIES.lock().unwrap();
+    r.iter().find(|(id, _)| *id == request).map(|(_, a)| a.clone())
+}
+
 fn tab_id(id: u32) -> String {
     format!("{TAB_PREFIX}{id}")
 }
@@ -62,6 +73,9 @@ impl App {
                         Err(_) => Err("the page did not answer in time".into()),
                     },
                 };
+                if request >= SCRIPT_REQUESTS {
+                    SCRIPT_REPLIES.lock().unwrap().push((request, result.clone()));
+                }
                 let _ = c.agent_reply(request, result).await;
             },
             |_| (),

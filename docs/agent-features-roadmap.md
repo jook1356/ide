@@ -43,7 +43,9 @@ Desk: `terminal_inspect`(사용자 터미널 읽기), `terminal_input`(텍스트
   사용자 승인(세션·터미널 단위로 기억) — 앱이 답하는 확인 단계를 앞에 두기.
 - **주의**: 실행 중인 명령에 Ctrl+C를 보내는 것도 입력이에요. 작업 대기열(아래 없음, 별도)과는 별개.
 
-## 2. 브라우저(CEF) 조작
+## 2. 브라우저(CEF) 조작 — 구현됨
+
+구현: `docs/browser-control.md`(도구 다섯 개, 사이트별 `browser.act` / `browser.read` 승인, CDP, 스크린샷 이미지 결과). 아래는 처음 계획이에요.
 
 Desk: `browser_inspect`(목록·콘솔·컴포넌트·선택), `browser_act`(이동·클릭·입력·키·스크롤·대기·
 스크린샷·강조·선택·evaluate·cdp·녹화), `browser_diagnose`. 사이트마다 사용자 승인.
