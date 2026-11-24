@@ -245,7 +245,7 @@ impl AgentProvider for Codex {
         let ours = our_commands(&v);
         if ours.is_empty() {
             IntegrationStatus::Missing
-        } else if ours != expected_commands(program) {
+        } else if ours != expected_commands(program) || !timeouts_current(&v) {
             IntegrationStatus::Outdated
         } else if !sandbox_ready(Some(acct)) {
             // The Windows sandbox of this Codex home is not set up yet: install does it.
@@ -559,6 +559,23 @@ fn our_commands(v: &serde_json::Value) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// Do ide's handlers have the time limits ide sets now (an older install let a write
+/// outside the session wait only 330 s for the user's answer)?
+fn timeouts_current(v: &serde_json::Value) -> bool {
+    let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else {
+        return true;
+    };
+    events.iter().all(|(event, groups)| {
+        groups
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|g| g.get("hooks").and_then(|h| h.as_array()).into_iter().flatten())
+            .filter(|h| is_ours(h))
+            .all(|h| h.get("timeout").and_then(|t| t.as_u64()) == Some(crate::hooks::hook_timeout_secs(event)))
+    })
 }
 
 fn expected_commands(program: &std::path::Path) -> Vec<String> {

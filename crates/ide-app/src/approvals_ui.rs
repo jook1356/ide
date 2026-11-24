@@ -33,6 +33,8 @@ pub struct ApprovalsState {
     pub queue: VecDeque<ApprovalForm>,
     pub list: Vec<ApprovalInfo>,
     pub error: Option<String>,
+    /// Seconds a question waits for the user (`None`: until answered); `None` until loaded.
+    pub wait: Option<Option<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,10 @@ pub enum ApprovalMsg {
     Listed(Result<Vec<ApprovalInfo>, ProtoError>),
     Revoke(String),
     Revoked(Result<(), ProtoError>),
+    /// How long questions wait (loaded with the list).
+    Wait(Result<Option<u64>, ProtoError>),
+    SetWait(Option<u64>),
+    WaitSet(Result<(), ProtoError>),
 }
 
 fn am(m: ApprovalMsg) -> Message {
@@ -62,6 +68,16 @@ fn question(f: &ApprovalForm) -> String {
         other => tr::approval_other(who, other, whom),
     }
 }
+
+/// The waits the user can choose (seconds; `None`: until answered).
+type Label = fn() -> String;
+const WAIT_CHOICES: [(Option<u64>, Label); 5] = [
+    (Some(60), tr::approvals_wait_1m),
+    (Some(300), tr::approvals_wait_5m),
+    (Some(900), tr::approvals_wait_15m),
+    (Some(3600), tr::approvals_wait_1h),
+    (None, tr::approvals_wait_none),
+];
 
 /// A capability in a short phrase (the settings list).
 fn capability_text(c: &str) -> String {
@@ -103,6 +119,26 @@ impl App {
         }
     }
 
+    /// The daemon stopped waiting for `request` (answered elsewhere, timed out, its caller
+    /// went): its question goes, whether shown or waiting, and is not answered any more.
+    pub(crate) fn agent_request_ended(&mut self, request: u64, timed_out: bool) -> Task<Message> {
+        self.approvals.queue.retain(|f| f.request != request);
+        let shown = match &self.modal {
+            Some(Modal::Approval(f)) => f.request == request,
+            Some(Modal::WidgetRegister(f)) => f.request == request,
+            _ => false,
+        };
+        if shown {
+            crate::script::log(&format!("question {request} ended (timed out: {timed_out})"));
+            self.modal = None;
+            if timed_out {
+                self.notify(crate::notices::Notice::warning(crate::notices::Text::tr(tr::approval_timed_out)).toast());
+            }
+            self.next_approval();
+        }
+        Task::none()
+    }
+
     fn reply(&self, request: u64, result: Result<String, String>) -> Task<Message> {
         let Some(c) = self.online() else {
             return Task::none();
@@ -129,7 +165,11 @@ impl App {
         let Some(c) = self.online() else {
             return Task::none();
         };
-        Task::perform(async move { c.approval_list().await }, |r| am(ApprovalMsg::Listed(r)))
+        let c2 = c.clone();
+        Task::batch([
+            Task::perform(async move { c.approval_list().await }, |r| am(ApprovalMsg::Listed(r))),
+            Task::perform(async move { c2.approval_wait().await }, |r| am(ApprovalMsg::Wait(r))),
+        ])
     }
 
     pub(crate) fn on_approval(&mut self, m: ApprovalMsg) -> Task<Message> {
@@ -160,6 +200,28 @@ impl App {
                 Task::perform(async move { c.approval_revoke(&id).await }, |r| am(ApprovalMsg::Revoked(r)))
             }
             ApprovalMsg::Revoked(r) => {
+                if let Err(e) = r {
+                    self.approvals.error = Some(crate::i18n::proto_error(&e));
+                }
+                self.load_approvals()
+            }
+            ApprovalMsg::Wait(r) => {
+                match r {
+                    Ok(w) => self.approvals.wait = Some(w),
+                    Err(e) => self.approvals.error = Some(crate::i18n::proto_error(&e)),
+                }
+                Task::none()
+            }
+            ApprovalMsg::SetWait(secs) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                // Shown at once; the reload after the change shows what the daemon keeps.
+                self.approvals.wait = Some(secs);
+                crate::script::log(&format!("approval wait: {secs:?}"));
+                Task::perform(async move { c.approval_set_wait(secs).await }, |r| am(ApprovalMsg::WaitSet(r)))
+            }
+            ApprovalMsg::WaitSet(r) => {
                 if let Err(e) = r {
                     self.approvals.error = Some(crate::i18n::proto_error(&e));
                 }
@@ -219,10 +281,32 @@ impl App {
         if let Some(e) = &self.approvals.error {
             c = c.push(crate::view::error_box(e));
         }
+        let online = self.connected();
+        // How long a question waits for the answer.
+        if let Some(wait) = self.approvals.wait {
+            let mut choices = row![].spacing(6);
+            for (secs, label) in WAIT_CHOICES {
+                let on = wait == secs;
+                choices = choices.push(
+                    button(text(label()).size(12))
+                        .padding([4, 10])
+                        .style(if on { style::primary } else { style::secondary })
+                        .on_press_maybe((online && !on).then_some(am(ApprovalMsg::SetWait(secs)))),
+                );
+            }
+            c = c.push(
+                column![
+                    text(tr::approvals_wait_label()).size(11).color(style::DIM),
+                    choices,
+                    text(tr::approvals_wait_note()).size(12).color(style::DIM),
+                ]
+                .spacing(6)
+                .boxed(),
+            );
+        }
         if self.approvals.list.is_empty() {
             c = c.push(text(tr::approvals_none()).size(13).color(style::DIM).boxed());
         }
-        let online = self.connected();
         for g in &self.approvals.list {
             // A session that went (its grants go with it; a race shows its gone name).
             let name = |t: &str| if t.is_empty() { tr::widget_session_gone() } else { t.to_owned() };

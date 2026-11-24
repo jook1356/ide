@@ -1,6 +1,6 @@
 # Approvals
 
-Status: implemented (protocol 18). One approval system for the ide-specific things agents (and
+Status: implemented (protocol 18; the wait and ended questions: protocol 20). One approval system for the ide-specific things agents (and
 later widgets) ask ide to do: typing into another session, interrupting it, and next terminals,
 browsers, previews (`docs/agent-features-roadmap.md`). Code: `ide-core/src/approval.rs`
 (grants), server `ide-server/src/service/approvals.rs` (`UserCtx::approve`, `approval.*`), app
@@ -54,12 +54,22 @@ key.
 - `UserCtx::approve(requester, capability, target, detail)` (async): a kept grant answers at
   once; otherwise the daemon asks the connected apps (`Notify::AgentRequest`, tool
   `ide.approval`, args `{capability, requester, requester_title, target, target_title,
-  detail}`) and waits up to 5 minutes. The app answers `once` / `session` / `always`, or an
-  error (refused, closed, timed out). No app connected: refused at once ("no ide window is
-  open").
+  detail}`) and waits as long as the user chose (Settings -> 권한 -> 승인 대기 시간: 1, 5
+  (default), 15 minutes, 1 hour or no limit; kept as `wait_secs` in `approvals.json`, at least
+  30 s). The app answers `once` / `session` / `always`, or an error (refused, closed). No app
+  connected: refused at once ("no ide window is open"); the last app gone while waiting: refused.
+- "No limit" still ends a day less two minutes later (`bridge::MAX_ASK`): the CLIs need a number
+  for their `PreToolUse` hook (`hooks::TOOL_HOOK_SECS`, 1 day), and ide refuses before the CLI
+  gives up on the hook (a hook that times out lets the tool run). A Codex account installed with
+  the older 330 s limit shows its integration as outdated until installed again.
 - The app shows one question at a time (a modal); questions arriving meanwhile wait in a queue.
-  Closing the dialog refuses.
-- Every answer is audited (`approval <capability> <requester> -> <target>: <answer>`).
+  Closing the dialog refuses and shows the next waiting question.
+- When a question is over (answered, perhaps in another window; timed out; its app gone) the
+  daemon sends `Notify::AgentRequestEnded {request, timed_out}`; the apps drop it from the
+  dialog or the queue (a shown question that timed out leaves a toast).
+- Every answer is audited (`approval <capability> <requester> -> <target>: <answer>`; no answer:
+  `refused`, `timed out`, `no window` or `window closed`). The agent is told not to retry or
+  work around a refusal and to tell the user.
 
 ## Protocol (18)
 
@@ -67,3 +77,5 @@ key.
 |---|---|
 | `approval.list` | -> `Approvals([ApprovalInfo {id, capability, requester, requester_title, target, target_title, always, created}])` |
 | `approval.revoke` | `{id}` -> `Unit` |
+| `approval.wait` (20) | -> `ApprovalWait(Option<u64>)` (seconds; `None`: no limit) |
+| `approval.set_wait` (20) | `{secs}` -> `Unit` |

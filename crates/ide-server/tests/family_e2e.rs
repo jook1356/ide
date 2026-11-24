@@ -295,10 +295,14 @@ async fn send_modes_and_approvals() {
     // The app answers approval questions from a script of answers; it counts them.
     let answers = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<Result<String, String>>::new()));
     let asked = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let ended = Arc::new(std::sync::Mutex::new(Vec::<(u64, bool)>::new()));
     let mut events = c.events().unwrap();
-    let (c2, answers2, asked2) = (c.clone(), answers.clone(), asked.clone());
+    let (c2, answers2, asked2, ended2) = (c.clone(), answers.clone(), asked.clone(), ended.clone());
     tokio::spawn(async move {
         while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::AgentRequestEnded { request, timed_out }) = &e {
+                ended2.lock().unwrap().push((*request, *timed_out));
+            }
             if let ClientEvent::Notify(Notify::AgentRequest { request, tool, args, .. }) = e
                 && tool == ide_proto::APPROVAL_REQUEST
             {
@@ -343,6 +347,14 @@ async fn send_modes_and_approvals() {
         assert_eq!((a[0]["capability"].as_str(), a[0]["target"].as_str()), (Some("session.steer"), Some(s.id.as_str())));
         assert_eq!((a[0]["requester_title"].as_str(), a[0]["target_title"].as_str(), a[0]["detail"].as_str()), (Some("P"), Some("S"), Some("now")));
     }
+    // The apps were told the question is over (not timed out).
+    for _ in 0..100 {
+        if !ended.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ended.lock().unwrap().iter().any(|&(_, t)| !t));
     assert_eq!(ctx.queued(&s.id), 0);
     // Allowed for the session: kept; a shell cannot take messages during a turn, though.
     answers.lock().unwrap().push_back(Ok("session".into()));
@@ -360,6 +372,15 @@ async fn send_modes_and_approvals() {
     assert!(bad && v.as_str().unwrap().contains("cannot interrupt"), "{v}");
     assert_eq!(c.approval_list().await.unwrap().len(), 2);
     assert!(std::fs::read_to_string(dir.join("data").join("approvals.json")).unwrap().contains("session.interrupt"));
+
+    // How long questions wait: 5 minutes unless changed; kept with the grants.
+    assert_eq!(c.approval_wait().await.unwrap(), Some(300));
+    c.approval_set_wait(None).await.unwrap();
+    assert_eq!(c.approval_wait().await.unwrap(), None);
+    c.approval_set_wait(Some(5)).await.unwrap();
+    assert_eq!(c.approval_wait().await.unwrap(), Some(30), "at least 30 s");
+    c.approval_set_wait(Some(3600)).await.unwrap();
+    assert!(std::fs::read_to_string(dir.join("data").join("approvals.json")).unwrap().contains("\"wait_secs\": 3600"));
 
     // Revoke.
     let steer = c.approval_list().await.unwrap().into_iter().find(|g| g.capability == "session.steer").unwrap();

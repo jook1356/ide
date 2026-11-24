@@ -1475,6 +1475,14 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+approvals-wait-label = APPROVAL WAIT
+approvals-wait-note = A question not answered within this time is refused and its dialog closes. The agent waits meanwhile. Without a limit, it is still refused when every ide window closes or after a day.
+approvals-wait-1m = 1 minute
+approvals-wait-5m = 5 minutes
+approvals-wait-15m = 15 minutes
+approvals-wait-1h = 1 hour
+approvals-wait-none = No limit
+approval-timed-out = An approval question was not answered in time and was refused. Change the wait in Settings → Permissions.
 
 ## Auto answers (auto_answers_ui.rs)
 auto-answers-label = AUTO ANSWERS

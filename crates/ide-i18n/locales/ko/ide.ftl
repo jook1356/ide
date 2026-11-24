@@ -1254,6 +1254,14 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+approvals-wait-label = 승인 대기 시간
+approvals-wait-note = 승인 요청에 이 시간 안에 답하지 않으면 거절로 처리하고 창을 닫아요. 기다리는 동안 그 에이전트의 작업은 멈춰 있어요. 무제한이어도 ide 창이 모두 닫히거나 하루가 지나면 거절돼요.
+approvals-wait-1m = 1분
+approvals-wait-5m = 5분
+approvals-wait-15m = 15분
+approvals-wait-1h = 1시간
+approvals-wait-none = 무제한
+approval-timed-out = 승인 요청에 정해진 시간 안에 답하지 않아서 거절됐어요. 대기 시간은 설정 → 권한에서 바꿀 수 있어요.
 
 ## 자동 응답 (auto_answers_ui.rs)
 auto-answers-label = 에이전트 자동 응답
