@@ -710,7 +710,8 @@ type Lists = (
 pub enum Message {
     /// Client event of link generation `.0`.
     Client(u64, ClientEvent),
-    Lists(u64, Result<Lists, ProtoError>),
+    /// Lists of link generation `.0`, request `.1` of [`App::refresh`].
+    Lists(u64, u64, Result<Lists, ProtoError>),
     Attached(u64, String, Result<(), ProtoError>),
     TermInput(String, Vec<u8>),
     TermResize(String, u16, u16),
@@ -1093,6 +1094,12 @@ pub struct App {
     pub link: Option<Link>,
     /// Incremented per new [`Link`]; results of older links are ignored.
     pub link_gen: u64,
+    /// The last list request sent ([`App::refresh`]) and the newest one applied: refreshes
+    /// overlap (each `SessionsChanged` starts one) and their answers may arrive out of order,
+    /// so an older answer must not replace a newer list (a just-created session would vanish
+    /// from the list until the next change).
+    pub lists_asked: std::cell::Cell<u64>,
+    pub lists_applied: u64,
     pub conn: Conn,
     /// Provider, account, configuration and session lists arrived at least once.
     pub loaded: bool,
@@ -1283,6 +1290,8 @@ impl App {
             target,
             link: None,
             link_gen: 0,
+            lists_asked: std::cell::Cell::new(0),
+            lists_applied: 0,
             conn,
             loaded: false,
             providers: Vec::new(),
@@ -1691,6 +1700,8 @@ impl App {
             return Task::none();
         };
         let generation = self.link_gen;
+        let seq = self.lists_asked.get() + 1;
+        self.lists_asked.set(seq);
         Task::perform(
             async move {
                 let p = c.providers(false).await?;
@@ -1699,7 +1710,7 @@ impl App {
                 let s = c.sessions().await?;
                 Ok((p, a, k, s))
             },
-            move |r| Message::Lists(generation, r),
+            move |r| Message::Lists(generation, seq, r),
         )
     }
 
@@ -2120,12 +2131,15 @@ impl App {
                 }
                 self.on_client(ev)
             }
-            Message::Lists(generation, r) => {
+            Message::Lists(generation, seq, r) => {
                 if generation != self.link_gen {
                     return Task::none();
                 }
                 match r {
+                    // A newer list was applied already.
+                    Ok(_) if seq < self.lists_applied => Task::none(),
                     Ok(lists) => {
+                        self.lists_applied = seq;
                         let t = self.apply_lists(lists);
                         Task::batch([t, self.integration_checks()])
                     }
