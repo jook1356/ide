@@ -81,6 +81,7 @@ async fn real_cli_launch() {
                 repos: vec![repo_id.clone()],
                 original_repo: None,
                 refresh_base: false,
+                background: false,
                 bases: Default::default(),
                 title: format!("{provider} launch probe"),
                 start: true,

@@ -1979,6 +1979,15 @@ impl App {
             Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
                 self.refresh()
             }
+            Notify::SessionPrepared {
+                session,
+                failures,
+                base_changes,
+            } => {
+                crate::script::log(&format!("session {session} worktrees ready"));
+                self.worktree_notices(&session, &failures, &base_changes);
+                self.refresh()
+            }
             Notify::ReposChanged => self.load_repos(),
             Notify::WidgetsChanged => self.load_widgets(),
             Notify::UTermsChanged { session } => self.load_uterms(&session),
@@ -4186,6 +4195,9 @@ impl App {
             configuration: f.configuration.clone(),
             refresh_base: f.refresh_base && original_repo.is_none(),
             bases,
+            // The dialog closes once the session folder exists; the worktrees follow in the
+            // background (the session list shows 워크트리 생성 중 meanwhile).
+            background: original_repo.is_none() && !repos.is_empty(),
             repos,
             original_repo: original_repo.clone(),
             title: f.title.clone(),
@@ -4201,6 +4213,42 @@ impl App {
             async move { c.create_session_full(req).await },
             Message::NewCreated,
         )
+    }
+
+    /// What creating a session's worktrees reported (at creation, or at `SessionPrepared` when
+    /// they were made in the background).
+    pub(crate) fn worktree_notices(
+        &mut self,
+        session: &str,
+        failures: &[RepoFailureInfo],
+        base_changes: &[String],
+    ) {
+        // Desk: "일부 레포의 워크트리를 만들지 못했습니다" (the session exists anyway).
+        if !failures.is_empty() {
+            let detail = failures
+                .iter()
+                .map(|f| format!("{}: {}", f.name, i18n::proto_error(&f.error)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::script::log(&format!("worktree failures: {detail}"));
+            self.notify(
+                Notice::error(Text::tr(tr::err_some_worktrees_failed))
+                    .body(detail)
+                    .session(session.to_owned())
+                    .toast(),
+            );
+        }
+        // Desk: "기준 브랜치가 규칙에 따라 바뀌었습니다" (one line per repo).
+        if !base_changes.is_empty() {
+            let detail = base_changes.join("\n");
+            crate::script::log(&format!("base changes: {detail}"));
+            self.notify(
+                Notice::info(Text::tr(tr::base_changed_by_rule))
+                    .body(detail)
+                    .session(session.to_owned())
+                    .toast(),
+            );
+        }
     }
 
     pub(crate) fn on_created(
@@ -4230,32 +4278,7 @@ impl App {
                 .collect::<Vec<_>>(),
             info.state
         ));
-        // Desk: "일부 레포의 워크트리를 만들지 못했습니다" (the session exists anyway).
-        if !failures.is_empty() {
-            let detail = failures
-                .iter()
-                .map(|f| format!("{}: {}", f.name, i18n::proto_error(&f.error)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            crate::script::log(&format!("worktree failures: {detail}"));
-            self.notify(
-                Notice::error(Text::tr(tr::err_some_worktrees_failed))
-                    .body(detail)
-                    .session(info.id.clone())
-                    .toast(),
-            );
-        }
-        // Desk: "기준 브랜치가 규칙에 따라 바뀌었습니다" (one line per repo).
-        if !base_changes.is_empty() {
-            let detail = base_changes.join("\n");
-            crate::script::log(&format!("base changes: {detail}"));
-            self.notify(
-                Notice::info(Text::tr(tr::base_changed_by_rule))
-                    .body(detail)
-                    .session(info.id.clone())
-                    .toast(),
-            );
-        }
+        self.worktree_notices(&info.id, &failures, &base_changes);
         let id = info.id.clone();
         let configuration = (info.kind == SessionKind::Agent).then(|| info.configuration.clone());
         match self.live_mut(&id) {

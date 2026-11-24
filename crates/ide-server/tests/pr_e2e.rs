@@ -209,6 +209,7 @@ async fn session(c: &Client, provider: &str, repo: &str, original: bool) -> Sess
             repos: if original { vec![] } else { vec![repo.into()] },
             original_repo: original.then(|| repo.into()),
             refresh_base: false,
+            background: false,
             bases: Default::default(),
             title: "pr".into(),
             start: false,

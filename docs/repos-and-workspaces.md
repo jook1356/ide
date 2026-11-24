@@ -53,6 +53,26 @@ what it does, and where ide does the same. Deviations are listed at the end.
   worktree and branch as before.
 - `server.json` is left in place; the browse-roots RPCs and settings UI are removed.
 
+## Background worktree creation
+The new-session dialog sends `NewSession.background` (workspace sessions with repos):
+`ide_core::create_session` only makes the session folder and records each repo as
+`Session::pending` (`PendingWorktree { repo, name, pick, refresh }`, the folder name planned
+with the `-2` rule), writes `<folder>/.worktrees-pending` (`PENDING_MARKER`, one planned folder
+per line), and the server answers `SessionCreated` and starts the agent right away; the dialog
+closes. A server thread per session (`UserCtx::prepare_worktrees`) then runs `add_worktree` for
+each pending repo outside the store lock, moves it to `worktrees` (or reports it as a failure),
+rewrites the guidance, updates the marker and sends `SessionsChanged`; at the end
+`Notify::SessionPrepared { failures, base_changes }` carries what `SessionCreated` carries in the
+synchronous mode (the app shows the same notices). Meanwhile:
+- `SessionInfo.preparing` is set and the session list shows 워크트리 생성 중 / Creating
+  worktrees in place of the agent phase.
+- The guidance lists pending worktrees as *being created* and tells the agent to answer what does
+  not need them at once, and otherwise to say it is waiting and poll until the marker is gone;
+  `--add-dir` already includes their repos' git dirs.
+- attach / detach / child creation are refused (`session-preparing`); deleting the session is
+  allowed (a worktree finished afterwards is removed again with its branch).
+- A server that went away mid-way resumes the pending worktrees on its next start.
+
 ## Deviations (no Desk equivalent or deliberately different)
 - Branch `ide/<session-id>` instead of `hermes/<key>` (existing prefix guard `BRANCH_PREFIX`).
 - Session folder under the data dir (`<data>/workspaces`) instead of `~/hermes-workspaces`.

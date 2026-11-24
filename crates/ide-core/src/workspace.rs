@@ -31,6 +31,34 @@ pub struct NewSession {
     pub refresh_base: bool,
     /// Base branch picked per repository (origin's branch name); others use the repo default.
     pub bases: std::collections::BTreeMap<RepoId, String>,
+    /// Create only the folder now and record the worktrees as [`Session::pending`] (with
+    /// [`PENDING_MARKER`] in the folder); the caller creates them afterwards with
+    /// [`add_worktree`], so the session (and its agent) can start right away.
+    pub background: bool,
+}
+
+/// File in a session folder while its worktrees are still being created in the background
+/// (lists their folders, one per line). The session guidance tells the agent to wait for it to
+/// disappear before it works in those repositories.
+pub const PENDING_MARKER: &str = ".worktrees-pending";
+
+/// Write [`PENDING_MARKER`] in a workspace session's folder while it has pending worktrees,
+/// remove it once it has none.
+pub fn write_pending_marker(s: &Session) -> Result<()> {
+    if !s.is_workspace() || s.shared {
+        return Ok(());
+    }
+    let path = s.root.join(PENDING_MARKER);
+    if s.pending.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(Error::io(IoAction::Removing, &path, e))
+            }
+            _ => Ok(()),
+        };
+    }
+    let body: String = s.pending.iter().map(|p| format!("{}/\n", p.name)).collect();
+    std::fs::write(&path, body).map_err(|e| Error::io(IoAction::Writing, &path, e))
 }
 
 /// What [`create_session`] returns: the session, the repos whose worktree failed, and each
@@ -122,6 +150,19 @@ pub fn create_session(
     ensure_dir(&root)?;
     let mut failures = Vec::new();
     let mut plans = Vec::new();
+    if req.background {
+        for r in picked {
+            let name = free_name(&s, &r.name);
+            s.pending.push(crate::session::PendingWorktree {
+                repo: r.id.clone(),
+                name,
+                pick: req.bases.get(&r.id).cloned(),
+                refresh: req.refresh_base,
+            });
+        }
+        write_pending_marker(&s)?;
+        return Ok((s, failures, plans));
+    }
     for r in picked {
         let pick = req.bases.get(&r.id).map(String::as_str);
         match add_worktree(&mut s, &r, req.refresh_base, pick) {
@@ -140,7 +181,9 @@ pub fn create_session(
 /// worktree folder of that name (case-insensitive) or the folder exists.
 fn free_name(s: &Session, wanted: &str) -> String {
     let taken = |n: &str| {
-        s.worktrees.iter().any(|w| w.name.eq_ignore_ascii_case(n)) || s.root.join(n).exists()
+        s.worktrees.iter().any(|w| w.name.eq_ignore_ascii_case(n))
+            || s.pending.iter().any(|p| p.name.eq_ignore_ascii_case(n))
+            || s.root.join(n).exists()
     };
     let mut name = wanted.to_owned();
     let mut i = 2;
@@ -471,10 +514,43 @@ pub fn session_guidance(s: &Session, repos: &RepoStore) -> Option<String> {
             format!("- `{folder}` — {repo}, branch `{}`{base}", w.branch)
         })
         .collect();
+    let mut rows = rows;
+    rows.extend(s.pending.iter().map(|p| {
+        let repo = repos
+            .get(&p.repo)
+            .map_or_else(|| "repository".to_owned(), |r| r.name.clone());
+        format!(
+            "- `{}/` — {repo}, branch `{}` (**being created** — see \"Worktrees being created\" below)",
+            p.name,
+            s.id.branch()
+        )
+    }));
     let list = if rows.is_empty() {
         "- (no repositories are currently connected to this workspace)".to_owned()
     } else {
         rows.join("\n")
+    };
+    let pending = if s.pending.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n## Worktrees being created\n\n\
+             The IDE is still creating the worktrees marked *being created* in the background \
+             (it started this session first so you could begin right away). While the file \
+             `{root}/{marker}` exists, that is still going on and those folders may be missing or \
+             incomplete.\n\n\
+             - A request that does not need those repositories (questions, planning, other \
+             folders): answer it right away.\n\
+             - A request that needs one of them (reading, searching, changing or running anything \
+             in it): first tell the user in one short line that you are waiting for the worktree \
+             to be created, then wait until `{marker}` is gone — check every few seconds with a \
+             shell loop, e.g. bash `while [ -e '{root}/{marker}' ]; do sleep 3; done` or \
+             PowerShell `while (Test-Path '{root}/{marker}') {{ Start-Sleep 3 }}` (give up after \
+             about 10 minutes and tell the user) — and then do the request.\n\
+             - After the file is gone, a listed folder that still does not exist could not be \
+             created: tell the user (they can attach the repository again from the app).\n",
+            marker = PENDING_MARKER,
+        )
     };
     let branches: Vec<&str> = {
         let mut b: Vec<&str> = s.worktrees.iter().map(|w| w.branch.as_str()).collect();
@@ -502,7 +578,8 @@ pub fn session_guidance(s: &Session, repos: &RepoStore) -> Option<String> {
          checked out elsewhere (git will refuse).\n\
          - Before working in a repository, read its own AGENTS.md / CLAUDE.md / README if present.\n\
          - If the task needs another registered repository, ask the user to attach it in the app \
-         (repository picker of the session's detail area); it then appears in this list.\n",
+         (repository picker of the session's detail area); it then appears in this list.\n\
+         {pending}",
         id = s.id,
     ))
 }
@@ -604,8 +681,55 @@ mod tests {
             repos,
             original_repo: None,
             refresh_base: false,
+            background: false,
             bases: Default::default(),
         }
+    }
+
+    #[test]
+    fn background_create_leaves_worktrees_pending() {
+        let t = TempDir::new("ws-bg");
+        let paths = Paths::new(t.0.join("data"));
+        let a = t.0.join("one").join("app");
+        let b = t.0.join("two").join("app");
+        for d in [&a, &b] {
+            test_repo::init(d);
+        }
+        let mut repos = RepoStore::open(&paths).unwrap();
+        let ra = repos.register(&a, false).unwrap().clone();
+        let rb = repos.register(&b, false).unwrap().clone();
+        let (mut s, failures, plans) = create_session(
+            &paths,
+            &repos,
+            &NewSession { background: true, ..req(vec![ra.id.clone(), rb.id.clone()]) },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(failures.is_empty() && plans.is_empty() && s.worktrees.is_empty());
+        // Planned names already avoid each other; nothing is created yet but the marker.
+        let names: Vec<&str> = s.pending.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["app", "app-2"]);
+        assert!(s.preparing() && s.root.is_dir() && !s.root.join("app").exists());
+        let marker = s.root.join(PENDING_MARKER);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "app/\napp-2/\n");
+        let g = session_guidance(&s, &repos).unwrap();
+        assert!(g.contains("`app-2/` — app, branch") && g.contains("being created"), "{g}");
+        assert!(g.contains(PENDING_MARKER), "{g}");
+        // The caller creates them one by one (as the server's job does).
+        for p in s.pending.clone() {
+            s.pending.retain(|x| x.repo != p.repo);
+            let r = repos.get(&p.repo).unwrap().clone();
+            add_worktree(&mut s, &r, p.refresh, p.pick.as_deref()).unwrap();
+            assert_eq!(s.worktree(&p.repo).unwrap().name, p.name);
+        }
+        write_pending_marker(&s).unwrap();
+        assert!(!marker.exists());
+        let g = session_guidance(&s, &repos).unwrap();
+        assert!(!g.contains("being created") && !g.contains(PENDING_MARKER), "{g}");
+        let mut store = SessionStore::open(&paths).unwrap();
+        store.upsert(s.clone()).unwrap();
+        assert_eq!(store.count_using_repo(&ra.id), 1);
+        remove_session_files(&paths, &s, &repos, true).unwrap();
     }
 
     #[test]

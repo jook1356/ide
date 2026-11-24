@@ -1146,6 +1146,8 @@ fn phase2() -> Vec<Step> {
         WaitCreated(20_000),
         MarkP2,
         WaitText(P2, ">", 15_000),
+        // The worktree is created in the background after the dialog closed.
+        WaitSessionRepos(1, 20_000),
         CdRepoP2,
         Log("--- explorer: lazy tree, open a file"),
         D(DetailMsg::Side(SideTab::Explore)),

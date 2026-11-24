@@ -485,17 +485,26 @@ impl<'a> SessionInput<'a> {
         repos: &ide_core::RepoStore,
         guidance: Option<String>,
     ) -> Self {
+        let info = |repo: &ide_core::RepoId, name: &str, path: PathBuf| {
+            let r = repos.get(repo);
+            RepoInfo {
+                name: r.map_or_else(|| name.to_owned(), |r| r.name.clone()),
+                path,
+                git_dir: r.map(|r| r.path.join(".git")).filter(|g| g.is_dir()),
+            }
+        };
+        // Worktrees still being created count already (at their planned folder): an agent
+        // started meanwhile needs their git dirs to commit there later.
         let repos = session
             .worktrees
             .iter()
-            .map(|w| {
-                let r = repos.get(&w.repo);
-                RepoInfo {
-                    name: r.map_or_else(|| w.name.clone(), |r| r.name.clone()),
-                    path: w.path.clone(),
-                    git_dir: r.map(|r| r.path.join(".git")).filter(|g| g.is_dir()),
-                }
-            })
+            .map(|w| info(&w.repo, &w.name, w.path.clone()))
+            .chain(
+                session
+                    .pending
+                    .iter()
+                    .map(|p| info(&p.repo, &p.name, session.root.join(&p.name))),
+            )
             .collect();
         SessionInput {
             session_id: session.id.as_str(),

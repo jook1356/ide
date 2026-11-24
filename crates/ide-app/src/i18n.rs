@@ -71,6 +71,7 @@ pub fn proto_error(e: &ProtoError) -> String {
         "provider-no-login" => tr::err_provider_no_login(&a("provider")),
         "invalid-mcp-name" => tr::err_invalid_mcp_name(&a("name")),
         "session-not-found" => tr::err_session_not_found(&a("id")),
+        "session-preparing" => tr::err_session_preparing(),
         "uterm-no-shell" => tr::err_uterm_no_shell(),
         "uterm-not-found" => tr::err_uterm_not_found(&a("id")),
         "invalid-session-id" => tr::err_invalid_session_id(&a("id")),
