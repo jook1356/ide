@@ -548,6 +548,21 @@ impl UserCtx {
                     Err(e) => return Some(err(e)),
                 };
                 let tid = target.id.as_str();
+                // A session that was running when the server went away and has not been
+                // opened since (`SessionInfo::resume_on_open`) is woken by the message: its
+                // conversation resumes and the message is typed in once it is ready.
+                let mut woken = false;
+                if target.autostart
+                    && target.kind == SessionKind::Agent
+                    && !self.existing_host(tid).is_some_and(|h| h.is_running())
+                {
+                    if let Err(e) = self.start(&target) {
+                        let _ = self.sessions.lock().unwrap().set_autostart(&target.id, false);
+                        return Some(err(format!("could not wake session `{tid}`: {e}")));
+                    }
+                    self.audit("session.wake", &format!("{} -> {tid}", s.id));
+                    woken = true;
+                }
                 let Some(host) = self.existing_host(tid).filter(|h| h.is_running()) else {
                     return Some(err(format!("session `{tid}` is not running")));
                 };
@@ -604,6 +619,9 @@ impl UserCtx {
                 let id = self.bridge.enqueue(tid, Some(s.id.as_str()), full);
                 self.deliver_pending(tid);
                 let queued = self.bridge.pending(tid) > 0;
+                if woken {
+                    note = Some("it was not running (not opened since the server restarted): it was started and resumes its conversation; the message is typed in when it is ready (see ide_sent_messages)");
+                }
                 ok(serde_json::json!({
                     "delivered": !queued,
                     "message_id": id,

@@ -219,6 +219,7 @@ running when the server went away (`Session::autostart`).
   tells the app, which sends `session.start` when the user opens such a session (selects it,
   or it is the shown session when the list loads; once per session until it runs,
   `App::resume_on_open`). A failed `session.start` of a marked session clears the mark.
+  `ide_send_to_session` to a marked session wakes it the same way (`docs/session-family.md`).
 - Claude: `resume_conversation` checks for the transcript first: `--resume` with an unknown id
   ends the CLI. Ids from hooks are used only if they are UUIDs.
 - (v 2.1.330) A server started from a Claude Code tool shell (an agent that builds and runs
