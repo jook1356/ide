@@ -24,9 +24,11 @@ session; an answer rule matches a dialog the same way a state rule does and type
 id = "trust_workspace"            # stable: the user's choice and the UI text use it
 default = true                    # on unless the user turns it off (default: true)
 region = "whole"                  # as for state rules
-path_after = "accessing workspace:"  # the folder: first non-blank line after this line
-contains = ["accessing workspace:", "yes, i trust this folder", "enter to confirm"]
-keys = ["\u001b[B", "\r"]         # written one after the other, 150 ms apart
+path_after = "accessing workspace:"  # the folder: first non-blank line after the last such line
+contains = ["accessing workspace:", "no, exit", "yes, i trust this folder"]
+any = [{ contains = ["enter to confirm"] }, { contains = ["then enter"] }]
+choose = "yes, i trust this folder"  # the list entry to pick (keys from the cursor's place)
+# or: keys = ["\u001b[B", "\r"]     # fixed writes, one after the other, 150 ms apart
 ```
 
 Gates are the state rules' (`contains`, `regex`, `line_regex`, `all`, `any`, `not`).
@@ -45,8 +47,9 @@ the session). A provider answering the same kind reuses the id; a new kind needs
 - The same dialog (session, answer, folder) is answered at most once in 5 s; a dialog held back
   by that is read again on the next tick, even when the screen does not change (one
   "Adding a new directory" follows another, one per repository).
-- Claude Code's rules answer only while the cursor is on "No, exit": a second Down could wrap a
-  list back to it.
+- `choose` reads where the list's cursor (`❯`) is and types Down / Up to the entry, then Enter;
+  when the cursor is on it already (an Enter the CLI missed), only Enter. It never moves past the
+  entry, and nothing is typed without a cursor next to it.
 - Every answer is audited (`auto_answer <session> <id> <folder>`).
 - Only agent sessions (not shells or login terminals) are read.
 
@@ -54,8 +57,8 @@ the session). A provider answering the same kind reuses the id; a new kind needs
 
 | Agent | Id | Dialog | Keys |
 |---|---|---|---|
-| Claude Code | `trust_workspace` | "Accessing workspace: <folder> … ❯ No, exit / Yes, I trust this folder" (v: seen 2026-11-24) | Down, Enter |
-| Claude Code | `trust_added_dir` | "Adding a new directory: <folder> … ❯ No, exit / Yes, add it" (an `--add-dir` folder such as a repository's git dir; one per repository; footers "Enter to confirm · Esc to cancel" or "Esc to exit · … press ↓ to Yes, then Enter") (v) | Down, Enter |
+| Claude Code | `trust_workspace` | "Accessing workspace: <folder> … ❯ No, exit / Yes, I trust this folder" (v: seen 2026-11-24) | `choose` (Down, Enter; Enter only when on Yes) |
+| Claude Code | `trust_added_dir` | "Adding a new directory: <folder> … ❯ No, exit / Yes, add it" (an `--add-dir` folder such as a repository's git dir; one per repository; footers "Enter to confirm · Esc to cancel" or "Esc to exit · … press ↓ to Yes, then Enter") (v) | `choose` (Down, Enter; Enter only when on Yes) |
 
 Codex: its trust question ("Do you trust the contents of this directory?", numbered choices)
 has no rule yet: the folder is not on a line of its own and the keys were not checked.

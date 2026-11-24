@@ -80,28 +80,25 @@ region = "title"
 regex = ['^\x{2733} ']
 
 # ---- Auto answers (docs/auto-answers.md): dialogs ide answers itself, for folders it set up.
-# Both lists start on "No, exit": Down, then Enter picks the second entry.
+# Both lists start on "No, exit"; `choose` moves the cursor to the entry (Down, Enter), or only
+# presses Enter when it is there already (an Enter the CLI missed). The footer varies:
+# "Enter to confirm · Esc to cancel" or "Esc to exit · … press ↓ to Yes, then Enter".
 
 # "Accessing workspace: <folder> ... Yes, I trust this folder" (the first start in a folder).
 [[answers]]
 id = "trust_workspace"
 region = "whole"
 path_after = "accessing workspace:"
-contains = ["accessing workspace:", "yes, i trust this folder"]
-# The footer varies: "Enter to confirm · Esc to cancel" or "Esc to exit · … press ↓ to Yes, then Enter".
+contains = ["accessing workspace:", "no, exit", "yes, i trust this folder"]
 any = [{ contains = ["enter to confirm"] }, { contains = ["then enter"] }]
-# Only while the cursor is on "No, exit": a second Down could wrap back to it.
-line_regex = ['^\s*❯\s*No, exit\s*$']
-keys = ["\u001b[B", "\r"]
+choose = "yes, i trust this folder"
 
 # "Adding a new directory: <folder> ... Yes, add it" (an --add-dir folder, e.g. a repository's
-# git dir, not trusted yet).
+# git dir, not trusted yet; one dialog per repository).
 [[answers]]
 id = "trust_added_dir"
 region = "whole"
 path_after = "adding a new directory:"
-contains = ["adding a new directory:", "yes, add it"]
+contains = ["adding a new directory:", "no, exit", "yes, add it"]
 any = [{ contains = ["enter to confirm"] }, { contains = ["then enter"] }]
-# Only while the cursor is on "No, exit": a second Down could wrap back to it.
-line_regex = ['^\s*❯\s*No, exit\s*$']
-keys = ["\u001b[B", "\r"]
+choose = "yes, add it"

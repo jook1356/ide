@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ide_agents::AgentProvider;
-use ide_agents::screen::AutoAnswer;
+use ide_agents::screen::Answering;
 use ide_core::Session;
 use ide_proto::{AutoAnswerInfo, ProtoError, Response};
 
@@ -68,7 +68,8 @@ impl UserCtx {
     /// session's folders (when it names one) and that dialog (the same folder) was not just
     /// answered. `true`: held back by [`COOLDOWN`] only, so the screen must be read again later
     /// even if it does not change (one dialog per repository may follow another).
-    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, a: &AutoAnswer, path: Option<&str>) -> bool {
+    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, ans: &Answering<'_>) -> bool {
+        let (a, path) = (ans.answer, ans.path.as_deref());
         let on = self.auto_answers.lock().unwrap().enabled(&s.provider, &a.id, a.default);
         if !on {
             return false;
@@ -89,7 +90,7 @@ impl UserCtx {
             last.retain(|_, t| t.elapsed() < COOLDOWN);
             last.insert(key, Instant::now());
         }
-        for (i, k) in a.keys.iter().enumerate() {
+        for (i, k) in ans.keys.iter().enumerate() {
             if i > 0 {
                 std::thread::sleep(KEY_GAP);
             }
