@@ -113,7 +113,7 @@ pub fn widgets_dir(root: &Path) -> PathBuf {
 }
 
 /// A relative path inside a widget: no root, prefix, `..`; `/` or `\` separated.
-fn safe_relative(rel: &str) -> Option<PathBuf> {
+pub(crate) fn safe_relative(rel: &str) -> Option<PathBuf> {
     let rel = rel.trim_start_matches(['/', '\\']);
     if rel.is_empty() {
         return None;

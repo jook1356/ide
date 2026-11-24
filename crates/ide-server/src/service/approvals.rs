@@ -17,8 +17,16 @@ pub(crate) const CAP_STEER: &str = "session.steer";
 pub(crate) const CAP_INTERRUPT: &str = "session.interrupt";
 
 impl UserCtx {
+    /// A target's name: a session's title; a site (browser control) names itself.
     fn title_of(&self, session: &str) -> String {
-        self.resolve_session(session).map(|s| s.title).unwrap_or_default()
+        match self.resolve_session(session) {
+            Ok(s) => s.title,
+            // A terminal (`terminal.input`, id `<session>:t<n>`), else a site (browser control).
+            Err(_) => self
+                .uterm_label(session)
+                .or_else(|| session.contains(':').then(|| session.to_owned()))
+                .unwrap_or_default(),
+        }
     }
 
     /// May `requester` do `capability` to `target`? A kept grant answers at once; otherwise
@@ -112,5 +120,10 @@ impl UserCtx {
     /// A session was deleted: grants it asked for or that act on it go.
     pub(crate) fn approvals_forget_session(&self, session: &str) {
         let _ = self.grants.lock().unwrap().forget_session(&self.paths, session);
+    }
+
+    /// A target went or is new (a user terminal): its grants go.
+    pub(crate) fn approvals_forget_target(&self, target: &str) {
+        let _ = self.grants.lock().unwrap().forget_target(&self.paths, target);
     }
 }

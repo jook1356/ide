@@ -1250,3 +1250,26 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+
+## 자동 응답 (auto_answers_ui.rs)
+auto-answers-label = 에이전트 자동 응답
+auto-answers-note = 에이전트가 묻는 질문 중 ide가 대신 답할 것들이에요. 폴더를 묻는 질문은 ide가 그 세션에 만든 폴더일 때만 답해요.
+auto-answer-trust-workspace = 세션 폴더 신뢰
+auto-answer-trust-workspace-note = 새 폴더에서 세션을 시작할 때 에이전트가 그 폴더를 신뢰할지 물어요.
+auto-answer-trust-added-dir = 세션에 추가된 폴더 신뢰
+auto-answer-trust-added-dir-note = 레포지토리의 git 폴더처럼 세션에 추가된 폴더를 쓰기 전에 에이전트가 물어요.
+
+## Previews (docs/previews.md)
+preview-tip = 세션의 에이전트가 보여 주는 미리보기예요
+preview-devtools = 개발자 도구
+err-preview = 미리보기: { $detail }
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = “{ $who }” 세션의 에이전트가 “{ $whom }” 터미널에 입력하려고 해요.
+approval-cap-terminal-input = 터미널에 입력
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 조작하려고 해요(열기, 클릭, 입력, 스크립트 실행).
+approval-browser-read = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 읽으려고 해요(글, 콘솔, 스크린샷).
+approval-cap-browser-act = 브라우저에서 사이트 조작
+approval-cap-browser-read = 브라우저에서 사이트 읽기

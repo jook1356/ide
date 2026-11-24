@@ -107,6 +107,17 @@ pub struct ProviderInfo {
     pub detection: ProviderDetection,
     /// Capabilities.
     pub caps: ProviderCaps,
+    /// Dialogs ide can answer for this agent and whether the user left them on (protocol 19,
+    /// `docs/auto-answers.md`).
+    pub answers: Vec<AutoAnswerInfo>,
+}
+
+/// A dialog ide can answer for an agent (`ProviderInfo.answers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoAnswerInfo {
+    /// Stable id (`trust_workspace`, ...).
+    pub id: String,
+    pub enabled: bool,
 }
 
 /// One account (login) of a provider.

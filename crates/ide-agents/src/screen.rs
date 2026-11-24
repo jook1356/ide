@@ -39,6 +39,48 @@ pub struct ScreenManifest {
     pub id: String,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Dialogs ide may answer by itself (`docs/auto-answers.md`).
+    #[serde(default)]
+    pub answers: Vec<AutoAnswer>,
+}
+
+/// A dialog ide answers by typing keys, when the user left it on for the agent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoAnswer {
+    /// Stable id naming the kind of dialog (`trust_workspace`, `trust_added_dir`): the user's
+    /// on / off setting and the UI text (provider-neutral, in the app) are keyed by it, so
+    /// providers answering the same kind of dialog share an id.
+    pub id: String,
+    /// On unless the user turned it off.
+    #[serde(default = "yes")]
+    pub default: bool,
+    /// See [`region`]; default `whole`.
+    #[serde(default = "whole")]
+    pub region: String,
+    /// The dialog names a folder on the first non-blank line after the line containing this
+    /// text (case-insensitive): it is answered only for folders ide set up for the session.
+    #[serde(default)]
+    pub path_after: Option<String>,
+    /// What to type, one write after the other (a short pause between them).
+    pub keys: Vec<String>,
+    #[serde(flatten)]
+    pub gate: Gate,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The first non-blank line after the line containing `needle` (case-insensitive), trimmed.
+fn path_after(lines: &[String], needle: &str) -> Option<String> {
+    let needle = needle.to_lowercase();
+    let at = lines.iter().position(|l| l.to_lowercase().contains(&needle))?;
+    lines[at + 1..]
+        .iter()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(str::to_owned)
 }
 
 /// One rule.
@@ -135,7 +177,33 @@ impl ScreenManifest {
                 return Err(format!("rule {}: unknown region {:?}", r.id, r.region));
             }
         }
+        for a in &m.answers {
+            if !a.gate.positive() {
+                return Err(format!("answer {}: no positive matcher", a.id));
+            }
+            if region(&a.region, &ScreenInput { lines: &[], title: "" }).is_none() {
+                return Err(format!("answer {}: unknown region {:?}", a.id, a.region));
+            }
+            if a.keys.is_empty() || a.keys.iter().any(|k| k.is_empty()) {
+                return Err(format!("answer {}: no keys", a.id));
+            }
+        }
         Ok(m)
+    }
+
+    /// A dialog on the screen ide could answer, and the folder it names (when the answer
+    /// asks for one; an answer whose folder is not found does not match).
+    pub fn answer(&self, input: &ScreenInput<'_>) -> Option<(&AutoAnswer, Option<String>)> {
+        self.answers.iter().find_map(|a| {
+            let text = region(&a.region, input)?;
+            if text.is_empty() || !a.gate.matches(&text, &text.to_lowercase()) {
+                return None;
+            }
+            match &a.path_after {
+                Some(n) => Some((a, Some(path_after(input.lines, n)?))),
+                None => Some((a, None)),
+            }
+        })
     }
 
     /// What the screen shows: `None` = keep the previous state (an `unknown` rule won).
@@ -421,5 +489,55 @@ regex=['(']").is_err());
         assert_eq!(detect(x, &idle, "Action Required"), Some(ScreenState::Blocked));
         let trust = ["> You are in C:/w/s1", "", "  Do you trust the contents of this directory?", "› 1. Yes"];
         assert_eq!(detect(x, &trust, ""), Some(ScreenState::Blocked));
+    }
+
+    #[test]
+    fn claude_auto_answers() {
+        let m = crate::Claude.screen_manifest().unwrap();
+        let screen = |rows: &[&str]| rows.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ws = screen(&[
+            "────────────────────────────────",
+            " Accessing workspace:",
+            "",
+            " C:/Users/jook1/AppData/Roaming/ide/ide/data/workspaces/0mwudwwxbug",
+            "",
+            " Quick safety check: Is this a project you created or one you trust?",
+            " Claude Code'll be able to read, edit, and execute files here.",
+            "",
+            " ❯ No, exit",
+            "   Yes, I trust this folder",
+            "",
+            " Enter to confirm · Esc to cancel",
+        ]);
+        let input = ScreenInput { lines: &ws, title: "" };
+        let (a, path) = m.answer(&input).expect("workspace trust");
+        assert_eq!(a.id, "trust_workspace");
+        assert_eq!(path.as_deref(), Some("C:/Users/jook1/AppData/Roaming/ide/ide/data/workspaces/0mwudwwxbug"));
+        assert_eq!(a.keys, ["\x1b[B", "\r"]);
+        assert!(a.default);
+        let dir = screen(&[
+            " Adding a new directory:",
+            "",
+            " C:/Users/jook1/Desktop/ide/.git",
+            "",
+            " This directory is part of the repository at C:/Users/jook1/Desktop/ide.",
+            " ❯ No, exit",
+            "   Yes, add it",
+            " Enter to confirm · Esc to cancel",
+        ]);
+        let (a, path) = m.answer(&ScreenInput { lines: &dir, title: "" }).expect("added dir");
+        assert_eq!((a.id.as_str(), path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/ide/.git")));
+        // Other dialogs and a missing folder line are not answered.
+        let perm = screen(&[" Do you want to run this command?", " ❯ 1. Yes", " Enter to confirm · Esc to cancel"]);
+        assert!(m.answer(&ScreenInput { lines: &perm, title: "" }).is_none());
+        let cut = screen(&[" Accessing workspace:", "", "   Yes, I trust this folder", " Enter to confirm"]);
+        assert_eq!(m.answer(&ScreenInput { lines: &cut, title: "" }).map(|(a, p)| (a.id.clone(), p)), Some(("trust_workspace".into(), Some("Yes, I trust this folder".into()))), "the server checks the folder");
+        let bad = r#"id = "x"
+[[answers]]
+id = "a"
+keys = []
+contains = ["y"]
+"#;
+        assert!(ScreenManifest::parse(bad).unwrap_err().contains("no keys"));
     }
 }

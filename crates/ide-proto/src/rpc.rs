@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 18;
+pub const PROTO_VERSION: u32 = 19;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -65,6 +65,10 @@ pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
 /// registrations without a question are answered by the daemon; `open` / `close` and the
 /// registration question are carried out by an app (`Notify::AgentRequest`).
 pub const AGENT_TOOL_WIDGET: &str = "ide_widget";
+/// Agent bridge tool for previews (`docs/previews.md`): the daemon checks and stores what to
+/// show (`guide` it answers itself); an app opens, reloads or closes the preview tab
+/// (`Notify::AgentRequest`).
+pub const AGENT_TOOL_PREVIEW: &str = "ide_preview";
 /// Not an agent tool: the daemon asks the apps for an approval (`docs/approvals.md`) as an
 /// `Notify::AgentRequest` with this name; the answer is `once` / `session` / `always`, or an error
 /// (refused).
@@ -161,11 +165,24 @@ pub struct AgentTool {
     pub input_schema: String,
 }
 
-/// What an agent tool call returned (MCP `tools/call`): text, and whether it failed.
+/// What an agent tool call returned (MCP `tools/call`): text, and whether it failed; an image
+/// after the text (browser screenshots, `docs/browser-control.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentToolResult {
     pub text: String,
     pub is_error: bool,
+    /// Absent from older peers: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<AgentImage>,
+}
+
+/// An image of an agent tool result (MCP `{"type": "image", "data", "mimeType"}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentImage {
+    /// Base64 of the image file.
+    pub data: String,
+    /// e.g. `image/png`.
+    pub mime_type: String,
 }
 
 /// Server answer to [`Hello`] (as `Response::Welcome`).
@@ -1135,6 +1152,12 @@ pub enum Request {
         widget: String,
         open: bool,
     },
+    /// Turn an agent's auto answer on or off (protocol 19, `docs/auto-answers.md`) -> `Unit`.
+    ProviderSetAutoAnswer {
+        provider: String,
+        answer: String,
+        enabled: bool,
+    },
     /// The kept approvals (protocol 18, `docs/approvals.md`) -> `Approvals`.
     ApprovalList,
     /// Remove a kept approval -> `Unit`.
@@ -1153,6 +1176,13 @@ pub enum Request {
         session: String,
         widget: String,
         op: WidgetDataOp,
+    },
+    /// A file of a session's preview (`docs/previews.md`; `path` empty = the preview's page)
+    /// -> `WidgetFile`.
+    PreviewFile {
+        session: String,
+        preview: String,
+        path: String,
     },
 }
 
@@ -1285,10 +1315,12 @@ impl Request {
             Request::WidgetRegister { .. } => "widget.register",
             Request::WidgetDelete { .. } => "widget.delete",
             Request::WidgetSetOpen { .. } => "widget.set_open",
+            Request::ProviderSetAutoAnswer { .. } => "provider.set_auto_answer",
             Request::ApprovalList => "approval.list",
             Request::ApprovalRevoke { .. } => "approval.revoke",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
+            Request::PreviewFile { .. } => "preview.file",
         }
     }
 }
@@ -1630,6 +1662,7 @@ mod tests {
                             instructions: crate::Support::Native,
                         },
                     },
+                    answers: vec![crate::AutoAnswerInfo { id: "trust_workspace".into(), enabled: true }],
                 }])),
             },
             RpcMessage::Response {

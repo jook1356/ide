@@ -43,6 +43,9 @@ pub use ide_proto::AGENT_TOOL_SHOW_MESSAGE as TOOL_SHOW_MESSAGE;
 /// `ide_widget`: the session's widgets (`docs/widgets.md`).
 pub use ide_proto::AGENT_TOOL_WIDGET as TOOL_WIDGET;
 
+/// `ide_preview`: show a page, Markdown, a file or a site in a tab (`docs/previews.md`).
+pub use ide_proto::AGENT_TOOL_PREVIEW as TOOL_PREVIEW;
+
 /// Session family tools (`docs/session-family.md`), answered by the daemon.
 pub const TOOL_LIST_RELATED: &str = "ide_list_related_sessions";
 pub const TOOL_CREATE_CHILD: &str = "ide_create_child_session";
@@ -53,6 +56,11 @@ pub const TOOL_REQUEST_WRITE: &str = "ide_request_write_access";
 pub const TOOL_RELEASE_WRITE: &str = "ide_release_write_access";
 pub const TOOL_READ_SESSION: &str = "ide_read_session";
 pub const TOOL_SENT_MESSAGES: &str = "ide_sent_messages";
+
+/// Terminal tools (`docs/terminals.md`), answered by the daemon (`service/terminals.rs`).
+pub const TOOL_TERMINAL_LIST: &str = "ide_terminal_list";
+pub const TOOL_TERMINAL_READ: &str = "ide_terminal_read";
+pub const TOOL_TERMINAL_INPUT: &str = "ide_terminal_input";
 
 /// A tool of the session family.
 pub fn is_family_tool(tool: &str) -> bool {
@@ -83,7 +91,9 @@ IDE: `ide_session` describes this session (folder, repositories, branches, base 
 `ide_show_message` shows a short note to the user in the IDE. Child sessions \
 (`ide_create_child_session`) take parallel work; talk to related sessions with \
 `ide_send_to_session`. To show the user something richer than text (a board, a form, a \
-chart, a small tool), build a widget: call `ide_widget` with action `guide` first.";
+chart, a small tool), build a widget: call `ide_widget` with action `guide` first. To show \
+the user a page, a Markdown document, an image or a site, use `ide_preview` (action `guide` \
+explains it).";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -420,6 +430,13 @@ pub fn wire_event(e: HookEvent) -> AgentHookEvent {
 
 /// The bridge's tools.
 pub fn tools() -> Vec<AgentTool> {
+    let mut all = core_tools();
+    // Browser control (`docs/browser-control.md`).
+    all.extend(crate::service::browser::tools());
+    all
+}
+
+fn core_tools() -> Vec<AgentTool> {
     vec![
         AgentTool {
             name: TOOL_SESSION.into(),
@@ -495,6 +512,37 @@ pub fn tools() -> Vec<AgentTool> {
                 .into(),
         },
         AgentTool {
+            name: TOOL_TERMINAL_LIST.into(),
+            description: "List the user's terminals of this session (the ones in ide's terminal \
+                          panel, not your own): id, title, command, folder, state, and the TCP \
+                          ports their processes listen on. `session`: a related session's \
+                          terminals instead (read only)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"A related session's id (default: this session)."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_TERMINAL_READ.into(),
+            description: "Read a terminal of this session or of a related session: its visible \
+                          screen as text and up to `lines` earlier lines that scrolled above it \
+                          (default 50, at most 2000; 0 = the screen only)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"terminal":{"type":"string","description":"The terminal id (ide_terminal_list)."},"lines":{"type":"integer","description":"Scrollback lines above the screen (default 50)."}},"required":["terminal"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_TERMINAL_INPUT.into(),
+            description: "Type into one of this session's terminals: `text` as typed (a line \
+                          break presses Enter), then `keys` by name (enter, tab, esc, \
+                          backspace, up, down, left, right, home, end, pageup, pagedown, \
+                          f1-f12, ctrl+c, alt+f, shift+tab, a single character, ...). The user \
+                          is asked to allow it first. Ctrl+C stops a running command: it is \
+                          input too. Read the result with ide_terminal_read."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"terminal":{"type":"string","description":"The terminal id (ide_terminal_list)."},"text":{"type":"string"},"keys":{"type":"array","items":{"type":"string"},"description":"Key names pressed after the text, e.g. [\"enter\"] or [\"ctrl+c\"]."}},"required":["terminal"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
             name: TOOL_MERGE_CHILD.into(),
             description: "Merge a child session's committed work into this session's worktrees \
                           (per repository: merged, up to date, conflicts left in progress for \
@@ -538,6 +586,19 @@ pub fn tools() -> Vec<AgentTool> {
                 .into(),
         },
         AgentTool {
+            name: TOOL_PREVIEW.into(),
+            description: "Show the user something in a tab next to your terminal (no approval \
+                          needed): `kind` `html` / `markdown` with `content` (a page you write, \
+                          Markdown rendered), `file` with `path` (an HTML page, Markdown file or \
+                          image inside this session's folder), `url` with `url` (a web page, \
+                          e.g. your dev server). The same `id` (default: from the title) \
+                          replaces the preview and reloads its tab. `guide`: details; `list`; \
+                          `close` {id}."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["show","guide","list","close"],"description":"Default show."},"title":{"type":"string","description":"The tab's title (show)."},"kind":{"type":"string","enum":["html","markdown","file","url"]},"content":{"type":"string","description":"HTML or Markdown text (kind html / markdown)."},"path":{"type":"string","description":"A file inside the session folder, relative to it or absolute (kind file)."},"url":{"type":"string","description":"An http(s) address (kind url)."},"id":{"type":"string","description":"1-40 of a-z, 0-9 and -; the same id replaces the preview."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
             name: TOOL_SYNC_PARENT.into(),
             description: "Merge the parent session's newer commits into this child session's \
                           worktrees (same results as ide_merge_child)."
@@ -551,6 +612,7 @@ fn ok(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: false,
+        image: None,
     }
 }
 
@@ -558,6 +620,7 @@ fn err(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: true,
+        image: None,
     }
 }
 
@@ -813,6 +876,16 @@ pub async fn run_mcp_stdio() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A tool result as MCP `tools/call` content: the text, then the image if there is one
+/// (`{"type": "image", "data", "mimeType"}`).
+pub fn mcp_content(r: AgentToolResult) -> serde_json::Value {
+    let mut content = vec![serde_json::json!({"type": "text", "text": r.text})];
+    if let Some(img) = r.image {
+        content.push(serde_json::json!({"type": "image", "data": img.data, "mimeType": img.mime_type}));
+    }
+    serde_json::json!({"content": content, "isError": r.is_error})
+}
+
 fn rpc_error(id: serde_json::Value, code: i64, message: &str) -> serde_json::Value {
     serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
@@ -862,10 +935,7 @@ async fn handle_mcp(link: &AgentLink, msg: serde_json::Value) -> Option<serde_js
                 Ok(r) => r,
                 Err(e) => err(e),
             };
-            Ok(serde_json::json!({
-                "content": [{"type": "text", "text": r.text}],
-                "isError": r.is_error,
-            }))
+            Ok(mcp_content(r))
         }
         _ => Err((-32601, format!("method not found: {method}"))),
     };

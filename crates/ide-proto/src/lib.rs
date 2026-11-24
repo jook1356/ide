@@ -7,6 +7,7 @@
 pub mod agents;
 #[doc(hidden)]
 pub mod bin;
+pub mod browser;
 pub mod error;
 pub mod files;
 pub mod frame;
@@ -19,7 +20,7 @@ pub mod term;
 pub use agents::{
     AccountInfo, AccountState, ConfigurationInfo, IntegrationAction, IntegrationInfo, IntegrationState,
     McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
-    ProviderDetection, ProviderInfo, RepoInfo, BaseRuleInfo, BaseRulePreview, SessionKind, SessionMode, SessionRepo, Support,
+    ProviderDetection, ProviderInfo, AutoAnswerInfo, RepoInfo, BaseRuleInfo, BaseRulePreview, SessionKind, SessionMode, SessionRepo, Support,
 };
 pub use error::ProtoError;
 pub use files::{
@@ -40,7 +41,7 @@ pub use mux::{
     StreamSender,
 };
 pub use rpc::{
-    AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, APPROVAL_REQUEST, ApprovalInfo, WidgetDataOp, WidgetInfo, AgentActivity, MergeResult, RepoMerge, AgentHello, AgentHookEvent, AgentTool, AgentToolResult, Attached, Hello, NewSession, Notify, PROTO_VERSION, ATTACH_CHUNK, ATTACH_MAX, RepoFailureInfo, Request, Response,
+    AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, AGENT_TOOL_PREVIEW, APPROVAL_REQUEST, ApprovalInfo, WidgetDataOp, WidgetInfo, AgentActivity, MergeResult, RepoMerge, AgentHello, AgentHookEvent, AgentTool, AgentToolResult, Attached, Hello, NewSession, Notify, PROTO_VERSION, ATTACH_CHUNK, ATTACH_MAX, RepoFailureInfo, Request, Response,
     ResumeToken, RpcMessage, PortInfo, ScriptGroup, ScriptItem, SessionInfo, ShellInfo, SessionState, UserInfo, UserTerm, Welcome,
 };
 pub use term::{ChunkDecoder, TermChunk, encode_chunk};
