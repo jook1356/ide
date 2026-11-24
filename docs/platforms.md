@@ -190,6 +190,10 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-24: a child's first prompt on the agent's command line (`ide_agents::assemble`,
+  `first_prompt_args`): left out on Windows when the CLI is a batch file run through `cmd.exe`;
+  elsewhere always passed as one argv entry (assumed safe: no shell in between). Unchecked on
+  macOS / Linux.
 - 2026-11-24: previews: CEF custom scheme `ide-preview://` next to `ide-widget://` (same list in
   `main`); checked on Windows only.
 - 2026-11-24: browser control by agents (`ide-web` `devtools.rs`: CDP through `send_dev_tools_message`, `post_task` to CEF's UI thread; `browser_agent.rs`): no OS-specific code, checked on Windows only.

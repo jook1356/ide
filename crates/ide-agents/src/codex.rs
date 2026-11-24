@@ -8,6 +8,7 @@
 //! | Skills | workspace: `<session folder>/.agents/skills/<name>/` (discovered from the cwd, also outside git: verified); original repo: fallback, listed in the developer instructions (nothing may be written into the repo; see docs/agent-providers.md for the rejected CODEX_HOME overlay) |
 //! | Guidance | workspace: `<session folder>/AGENTS.md` (verified: read from a non-git cwd) |
 //! | Outside dirs | `--add-dir` (writable: legacy worktrees, the repositories' git dirs) |
+//! | First prompt | `-- "<prompt>"` (last; a child session's task, new sessions only) |
 //! | Sandbox | `--sandbox workspace-write` unless the account's `config.toml` sets `sandbox_mode` (a session folder is not a trusted project: Codex would start read-only and refuse `--add-dir`, v 0.172.0) |
 //! | MCP | `-c mcp_servers.<name>={command="..", args=[..], env={..}}` |
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
@@ -179,6 +180,12 @@ impl AgentProvider for Codex {
         crate::PromptInput::Paste {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
+    }
+    fn first_prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        // `codex [options] -- "<prompt>"` (the TUI's optional `[PROMPT]`): submitted as the
+        // first turn after the trust question. `--` ends the options (`--add-dir` and
+        // `-c` take values; a prompt may start with `-`).
+        Some(vec!["--".into(), prompt.to_owned()])
     }
 
     /// Esc stops Codex's turn ("esc to interrupt" on its screen) (a).

@@ -223,7 +223,11 @@ impl BridgeState {
                 bg.turn_ended = false;
                 AgentActivity::Working
             }
-            AgentHookEvent::Stopped => {
+            AgentHookEvent::Stopped | AgentHookEvent::StoppedRunning { .. } => {
+                if let AgentHookEvent::StoppedRunning { background } = event {
+                    // The CLI's own account replaces what was counted (ends no hook reports).
+                    bg.running = background.iter().cloned().collect();
+                }
                 bg.turn_ended = true;
                 if bg.running.is_empty() {
                     AgentActivity::Idle
@@ -425,6 +429,7 @@ pub fn wire_event(e: HookEvent) -> AgentHookEvent {
         HookEvent::PreTool(ToolUse::Other { tool }) => AgentHookEvent::PreTool { tool },
         HookEvent::BackgroundStarted { id } => AgentHookEvent::BackgroundStarted { id },
         HookEvent::BackgroundEnded { id } => AgentHookEvent::BackgroundEnded { id },
+        HookEvent::StoppedRunning { background } => AgentHookEvent::StoppedRunning { background },
     }
 }
 
@@ -1217,6 +1222,27 @@ mod tests {
         assert_eq!(h(E::Stopped), Some(Working));
         assert_eq!(h(end("b")), Some(Idle), "the last one ended");
         assert_eq!(h(end("b")), None, "an unknown or repeated end changes nothing");
+
+        // Background shells: no hook starts or ends them, the CLI's record at Stop does.
+        let stop_with = |ids: &[&str]| E::StoppedRunning {
+            background: ids.iter().map(|i| i.to_string()).collect(),
+        };
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(stop_with(&["sh1", "sh2"])), Some(Working), "2 shells still running");
+        assert_eq!(b.screen_says("s", Idle), Some(Working), "an idle prompt while shells run");
+        // sh1 ends: the CLI resumes with its notification (tools, no prompt) and stops again.
+        assert_eq!(h(tool()), Some(Working));
+        assert_eq!(h(stop_with(&["sh2"])), Some(Working));
+        assert_eq!(h(stop_with(&[])), Some(Idle), "the last one ended");
+        // The record replaces what hooks counted: a lost SubagentStop cannot hold the session.
+        assert_eq!(h(start("lost")), None);
+        assert_eq!(h(stop_with(&[])), Some(Idle));
+        // A start reported after the record is still counted until its end.
+        assert_eq!(h(E::PromptSubmitted), Some(Working));
+        assert_eq!(h(stop_with(&["sh3"])), Some(Working));
+        assert_eq!(h(start("a")), None);
+        assert_eq!(h(end("sh3")), None, "a still runs");
+        assert_eq!(h(end("a")), Some(Idle));
 
         // A new conversation forgets work it never saw end.
         assert_eq!(h(start("c")), None);

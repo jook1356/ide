@@ -51,6 +51,10 @@ pub trait AgentProvider: Send + Sync {
     fn capabilities(&self) -> Caps;
     fn prompt_input(&self) -> PromptInput { Lines }        // session.send_prompt: Paste{..} for TUIs
                                                            // (claude, codex), see changes-actions.md
+    fn first_prompt_args(&self, prompt: &str) -> Option<Vec<String>> { None }
+                                                           // a new child's task on the command line,
+                                                           // appended last: claude / codex `-- <prompt>`;
+                                                           // None = typed in (session-family.md)
     // Accounts
     fn account_env(&self, acct: &AccountDir) -> Vec<(String, String)> { vec![] }
     fn login_args(&self) -> Option<Vec<String>> { None }          // see login_spec()
