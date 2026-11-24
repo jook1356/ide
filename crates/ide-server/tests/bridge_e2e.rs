@@ -275,11 +275,20 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_send_to_session",
             "ide_read_session",
             "ide_sent_messages",
+            "ide_terminal_list",
+            "ide_terminal_read",
+            "ide_terminal_input",
             "ide_merge_child",
             "ide_request_write_access",
             "ide_release_write_access",
             "ide_widget",
+            "ide_preview",
             "ide_sync_from_parent",
+            "ide_browser_list",
+            "ide_browser_open",
+            "ide_browser_read",
+            "ide_browser_act",
+            "ide_browser_screenshot",
         ]
     );
     for t in &tools {

@@ -155,10 +155,21 @@ impl Grants {
         Ok(true)
     }
 
-    /// A session went: the grants it asked for or that act on it go too.
+    /// A session went: the grants it asked for or that act on it or on something of it (a
+    /// target `<session>:...`, e.g. its terminal `<session>:t1`) go too.
     pub fn forget_session(&mut self, paths: &Paths, session: &str) -> crate::Result<()> {
+        let inside = |t: &str| t == session || t.strip_prefix(session).is_some_and(|r| r.starts_with(':'));
+        self.forget(paths, |g| g.requester == session || inside(&g.target))
+    }
+
+    /// A target went or is new (a terminal id given again after a restart): its grants go.
+    pub fn forget_target(&mut self, paths: &Paths, target: &str) -> crate::Result<()> {
+        self.forget(paths, |g| g.target == target)
+    }
+
+    fn forget(&mut self, paths: &Paths, gone: impl Fn(&Grant) -> bool) -> crate::Result<()> {
         let kept_before = self.list.iter().filter(|g| g.always).count();
-        self.list.retain(|g| g.requester != session && g.target != session);
+        self.list.retain(|g| !gone(g));
         if self.list.iter().filter(|g| g.always).count() != kept_before {
             self.save(paths)?;
         }
@@ -206,5 +217,16 @@ mod tests {
         g.forget_session(&paths, "b").unwrap();
         assert_eq!(g.list().len(), 1);
         assert!(Grants::load(&paths).list().is_empty(), "the kept grant on `b` went");
+
+        // Things of a session (its terminals) go with it; `bb:t1` is not `b`'s.
+        let mut g = Grants::load(&paths);
+        g.record(&paths, "terminal.input", "x", "b:t1", Answer::Always).unwrap();
+        g.record(&paths, "terminal.input", "x", "bb:t1", Answer::Always).unwrap();
+        g.forget_session(&paths, "b").unwrap();
+        assert!(!g.allows("terminal.input", "x", "b:t1"));
+        assert!(g.allows("terminal.input", "x", "bb:t1"));
+        g.forget_target(&paths, "bb:t1").unwrap();
+        assert!(g.list().is_empty());
+        assert!(Grants::load(&paths).list().is_empty());
     }
 }

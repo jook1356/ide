@@ -118,6 +118,23 @@ struct Core {
     term: Term<Proxy>,
 }
 
+/// Row `r` of the grid as text (0 = the screen's top, negative = scrollback), trailing blanks
+/// trimmed.
+fn row_text(term: &Term<Proxy>, r: i32) -> String {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
+    let grid = term.grid();
+    let row = &grid[Line(r)];
+    let mut line: String = (0..grid.columns())
+        .map(|c| &row[Column(c)])
+        .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .map(|cell| cell.c)
+        .collect();
+    line.truncate(line.trim_end().len());
+    line
+}
+
 struct Proc {
     generation: u64,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
@@ -149,7 +166,19 @@ impl TermHost {
         rows: u16,
         events: broadcast::Sender<Notify>,
     ) -> Arc<Self> {
-        Self::with_capacity(session, cols, rows, events, RING_CAPACITY)
+        Self::build(session, cols, rows, events, RING_CAPACITY, 0)
+    }
+
+    /// Like [`TermHost::new`], keeping up to `lines` rows that scrolled off the screen
+    /// ([`TermHost::history_text`]; user terminals, read by `ide_terminal_read`).
+    pub fn with_scrollback(
+        session: &str,
+        cols: u16,
+        rows: u16,
+        events: broadcast::Sender<Notify>,
+        lines: usize,
+    ) -> Arc<Self> {
+        Self::build(session, cols, rows, events, RING_CAPACITY, lines)
     }
 
     /// Like [`TermHost::new`] with a custom ring capacity (tests).
@@ -159,6 +188,17 @@ impl TermHost {
         rows: u16,
         events: broadcast::Sender<Notify>,
         ring_capacity: usize,
+    ) -> Arc<Self> {
+        Self::build(session, cols, rows, events, ring_capacity, 0)
+    }
+
+    fn build(
+        session: &str,
+        cols: u16,
+        rows: u16,
+        events: broadcast::Sender<Notify>,
+        ring_capacity: usize,
+        scrollback: usize,
     ) -> Arc<Self> {
         let cols = cols.max(2);
         let rows = rows.max(1);
@@ -173,7 +213,7 @@ impl TermHost {
             size: size.clone(),
         };
         let config = AlacConfig {
-            scrolling_history: 0,
+            scrolling_history: scrollback,
             ..AlacConfig::default()
         };
         let term = Term::new(config, &TermSize::new(cols as usize, rows as usize), proxy);
@@ -270,23 +310,30 @@ impl TermHost {
     /// rules (`ide_agents::screen`).
     pub fn screen_text(&self) -> Vec<String> {
         use alacritty_terminal::grid::Dimensions;
-        use alacritty_terminal::index::{Column, Line};
-        use alacritty_terminal::term::cell::Flags;
         let core = self.core.lock().unwrap();
-        let grid = core.term.grid();
-        let (rows, cols) = (grid.screen_lines(), grid.columns());
-        (0..rows)
-            .map(|r| {
-                let row = &grid[Line(r as i32)];
-                let mut line: String = (0..cols)
-                    .map(|c| &row[Column(c)])
-                    .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-                    .map(|cell| cell.c)
-                    .collect();
-                line.truncate(line.trim_end().len());
-                line
-            })
-            .collect()
+        let rows = core.term.grid().screen_lines() as i32;
+        (0..rows).map(|r| row_text(&core.term, r)).collect()
+    }
+
+    /// The rows that scrolled off above the screen (oldest first, at most the last `max`), and
+    /// how many are kept in all. Empty unless made [`TermHost::with_scrollback`].
+    pub fn history_text(&self, max: usize) -> (Vec<String>, usize) {
+        use alacritty_terminal::grid::Dimensions;
+        let core = self.core.lock().unwrap();
+        let total = core.term.grid().history_size();
+        let n = total.min(max) as i32;
+        ((-n..0).map(|r| row_text(&core.term, r)).collect(), total)
+    }
+
+    /// Cursor keys are in application mode (`ESC[?1h`): arrows send `ESC O A` instead of
+    /// `ESC [ A`.
+    pub fn app_cursor(&self) -> bool {
+        self.core
+            .lock()
+            .unwrap()
+            .term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::APP_CURSOR)
     }
 
     /// Write to the process' input.

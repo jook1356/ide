@@ -1473,3 +1473,26 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+
+## Auto answers (auto_answers_ui.rs)
+auto-answers-label = AUTO ANSWERS
+auto-answers-note = Dialogs of an agent that ide answers by itself. Folder questions are answered only for the folders ide set up for the session.
+auto-answer-trust-workspace = Trust the session's folder
+auto-answer-trust-workspace-note = The agent asks whether to trust the folder when a session starts in a new one.
+auto-answer-trust-added-dir = Trust the session's added folders
+auto-answer-trust-added-dir-note = The agent asks before it uses a folder added to the session, e.g. a repository's git folder.
+
+## Previews (docs/previews.md)
+preview-tip = A preview from the session's agent
+preview-devtools = Developer tools
+err-preview = Preview: { $detail }
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = The agent of “{ $who }” wants to type into the terminal “{ $whom }”.
+approval-cap-terminal-input = type into a terminal
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = The agent of “{ $who }” wants to use the site { $whom } in the ide browser (open, click, type, run scripts).
+approval-browser-read = The agent of “{ $who }” wants to read the site { $whom } in the ide browser (its text, console or a screenshot).
+approval-cap-browser-act = use the site in the browser
+approval-cap-browser-read = read the site in the browser

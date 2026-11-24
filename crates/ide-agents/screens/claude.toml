@@ -78,3 +78,23 @@ state = "idle"
 priority = 250
 region = "title"
 regex = ['^\x{2733} ']
+
+# ---- Auto answers (docs/auto-answers.md): dialogs ide answers itself, for folders it set up.
+# Both lists start on "No, exit": Down, then Enter picks the second entry.
+
+# "Accessing workspace: <folder> ... Yes, I trust this folder" (the first start in a folder).
+[[answers]]
+id = "trust_workspace"
+region = "whole"
+path_after = "accessing workspace:"
+contains = ["accessing workspace:", "yes, i trust this folder", "enter to confirm"]
+keys = ["\u001b[B", "\r"]
+
+# "Adding a new directory: <folder> ... Yes, add it" (an --add-dir folder, e.g. a repository's
+# git dir, not trusted yet).
+[[answers]]
+id = "trust_added_dir"
+region = "whole"
+path_after = "adding a new directory:"
+contains = ["adding a new directory:", "yes, add it", "enter to confirm"]
+keys = ["\u001b[B", "\r"]

@@ -9,6 +9,8 @@ iced = { workspace = true, features = ["advanced", "tokio", "wgpu"] }
 cef = { workspace = true, features = ["accelerated_osr"] }
 anyhow.workspace = true
 tracing.workspace = true
+# DevTools protocol messages (`cdp.rs`, `devtools.rs`).
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # MapVirtualKeyW (VK -> scan code for CEF's native_key_code) and the detail window's owner

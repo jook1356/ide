@@ -25,7 +25,7 @@ pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, 
 pub use ide_proto::{
     AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, IntegrationAction,
     IntegrationInfo, IntegrationState, McpServerInfo, ModeCaps, ProviderCaps, SkillInfo,
-    ProviderDetection, ProviderInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
+    ProviderDetection, ProviderInfo, AutoAnswerInfo, RepoFailureInfo, RepoInfo, SessionKind, SessionMode,
     SessionRepo, Support,
 };
 pub use ide_proto::{
@@ -33,7 +33,7 @@ pub use ide_proto::{
     DefResult, DefTarget, DiffAgainst, DiffFile, DiffHunk, DiffLine, EntryKind, FileContent,
     FileMatch, FsEntry, PathMatch, PathMatches, FsStat, GIT_LOG_PAGE, GIT_UNPUSHED_MAX, GitChange, GitLog, GitRev, GitStatus, LineKind, NewSession, Notify,
     ProtoError, SearchMatch, SearchSummary, SessionInfo, SessionState, TermChunk, TextEncoding, ScriptGroup, ScriptItem, UserTerm, PortInfo, ShellInfo,
-    TextSearch, UserInfo, Welcome, AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, APPROVAL_REQUEST, ApprovalInfo, WidgetDataOp, WidgetInfo, AgentActivity, MergeResult, RepoMerge,
+    TextSearch, UserInfo, Welcome, AGENT_TOOL_SESSION, AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, AGENT_TOOL_PREVIEW, APPROVAL_REQUEST, ApprovalInfo, WidgetDataOp, WidgetInfo, AgentActivity, MergeResult, RepoMerge,
 };
 // --- local git actions (Changes / History footer)
 pub use ide_proto::git_actions::{

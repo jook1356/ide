@@ -27,6 +27,7 @@ fn ok(v: serde_json::Value) -> AgentToolResult {
     AgentToolResult {
         text: serde_json::to_string_pretty(&v).expect("json"),
         is_error: false,
+        image: None,
     }
 }
 
@@ -34,6 +35,7 @@ fn err(t: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: t.into(),
         is_error: true,
+        image: None,
     }
 }
 
@@ -310,6 +312,7 @@ impl UserCtx {
                 "guide" => Ok(Ok(AgentToolResult {
                     text: guide(&widget::widgets_dir(&s.root).display().to_string()),
                     is_error: false,
+                    image: None,
                 })),
                 "list" => Ok(Ok(ok(me.widget_tool_list(&s)))),
                 "register" => {

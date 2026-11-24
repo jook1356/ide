@@ -149,6 +149,8 @@ pub(crate) struct ViewShared {
     /// scrollable translation).
     pub last_bounds: Mutex<Option<Rectangle>>,
     pub counters: Counters,
+    /// DevTools requests and the console log (`devtools.rs`).
+    pub cdp: crate::devtools::CdpState,
 }
 
 impl ViewShared {
@@ -174,7 +176,8 @@ impl ViewShared {
 
     /// Tells CEF whether it is hidden: by the app or while frozen under a modal.
     pub fn apply_hidden(&self) {
-        let hidden = self.app_hidden.load(SeqCst) || self.frozen.load(SeqCst);
+        let hidden = (self.app_hidden.load(SeqCst) || self.frozen.load(SeqCst))
+            && self.cdp.awake.load(SeqCst) == 0;
         if let Some(host) = self.host() {
             host.was_hidden(hidden as _);
         }
@@ -470,6 +473,10 @@ wrap_display_handler! {
             } else {
                 ConsoleLevel::Debug
             };
+            let url = self.h.shared.url.lock().unwrap().clone();
+            self.h.shared.cdp.log(crate::devtools::ConsoleEntry {
+                level, message: message.clone(), source: s(source), line, url,
+            });
             emit(self.h.shared.id, WebEvent::Console { level, message, source: s(source), line });
             1 // handled: don't also print to CEF's log/stdout
         }
@@ -790,6 +797,7 @@ impl WebView {
             caret_probe: options.caret_probe,
             last_bounds: Mutex::new(None),
             counters: Counters::default(),
+            cdp: Default::default(),
         });
         if !shared.create_browser(url) {
             anyhow::bail!("browser_host_create_browser failed");
@@ -907,6 +915,11 @@ impl WebView {
     /// The frame copied after [`WebView::request_frame_dump`], once available.
     pub fn take_frame_dump(&self) -> Option<FrameDump> {
         self.shared().dump.lock().unwrap().take()
+    }
+
+    /// DevTools protocol access to the page (the agent bridge's browser tools).
+    pub fn devtools(&self) -> crate::DevTools {
+        crate::DevTools(self.shared().clone())
     }
 
     /// Opens Chrome DevTools in a separate native window.

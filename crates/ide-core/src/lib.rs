@@ -37,6 +37,7 @@
 
 pub mod account;
 pub mod approval;
+pub mod auto_answer;
 pub mod base;
 pub mod configuration;
 pub mod error;
@@ -45,6 +46,7 @@ pub mod launch;
 pub mod migrate;
 pub mod ops;
 pub mod paths;
+pub mod preview;
 pub mod prompts;
 pub mod registry;
 pub mod repo;

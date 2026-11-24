@@ -33,8 +33,12 @@ use crate::{def, fsops, git, scripts, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 mod approvals;
+mod auto_answers;
+pub(crate) mod browser;
+mod terminals;
 mod widgets;
 mod write_guard;
+mod previews;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Env var naming the `gh` program ([`ServerConfig::gh`]).
@@ -298,6 +302,10 @@ pub struct UserCtx {
     bridge: crate::bridge::BridgeState,
     /// What the user allowed agents to do beyond their session (`docs/approvals.md`).
     grants: Mutex<ide_core::approval::Grants>,
+    /// The user's auto answer choices per agent (`docs/auto-answers.md`) and when each
+    /// session's dialog was last answered.
+    auto_answers: Mutex<ide_core::auto_answer::AutoAnswers>,
+    answered: Mutex<HashMap<String, std::time::Instant>>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
     /// Sessions whose pending worktrees a background job is creating
@@ -360,6 +368,7 @@ impl UserCtx {
         }
         let providers = Providers::load(&paths.providers_dir());
         let grants = ide_core::approval::Grants::load(&paths);
+        let auto_answers = ide_core::auto_answer::AutoAnswers::load(&paths);
         Ok(UserCtx {
             user,
             paths,
@@ -380,6 +389,8 @@ impl UserCtx {
             github,
             bridge: crate::bridge::BridgeState::new(bridge),
             grants: Mutex::new(grants),
+            auto_answers: Mutex::new(auto_answers),
+            answered: Mutex::new(HashMap::new()),
             this: std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
         })
@@ -417,8 +428,9 @@ impl UserCtx {
         let ok = |v: serde_json::Value| ide_proto::AgentToolResult {
             text: serde_json::to_string_pretty(&v).expect("json"),
             is_error: false,
+            image: None,
         };
-        let err = |t: String| ide_proto::AgentToolResult { text: t, is_error: true };
+        let err = |t: String| ide_proto::AgentToolResult { text: t, is_error: true, image: None };
         let s = match self.resolve_session(session) {
             Ok(s) => s,
             Err(e) => return Some(err(format!("session not available: {e}"))),
@@ -783,12 +795,29 @@ impl UserCtx {
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
     /// asks the connected apps).
     pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        if let Some(r) = self.terminal_tool(session, tool, args).await {
+            return r;
+        }
+        if ide_proto::browser::TOOLS.contains(&tool) {
+            return self.browser_tool(session, tool, args).await;
+        }
         if tool == crate::bridge::TOOL_WIDGET {
             return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
                 Ok(v) => self.widget_tool(session, &v).await,
                 Err(e) => ide_proto::AgentToolResult {
                     text: format!("invalid arguments: {e}"),
                     is_error: true,
+                    image: None,
+                },
+            };
+        }
+        if tool == crate::bridge::TOOL_PREVIEW {
+            return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
+                Ok(v) => self.preview_tool(session, &v).await,
+                Err(e) => ide_proto::AgentToolResult {
+                    text: format!("invalid arguments: {e}"),
+                    is_error: true,
+                    image: None,
                 },
             };
         }
@@ -799,6 +828,7 @@ impl UserCtx {
                     return ide_proto::AgentToolResult {
                         text: format!("invalid arguments: {e}"),
                         is_error: true,
+                        image: None,
                     };
                 }
             };
@@ -806,6 +836,7 @@ impl UserCtx {
                 return ide_proto::AgentToolResult {
                     text: why,
                     is_error: true,
+                    image: None,
                 };
             }
             let (me, session, tool) = (self.clone(), session.to_owned(), tool.to_owned());
@@ -816,6 +847,7 @@ impl UserCtx {
                 .unwrap_or_else(|| ide_proto::AgentToolResult {
                     text: "the tool failed".into(),
                     is_error: true,
+                    image: None,
                 });
         }
         // Apps subscribe to the notifications; agent connections do not.
@@ -973,6 +1005,10 @@ impl UserCtx {
                 lines: &lines,
                 title: &key.1,
             };
+            // A dialog ide answers by itself (`docs/auto-answers.md`).
+            if let Some((a, path)) = m.answer(&input) {
+                self.auto_answer(&s, &host, a, path.as_deref());
+            }
             let Some(state) = m.detect(&input) else {
                 continue;
             };
@@ -1705,6 +1741,7 @@ impl UserCtx {
                             instructions: support(c.original_repo.instructions),
                         },
                     },
+                    answers: self.answers_of(p.as_ref()),
                 }
             })
             .collect()
@@ -2112,6 +2149,8 @@ impl UserCtx {
             Request::WidgetDelete { widget } => self.widget_delete(&widget),
             Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
+            Request::ProviderSetAutoAnswer { provider, answer, enabled } => self.set_auto_answer(&provider, &answer, enabled),
+            Request::PreviewFile { session, preview, path } => self.preview_file(&session, &preview, &path),
             Request::ApprovalList => Ok(self.approval_list()),
             Request::ApprovalRevoke { id } => self.approval_revoke(&id),
             Request::ScriptsList { session, repo } => {
@@ -3606,7 +3645,7 @@ impl UserCtx {
                     format!("{shell_name} {}", n + 1)
                 }
             });
-        let host = TermHost::new(&id, DEFAULT_COLS, DEFAULT_ROWS, self.events.clone());
+        let host = TermHost::with_scrollback(&id, DEFAULT_COLS, DEFAULT_ROWS, self.events.clone(), terminals::SCROLLBACK);
         self.uterm_spawn(&host, &program, &args, &cwd)?;
         let entry = UTermEntry {
             id: id.clone(),
@@ -3622,6 +3661,8 @@ impl UserCtx {
         let info = Self::uterm_info(&entry);
         u.list.push(entry);
         drop(u);
+        // A terminal id given again (after a restart) is a new terminal: no grants carry over.
+        self.approvals_forget_target(&id);
         self.audit("uterm.open", &format!("{id} {}", info.command));
         self.notify(Notify::UTermsChanged {
             session: session.to_owned(),
@@ -3804,6 +3845,7 @@ impl UserCtx {
                 let (session, host) = self.uterm_find(&id)?;
                 host.kill();
                 self.uterms.lock().unwrap().list.retain(|t| t.id != id);
+                self.approvals_forget_target(&id);
                 self.audit("uterm.remove", &id);
                 self.notify(Notify::UTermsChanged { session });
                 Ok(Response::Unit)
