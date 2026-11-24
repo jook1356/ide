@@ -937,6 +937,19 @@ impl Client {
         }
     }
 
+    /// `preview.file`: a file of a session's preview (`path` empty = its page): media type, bytes.
+    pub async fn preview_file(&self, session: &str, preview: &str, path: &str) -> Result<(String, Vec<u8>), ProtoError> {
+        let req = Request::PreviewFile {
+            session: session.into(),
+            preview: preview.into(),
+            path: path.into(),
+        };
+        match self.call(req).await? {
+            Response::WidgetFile { mime, data } => Ok((mime, data)),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a preview file")),
+        }
+    }
+
     /// `widget.register`: the user allowed registering the session's draft with `tools` (as shown).
     pub async fn widget_register(&self, session: &str, widget: &str, tools: Vec<String>) -> Result<(), ProtoError> {
         expect_unit(

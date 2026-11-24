@@ -39,6 +39,9 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
   custom schemes must be registered in every CEF process: `register_custom_schemes` runs before
   `maybe_run_subprocess`, which assumes the helper processes run the app's own executable (as on
   Windows). Check: `IDE_APP_SCRIPT_ONLY=widget` passes (`docs/widgets.md`).
+- [ ] **Preview scheme (`ide-preview://`, `previews_ui.rs`).** Same as the widget scheme: one more
+  name in the same `register_custom_schemes` list. Check: `IDE_APP_SCRIPT_ONLY=preview` passes
+  (`docs/previews.md`).
 - [ ] **Self-update (빌드 후 재시작).** Windows only (`self_update::available` is false elsewhere;
   `scripts/ide-update.ps1`). Assumption: a shell script doing the same steps works on Linux / macOS
   (a running binary can be replaced there directly). Check: port the script, show the footer button.
@@ -99,6 +102,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 - [ ] **Widget scheme (`ide-widget://`).** As on Linux; on macOS CEF's helper processes are
   separate app bundles (`bundle-cef-app`): they must call `ide_web::register_custom_schemes` with
   the same list too, or widget pages do not get their own origin. Check: `IDE_APP_SCRIPT_ONLY=widget`.
+- [ ] **Preview scheme (`ide-preview://`).** As the widget scheme: the helper bundles need
+  `previews_ui::SCHEME` in their list too. Check: `IDE_APP_SCRIPT_ONLY=preview`.
 - [ ] **Login-shell `PATH`.** An app started from Finder / Dock gets
   `/usr/bin:/bin:/usr/sbin:/sbin`, so `claude`, `codex`, `gh`, Homebrew `git` and `node` are not
   found. The server should read the login shell's environment once (`$SHELL -lc env` or similar)
@@ -180,6 +185,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-24: previews: CEF custom scheme `ide-preview://` next to `ide-widget://` (same list in
+  `main`); checked on Windows only.
 - 2026-11-23: `old_server.rs` ends an incompatible daemon by pid; `kill -TERM -<pid>` off Windows (unbuilt).
 - 2026-11-23: widgets: CEF custom scheme `ide-widget://` (`scheme.rs`), registered in every
   process; checked on Windows only.

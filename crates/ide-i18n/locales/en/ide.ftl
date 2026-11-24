@@ -1477,3 +1477,8 @@ auto-answer-trust-workspace = Trust the session's folder
 auto-answer-trust-workspace-note = Claude Code's “Accessing workspace … Yes, I trust this folder” when a session starts in a new folder.
 auto-answer-trust-added-dir = Trust the session's added folders
 auto-answer-trust-added-dir-note = Claude Code's “Adding a new directory … Yes, add it”, e.g. for a repository's git folder.
+
+## Previews (docs/previews.md)
+preview-tip = A preview from the session's agent
+preview-devtools = Developer tools
+err-preview = Preview: { $detail }

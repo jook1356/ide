@@ -65,6 +65,10 @@ pub const AGENT_TOOL_SHOW_MESSAGE: &str = "ide_show_message";
 /// registrations without a question are answered by the daemon; `open` / `close` and the
 /// registration question are carried out by an app (`Notify::AgentRequest`).
 pub const AGENT_TOOL_WIDGET: &str = "ide_widget";
+/// Agent bridge tool for previews (`docs/previews.md`): the daemon checks and stores what to
+/// show (`guide` it answers itself); an app opens, reloads or closes the preview tab
+/// (`Notify::AgentRequest`).
+pub const AGENT_TOOL_PREVIEW: &str = "ide_preview";
 /// Not an agent tool: the daemon asks the apps for an approval (`docs/approvals.md`) as an
 /// `Notify::AgentRequest` with this name; the answer is `once` / `session` / `always`, or an error
 /// (refused).
@@ -1152,6 +1156,13 @@ pub enum Request {
         widget: String,
         op: WidgetDataOp,
     },
+    /// A file of a session's preview (`docs/previews.md`; `path` empty = the preview's page)
+    /// -> `WidgetFile`.
+    PreviewFile {
+        session: String,
+        preview: String,
+        path: String,
+    },
 }
 
 impl Request {
@@ -1288,6 +1299,7 @@ impl Request {
             Request::ApprovalRevoke { .. } => "approval.revoke",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
+            Request::PreviewFile { .. } => "preview.file",
         }
     }
 }

@@ -52,6 +52,9 @@ mod detail_window_steps;
 /// Widget steps (`script_widgets.rs`).
 #[path = "script_widgets.rs"]
 mod widget_steps;
+/// Preview steps (`script_previews.rs`).
+#[path = "script_previews.rs"]
+mod preview_steps;
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
@@ -365,6 +368,7 @@ enum Step {
     /// Detail window steps.
     Pop(detail_window_steps::PStep),
     Widget(widget_steps::WStep),
+    Preview(preview_steps::PStep),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -476,6 +480,8 @@ impl Script {
         let only_pop = only == "pop";
         // `IDE_APP_SCRIPT_ONLY=widget`: startup, the widget checks and the server stop.
         let only_widget = only == "widget";
+        // `IDE_APP_SCRIPT_ONLY=preview`: startup, the preview checks and the server stop.
+        let only_preview = only == "preview";
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -484,7 +490,9 @@ impl Script {
         ));
         Some(Script {
             steps: {
-                let mut s = if only_widget {
+                let mut s = if only_preview {
+                    preview_steps::steps_only()
+                } else if only_widget {
                     widget_steps::steps_only()
                 } else if only_pop {
                     detail_window_steps::steps_only()
@@ -493,11 +501,12 @@ impl Script {
                 } else {
                     steps(claude)
                 };
-                if !only_pop && !only_widget {
+                if !only_pop && !only_widget && !only_preview {
                     changes::splice(&mut s);
                     footer_steps::splice(&mut s);
                     detail_window_steps::splice(&mut s);
                     widget_steps::splice(&mut s);
+                    preview_steps::splice(&mut s);
                 }
                 s
             },
@@ -3911,6 +3920,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::Widget(x) => {
                 let (n, t) = widget_steps::run(sc, app, x, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::Preview(x) => {
+                let (n, t) = preview_steps::run(sc, app, x, el);
                 next = n;
                 tasks.push(t);
             }

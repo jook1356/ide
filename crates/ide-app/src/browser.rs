@@ -33,10 +33,12 @@ pub struct Browser {
     /// The tab shows a widget (`widgets_ui.rs`): its page is served by ide, the header shows
     /// its name instead of the address.
     pub widget: Option<crate::widgets_ui::WidgetTab>,
+    /// The tab shows an agent's preview (`previews_ui.rs`).
+    pub preview: Option<crate::previews_ui::PreviewTab>,
 }
 
 impl Browser {
-    fn new(id: u32, url: String) -> Self {
+    pub(crate) fn new(id: u32, url: String) -> Self {
         Self {
             id,
             view: None,
@@ -47,6 +49,7 @@ impl Browser {
             can_forward: false,
             error: None,
             widget: None,
+            preview: None,
         }
     }
 
@@ -54,6 +57,8 @@ impl Browser {
     pub fn label(&self) -> String {
         if let Some(w) = &self.widget {
             w.name.clone()
+        } else if let Some(p) = self.preview.as_ref().filter(|p| p.is_page()) {
+            p.title.clone()
         } else if !self.title.trim().is_empty() {
             self.title.clone()
         } else if !self.url_input.trim().is_empty() {
@@ -176,7 +181,7 @@ impl App {
             && let Some(b) = self.browser_mut(id)
             && b.view.is_none()
         {
-            let url = if b.widget.is_some() {
+            let url = if b.widget.is_some() || b.preview.is_some() {
                 b.url_input.clone()
             } else {
                 address_to_url(&b.url_input).unwrap_or_else(|| crate::app::DEFAULT_URL.into())
@@ -318,6 +323,9 @@ impl App {
             WebEvent::Console { message, .. } if b.widget.is_some() => {
                 crate::widgets_ui::console(&b.widget.as_ref().map(|w| w.id.clone()).unwrap_or_default(), message);
             }
+            WebEvent::Console { message, .. } if b.preview.is_some() => {
+                crate::previews_ui::console(&b.preview.as_ref().map(|p| p.id.clone()).unwrap_or_default(), message);
+            }
             _ => {}
         }
         if let Some((from, url)) = new_tab {
@@ -434,6 +442,9 @@ impl App {
         };
         if let Some(w) = &b.widget {
             return self.widget_identity(b, w);
+        }
+        if let Some(p) = b.preview.as_ref().filter(|p| p.is_page()) {
+            return self.preview_identity(b, p);
         }
         row![
             icon_button("←", b.can_back.then_some(Message::WebBack), tr::web_back()),

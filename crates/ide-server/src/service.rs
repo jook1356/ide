@@ -35,6 +35,7 @@ pub const SERVER_CONFIG_FILE: &str = "server.json";
 mod approvals;
 mod auto_answers;
 mod widgets;
+mod previews;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Env var naming the `gh` program ([`ServerConfig::gh`]).
@@ -787,6 +788,15 @@ impl UserCtx {
         if tool == crate::bridge::TOOL_WIDGET {
             return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
                 Ok(v) => self.widget_tool(session, &v).await,
+                Err(e) => ide_proto::AgentToolResult {
+                    text: format!("invalid arguments: {e}"),
+                    is_error: true,
+                },
+            };
+        }
+        if tool == crate::bridge::TOOL_PREVIEW {
+            return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
+                Ok(v) => self.preview_tool(session, &v).await,
                 Err(e) => ide_proto::AgentToolResult {
                     text: format!("invalid arguments: {e}"),
                     is_error: true,
@@ -2102,6 +2112,7 @@ impl UserCtx {
             Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
             Request::ProviderSetAutoAnswer { provider, answer, enabled } => self.set_auto_answer(&provider, &answer, enabled),
+            Request::PreviewFile { session, preview, path } => self.preview_file(&session, &preview, &path),
             Request::ApprovalList => Ok(self.approval_list()),
             Request::ApprovalRevoke { id } => self.approval_revoke(&id),
             Request::ScriptsList { session, repo } => {

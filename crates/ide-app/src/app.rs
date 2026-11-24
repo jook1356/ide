@@ -959,6 +959,7 @@ pub enum Message {
     /// Browser tabs and 즐겨찾기 (`browser.rs`).
     Browser(crate::browser::BrowserMsg),
     Widget(crate::widgets_ui::WidgetMsg),
+    Preview(crate::previews_ui::PreviewMsg),
     Approval(crate::approvals_ui::ApprovalMsg),
     AutoAnswer(crate::auto_answers_ui::AutoAnswerMsg),
     /// The input box under an agent terminal.
@@ -1240,6 +1241,7 @@ impl App {
     ) -> (Self, Task<Message>) {
         let mut app = Self::load(data_dir, runtime, remote_override);
         crate::widgets_ui::install();
+        crate::previews_ui::install();
         app.script = Script::from_env(&app.data_dir);
         // Self-update: a run that started this app learns it came up.
         app.update_available = crate::self_update::available();
@@ -3792,6 +3794,7 @@ impl App {
             Message::UTerm(m) => self.on_uterm(m),
             Message::Browser(m) => self.on_browser(m),
             Message::Widget(m) => self.on_widget(m),
+            Message::Preview(m) => self.on_preview(m),
             Message::Approval(m) => self.on_approval(m),
             Message::AutoAnswer(m) => self.on_auto_answer(m),
             Message::Composer(m) => self.on_composer(m),
@@ -4339,6 +4342,7 @@ impl App {
         let mut subs = vec![
             ide_web::events().map(Message::Web),
             crate::widgets_ui::subscription(),
+            crate::previews_ui::subscription(),
             window::resize_events().map(|(id, s)| Message::WindowResized(id, s)),
             window::close_requests().map(Message::WindowCloseRequest),
             window::close_events().map(Message::WindowClosed),

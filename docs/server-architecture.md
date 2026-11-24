@@ -266,6 +266,7 @@ Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify
 | Explore file ops (protocol 10) | `fs.copy{session, repo, from, external, to_dir}` -> `FsCopied(path)` (a file or folder, links skipped; `external` = an absolute path outside the worktree, e.g. pasted from the file manager; a taken name gets ` copy` / ` copy N`; not into itself); `fs.delete{trash: true}` moves the entry to the OS recycle bin (`trash` crate); `git.remote_url{session, repo, path}` -> `Url` (`<origin web>/blob/<branch>/<path>`). |
 | Pin / archive (protocol 11) | `session.set_flags{id, pinned?, archived?}` -> `Session` (Desk's session PATCH `{pinned}` / `{archived}`; archiving unpins, an archived session stays unpinned); `SessionInfo.pinned` / `.archived`, kept in `sessions.json` only when set. |
 | Widgets (protocol 17) | `widget.list` / `file` / `register` / `delete` / `set_open` / `call` / `data`, `Notify::WidgetsChanged`; bridge tool `ide_widget`. See `docs/widgets.md`. |
+| Previews | `preview.file{session, preview, path}` -> `WidgetFile`; bridge tool `ide_preview`. See `docs/previews.md`. |
 | Approvals (protocol 18) | `approval.list` / `revoke`; the daemon asks apps with `Notify::AgentRequest` `ide.approval`. See `docs/approvals.md`. |
 | Auto answers (protocol 19) | `ProviderInfo.answers`, `provider.set_auto_answer`. See `docs/auto-answers.md`. |
 | Account integration (protocol 15) | `account.integration{provider, slug, action}` -> `Integration{state, approve_with}`; `ProviderCaps.integration`. See `docs/agent-bridge.md`. |

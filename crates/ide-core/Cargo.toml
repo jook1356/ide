@@ -11,3 +11,5 @@ thiserror.workspace = true
 tracing.workspace = true
 directories.workspace = true
 fancy-regex = "0.14"
+# Markdown previews (`preview.rs`): CommonMark + GFM extensions to HTML.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
