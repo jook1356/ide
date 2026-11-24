@@ -58,6 +58,9 @@ mod preview_steps;
 /// Browser control steps (`script_browser.rs`).
 #[path = "script_browser.rs"]
 mod browser_steps;
+/// New-session dialog with many repos (`script_new_repos.rs`).
+#[path = "script_new_repos.rs"]
+mod new_repos_steps;
 
 /// Session index meaning "the phase 2 session" (created through the folder browser).
 const P2: usize = 99;
@@ -373,6 +376,7 @@ enum Step {
     Widget(widget_steps::WStep),
     Preview(preview_steps::PStep),
     Browser(browser_steps::BStep),
+    NewRepos(new_repos_steps::NStep),
 }
 
 /// SSH host that never resolves (`.invalid` is reserved).
@@ -384,6 +388,8 @@ enum Repo {
     /// The second test repo (multi-repo checks).
     Second,
     PlainFolder,
+    /// A scratch repo of the new-session dialog checks (`new_repos_steps::NAMES`).
+    Many(u8),
 }
 
 pub struct Script {
@@ -488,6 +494,9 @@ impl Script {
         let only_preview = only == "preview";
         // `IDE_APP_SCRIPT_ONLY=browser`: startup, the browser control checks and the server stop.
         let only_browser = only == "browser";
+        // `IDE_APP_SCRIPT_ONLY=newrepos`: startup, the new-session dialog checks with many repos
+        // and the server stop.
+        let only_new_repos = only == "newrepos";
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -496,7 +505,9 @@ impl Script {
         ));
         Some(Script {
             steps: {
-                let mut s = if only_preview {
+                let mut s = if only_new_repos {
+                    new_repos_steps::steps_only()
+                } else if only_preview {
                     preview_steps::steps_only()
                 } else if only_browser {
                     browser_steps::steps_only()
@@ -509,7 +520,7 @@ impl Script {
                 } else {
                     steps(claude)
                 };
-                if !only_pop && !only_widget && !only_preview && !only_browser {
+                if !only_pop && !only_widget && !only_preview && !only_browser && !only_new_repos {
                     changes::splice(&mut s);
                     footer_steps::splice(&mut s);
                     detail_window_steps::splice(&mut s);
@@ -557,6 +568,10 @@ impl Script {
         match r {
             Repo::Test => self.repo.clone(),
             Repo::Second => self.repo2.clone(),
+            Repo::Many(i) => self
+                .data
+                .join("many-repos")
+                .join(new_repos_steps::NAMES[usize::from(i)]),
             Repo::PlainFolder => {
                 let p = self.data.join("not-a-repo");
                 let _ = std::fs::create_dir_all(&p);
@@ -3941,6 +3956,11 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             }
             Step::Browser(x) => {
                 let (n, t) = browser_steps::run(sc, app, x, el);
+                next = n;
+                tasks.push(t);
+            }
+            Step::NewRepos(x) => {
+                let (n, t) = new_repos_steps::run(sc, app, x, el);
                 next = n;
                 tasks.push(t);
             }

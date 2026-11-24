@@ -92,7 +92,12 @@ synchronous mode (the app shows the same notices). Meanwhile:
   instructions flags (`--append-system-prompt-file` / `developer_instructions`). See
   `agent-providers.md` for what was verified.
 - The new-session dialog uses one checkbox per registered repo instead of Desk's add/remove table
-  (same result: pre-checked defaults, any subset, zero = empty workspace).
+  (same result: pre-checked defaults, any subset, zero = empty workspace). The list is ordered
+  most recently used first (latest creation / activity of a session with the repo, then registry
+  order), grows to about eight rows and then scrolls; from six registered repos on it adds a
+  search box (every word in the name or path) and shows the checked repos as chips above it
+  (`crates/ide-app/src/new_session_repos.rs`). The dialog itself never outgrows the window: the
+  title and the 취소 / 만들기 buttons stay, the fields between them scroll.
 - Not ported: per-repo branch names in the new dialog, orphan workspace reuse, child sessions,
   task prompts per repo, the agent-side `desk_repo` tool, the rule card's "AI로 만들기" regex
   draft (needs an LLM call), Desk's later uses of the base (PR target, parallel merge, 커밋 보유,
