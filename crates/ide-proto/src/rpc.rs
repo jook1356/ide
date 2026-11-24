@@ -332,6 +332,38 @@ pub struct SessionInfo {
     /// Its worktrees are still being created in the background (`NewSession::background`).
     #[serde(default)]
     pub preparing: bool,
+    /// Its agent was running when the server last went away and is resumed when a client
+    /// opens the session (`session.start`); the server does not restart it by itself.
+    #[serde(default)]
+    pub resume_on_open: bool,
+    /// The branch badge of the session list, checked by the server (`None`: not checked yet).
+    /// Kept across server restarts (`docs/branch-badge.md`).
+    #[serde(default)]
+    pub branch: Option<BranchBadge>,
+}
+
+/// The state of a session's repos for the session list's branch badge (Hermes Desk's
+/// `BranchIndicator`, aggregated over the session's repos by the server; `None` = not known).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct BranchState {
+    pub dirty: Option<bool>,
+    pub ahead: u32,
+    pub unpublished: bool,
+    pub open_pr: Option<bool>,
+    pub pr_conflict: bool,
+    pub merged: bool,
+    pub unmerged: u32,
+    pub unmerged_conflict: bool,
+}
+
+/// The last branch check of a session (`SessionInfo::branch`, `Notify::Branch`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchBadge {
+    /// The aggregated state of its repos.
+    Known(BranchState),
+    /// The check failed.
+    Failed(ProtoError),
 }
 
 /// What merging one repo of a session family did (`session.merge_child` / `sync_parent`).
@@ -1506,6 +1538,11 @@ pub enum Notify {
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
+    /// A session's branch badge was checked again and changed (`SessionInfo::branch`).
+    Branch {
+        session: String,
+        badge: BranchBadge,
+    },
     /// A session's background worktree creation (`NewSession::background`) finished: the
     /// repos that failed and the base changes (as `SessionCreated` reports them otherwise).
     SessionPrepared {

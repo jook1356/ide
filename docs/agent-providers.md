@@ -214,8 +214,12 @@ running when the server went away (`Session::autostart`).
   server stores that one, so the next start continues what the user saw last.
 - `autostart` is set when a resumable session starts, cleared by `session.stop` (the user) and
   when the process exits by itself (`Exited`); a server shutdown (close dialog, stop server,
-  crash) keeps it. When a user context opens (first client after a server start) the server
-  restarts those sessions (`session.autostart` audit record); a failed start clears the mark.
+  crash) keeps it. The server does **not** restart those sessions when it starts (every agent
+  CLI at once was too heavy): `SessionInfo::resume_on_open` (the mark, while no process runs)
+  tells the app, which sends `session.start` when the user opens such a session (selects it,
+  or it is the shown session when the list loads; once per session until it runs,
+  `App::resume_on_open`). A failed `session.start` of a marked session clears the mark.
+  `ide_send_to_session` to a marked session wakes it the same way (`docs/session-family.md`).
 - Claude: `resume_conversation` checks for the transcript first: `--resume` with an unknown id
   ends the CLI. Ids from hooks are used only if they are UUIDs.
 - (v 2.1.330) A server started from a Claude Code tool shell (an agent that builds and runs
