@@ -1966,6 +1966,7 @@ impl App {
                 tool,
                 args,
             } => self.on_agent_request(request, session, tool, args),
+            Notify::AgentRequestEnded { request, timed_out } => self.agent_request_ended(request, timed_out),
             Notify::Title { session, title } => {
                 if self.uterm_notify(&session, None, Some(title.clone())) {
                     return Task::none();
@@ -2593,6 +2594,8 @@ impl App {
                 // A widget registration closed without 허용 is refused (the agent is told).
                 let refused = Task::batch([self.widget_register_closed(), self.approval_closed()]);
                 self.modal = None;
+                // The next waiting question, if any.
+                self.next_approval();
                 Task::batch([refused, self.after_select()])
             }
 

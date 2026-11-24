@@ -661,7 +661,7 @@ pub async fn call(
     args: &str,
     info: impl FnOnce() -> Result<SessionInfo, ProtoError>,
     apps: bool,
-    notify: impl FnOnce(Notify),
+    notify: impl Fn(Notify),
 ) -> AgentToolResult {
     let args: serde_json::Value = match serde_json::from_str(if args.trim().is_empty() {
         "{}"
@@ -700,10 +700,17 @@ pub async fn ask_app(
     tool: &str,
     args: String,
     apps: bool,
-    notify: impl FnOnce(Notify),
+    notify: impl Fn(Notify),
 ) -> AgentToolResult {
-    ask_app_within(state, session, tool, args, apps, notify, APP_TIMEOUT).await
+    ask_app_within(state, session, tool, args, || apps, notify, Some(APP_TIMEOUT)).await
 }
+
+/// The longest any question waits, even "until answered": below the CLIs' `PreToolUse` hook
+/// limit ([`ide_agents::hooks::TOOL_HOOK_SECS`]), so ide's refusal arrives before the CLI gives
+/// up on the hook (and runs the tool).
+pub const MAX_ASK: Duration = Duration::from_secs(ide_agents::hooks::TOOL_HOOK_SECS - 120);
+/// How often a question without a time limit checks that an app is still connected.
+const APPS_CHECK: Duration = Duration::from_secs(2);
 
 /// [`ask_app`] waiting at most `timeout` (a question to the user takes longer).
 pub async fn ask_app_within(
@@ -711,29 +718,52 @@ pub async fn ask_app_within(
     session: &str,
     tool: &str,
     args: String,
-    apps: bool,
-    notify: impl FnOnce(Notify),
-    timeout: Duration,
+    apps: impl Fn() -> bool,
+    notify: impl Fn(Notify),
+    timeout: Option<Duration>,
 ) -> AgentToolResult {
-    if !apps {
-        return err("no ide window is open");
+    if !apps() {
+        return err(NO_WINDOW);
     }
-    let (id, rx) = state.begin();
+    let (id, mut rx) = state.begin();
     notify(Notify::AgentRequest {
         request: id,
         session: session.to_owned(),
         tool: tool.to_owned(),
         args,
     });
-    let r = tokio::time::timeout(timeout, rx).await;
+    let limit = timeout.unwrap_or(MAX_ASK).min(MAX_ASK);
+    let start = tokio::time::Instant::now();
+    // Waits in steps: a question without a time limit gives up when the last app went (it
+    // would wait for nobody).
+    let r = loop {
+        let left = limit.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            break Err(TIMED_OUT);
+        }
+        match tokio::time::timeout(left.min(APPS_CHECK), &mut rx).await {
+            Ok(Ok(answer)) => break Ok(answer),
+            Ok(Err(_)) => break Err(GONE),
+            Err(_) if !apps() => break Err(GONE),
+            Err(_) => {}
+        }
+    };
     state.end(id);
+    notify(Notify::AgentRequestEnded {
+        request: id,
+        timed_out: r == Err(TIMED_OUT),
+    });
     match r {
-        Ok(Ok(Ok(text))) => ok(text),
-        Ok(Ok(Err(e))) => err(e),
-        Ok(Err(_)) => err("the ide window went away"),
-        Err(_) => err("the ide window did not answer"),
+        Ok(Ok(text)) => ok(text),
+        Ok(Err(e)) => err(e),
+        Err(why) => err(why),
     }
 }
+
+/// Why an app did not answer (also shown in the audit, `docs/approvals.md`).
+pub const NO_WINDOW: &str = "no ide window is open";
+pub const TIMED_OUT: &str = "the user did not answer in time";
+pub const GONE: &str = "the ide window went away";
 
 // ---------------------------------------------------------------- screen detection
 
@@ -780,8 +810,9 @@ pub fn screen_activity(s: ide_agents::screen::ScreenState) -> AgentActivity {
 /// How long a hook waits for the daemon (a hook blocks the agent's tool call).
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a tool hook waits once connected: a write outside the session waits for the
-/// user's answer (`docs/write-guard.md`; the daemon asks for up to 5 minutes).
-const TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(320);
+/// user's answer (`docs/write-guard.md`; the daemon gives up first, [`MAX_ASK`]), and stops
+/// before the CLI's own limit for the hook.
+const TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(ide_agents::hooks::TOOL_HOOK_SECS - 60);
 
 /// `ide-server hook --provider <id> <event>`: run by the agent CLI for one hook (stdin: the
 /// CLI's hook input). The provider turns it into an event, the daemon answers, the provider
@@ -820,13 +851,16 @@ pub async fn run_hook(args: &[String]) -> i32 {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let decision = match (var(SESSION_ENV), var(TOKEN_ENV), var(SOCKET_ENV)) {
         (Some(s), Some(t), Some(k)) => {
-            let wait = match &ev {
-                HookEvent::PreTool(ToolUse::Edit { .. } | ToolUse::Shell { .. }) => TOOL_HOOK_TIMEOUT,
-                _ => HOOK_TIMEOUT,
-            };
+            let tool = matches!(&ev, HookEvent::PreTool(ToolUse::Edit { .. } | ToolUse::Shell { .. }));
+            let wait = if tool { TOOL_HOOK_TIMEOUT } else { HOOK_TIMEOUT };
             match tokio::time::timeout(HOOK_TIMEOUT, AgentLink::connect(&k, &s, &t)).await {
                 Ok(link) => match tokio::time::timeout(wait, link.hook(wire_event(ev))).await {
                     Ok(Ok(Some(reason))) => HookDecision::Deny { reason },
+                    // The daemon took longer than any question may (it gives up first): a write
+                    // it may still be asking about does not run.
+                    Err(_) if tool => HookDecision::Deny {
+                        reason: "ide did not answer in time: do not retry or work around it; ask the user in your reply".into(),
+                    },
                     _ => HookDecision::NoOpinion,
                 },
                 Err(_) => HookDecision::NoOpinion,
@@ -1058,6 +1092,51 @@ mod tests {
 
     /// The screen as the server's terminal model sees it (escape sequences applied), read by
     /// the providers' screen rules.
+    /// A question to the apps ends (and the apps are told) when its time is up or when the
+    /// last app went, even without a time limit.
+    #[tokio::test]
+    async fn questions_end() {
+        let state = BridgeState::default();
+        let sent = Mutex::new(Vec::new());
+        let notify = |n: Notify| sent.lock().unwrap().push(n);
+        let r = ask_app_within(&state, "s", "t", "{}".into(), || true, notify, Some(Duration::from_millis(50))).await;
+        assert!(r.is_error && r.text == TIMED_OUT, "{}", r.text);
+        let ended = |n: &Notify| match n {
+            Notify::AgentRequestEnded { request, timed_out } => Some((*request, *timed_out)),
+            _ => None,
+        };
+        {
+            let s = sent.lock().unwrap();
+            assert!(matches!(s[0], Notify::AgentRequest { request: 1, .. }));
+            assert_eq!(ended(&s[1]), Some((1, true)));
+        }
+        // No limit: the app goes away meanwhile.
+        let apps = std::sync::atomic::AtomicBool::new(true);
+        let ask = ask_app_within(&state, "s", "t", "{}".into(), || apps.load(Ordering::Relaxed), notify, None);
+        let gone = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            apps.store(false, Ordering::Relaxed);
+        };
+        let (r, ()) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(ask, gone) })
+            .await
+            .expect("ends");
+        assert!(r.is_error && r.text == GONE, "{}", r.text);
+        assert_eq!(ended(&sent.lock().unwrap()[3]), Some((2, false)));
+        // Answered.
+        let ask = ask_app_within(&state, "s", "t", "{}".into(), || true, notify, None);
+        let answer = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.reply(3, Ok("once".into()));
+        };
+        let (r, ()) = tokio::join!(ask, answer);
+        assert!(!r.is_error && r.text == "once");
+        assert_eq!(ended(&sent.lock().unwrap()[5]), Some((3, false)));
+        // No app at all: refused at once, nothing sent.
+        let r = ask_app_within(&state, "s", "t", "{}".into(), || false, notify, None).await;
+        assert!(r.is_error && r.text == NO_WINDOW);
+        assert_eq!(sent.lock().unwrap().len(), 6);
+    }
+
     #[test]
     fn screen_of_a_terminal() {
         let (tx, _rx) = tokio::sync::broadcast::channel(16);

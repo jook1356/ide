@@ -2156,6 +2156,8 @@ impl UserCtx {
             Request::PreviewFile { session, preview, path } => self.preview_file(&session, &preview, &path),
             Request::ApprovalList => Ok(self.approval_list()),
             Request::ApprovalRevoke { id } => self.approval_revoke(&id),
+            Request::ApprovalWait => Ok(Response::ApprovalWait(self.grants.lock().unwrap().wait())),
+            Request::ApprovalSetWait { secs } => self.approval_set_wait(secs),
             Request::ScriptsList { session, repo } => {
                 let (_, _, j) = self.worktree_root(&session, &repo)?;
                 Ok(Response::Scripts(scripts::discover(j.root())))

@@ -987,6 +987,19 @@ impl Client {
         expect_unit(self.call(Request::ApprovalRevoke { id: id.into() }).await)
     }
 
+    /// `approval.wait`: seconds a question waits for the user's answer (`None`: until answered).
+    pub async fn approval_wait(&self) -> Result<Option<u64>, ProtoError> {
+        match self.call(Request::ApprovalWait).await? {
+            Response::ApprovalWait(w) => Ok(w),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected approval wait")),
+        }
+    }
+
+    /// `approval.set_wait`: change it.
+    pub async fn approval_set_wait(&self, secs: Option<u64>) -> Result<(), ProtoError> {
+        expect_unit(self.call(Request::ApprovalSetWait { secs }).await)
+    }
+
     /// `widget.delete`: remove a registered widget.
     pub async fn widget_delete(&self, widget: &str) -> Result<(), ProtoError> {
         expect_unit(self.call(Request::WidgetDelete { widget: widget.into() }).await)

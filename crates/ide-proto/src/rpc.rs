@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 19;
+pub const PROTO_VERSION: u32 = 20;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -1169,6 +1169,12 @@ pub enum Request {
     ApprovalRevoke {
         id: String,
     },
+    /// How long a question to the user waits for the answer (protocol 20) -> `ApprovalWait`.
+    ApprovalWait,
+    /// Change it (`secs`: `None` = until answered) -> `Unit`.
+    ApprovalSetWait {
+        secs: Option<u64>,
+    },
     /// A widget calls an ide tool it declared and the user approved -> `AgentResult`.
     WidgetCall {
         session: String,
@@ -1323,6 +1329,8 @@ impl Request {
             Request::ProviderSetAutoAnswer { .. } => "provider.set_auto_answer",
             Request::ApprovalList => "approval.list",
             Request::ApprovalRevoke { .. } => "approval.revoke",
+            Request::ApprovalWait => "approval.wait",
+            Request::ApprovalSetWait { .. } => "approval.set_wait",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
             Request::PreviewFile { .. } => "preview.file",
@@ -1464,6 +1472,8 @@ pub enum Response {
     /// `Get`: the value as JSON text (`None`: not set); `Keys`: a JSON array; else `None`.
     WidgetData(Option<String>),
     Approvals(Vec<ApprovalInfo>),
+    /// Seconds a question waits for the user (`None`: until answered).
+    ApprovalWait(Option<u64>),
     /// `None`: no opinion; `Some(reason)`: refuse the tool call.
     AgentHookDecision(Option<String>),
     Merges(Vec<RepoMerge>),
@@ -1486,6 +1496,13 @@ pub enum Notify {
         session: String,
         tool: String,
         args: String,
+    },
+    /// An `AgentRequest` is over: answered (perhaps by another app), timed out or its caller
+    /// went (protocol 20). An app drops the question it still shows for it.
+    AgentRequestEnded {
+        request: u64,
+        /// Nobody answered in time.
+        timed_out: bool,
     },
     /// OSC 0/2 title (empty = reset).
     Title {

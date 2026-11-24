@@ -61,17 +61,51 @@ pub fn file(paths: &Paths) -> PathBuf {
     paths.root().join("approvals.json")
 }
 
-/// The grants of one user: the kept ones (`always`) and those of this daemon run.
-#[derive(Debug, Default)]
+/// How long a question waits for the user's answer by default, in seconds.
+pub const DEFAULT_WAIT_SECS: u64 = 300;
+/// The shortest wait the user can choose, in seconds.
+pub const MIN_WAIT_SECS: u64 = 30;
+
+/// The grants of one user: the kept ones (`always`) and those of this daemon run, and how long
+/// a question waits for the user.
+#[derive(Debug)]
 pub struct Grants {
     list: Vec<Grant>,
     next: u64,
+    /// Seconds a question waits for the answer; `None`: until the user answers.
+    wait: Option<u64>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+impl Default for Grants {
+    fn default() -> Grants {
+        Grants {
+            list: Vec::new(),
+            next: 0,
+            wait: Some(DEFAULT_WAIT_SECS),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 struct Stored {
     #[serde(default)]
     grants: Vec<Grant>,
+    /// Seconds; `null`: no limit. Missing: [`DEFAULT_WAIT_SECS`].
+    #[serde(default = "default_wait")]
+    wait_secs: Option<u64>,
+}
+
+impl Default for Stored {
+    fn default() -> Stored {
+        Stored {
+            grants: Vec::new(),
+            wait_secs: default_wait(),
+        }
+    }
+}
+
+fn default_wait() -> Option<u64> {
+    Some(DEFAULT_WAIT_SECS)
 }
 
 impl Grants {
@@ -81,14 +115,27 @@ impl Grants {
         Grants {
             list: stored.grants.into_iter().filter(|g| g.always).collect(),
             next: 0,
+            wait: stored.wait_secs.map(|s| s.max(MIN_WAIT_SECS)),
         }
     }
 
     fn save(&self, paths: &Paths) -> crate::Result<()> {
         let stored = Stored {
             grants: self.list.iter().filter(|g| g.always).cloned().collect(),
+            wait_secs: self.wait,
         };
         write_json(&file(paths), &stored)
+    }
+
+    /// Seconds a question waits for the user's answer (`None`: until answered).
+    pub fn wait(&self) -> Option<u64> {
+        self.wait
+    }
+
+    /// Change how long questions wait (kept). Below [`MIN_WAIT_SECS`]: that.
+    pub fn set_wait(&mut self, paths: &Paths, secs: Option<u64>) -> crate::Result<()> {
+        self.wait = secs.map(|s| s.max(MIN_WAIT_SECS));
+        self.save(paths)
     }
 
     /// Every grant, oldest first.
@@ -228,5 +275,24 @@ mod tests {
         g.forget_target(&paths, "bb:t1").unwrap();
         assert!(g.list().is_empty());
         assert!(Grants::load(&paths).list().is_empty());
+    }
+
+    #[test]
+    fn wait() {
+        let t = crate::paths::TempDir::new("approvals-wait");
+        let paths = Paths::new(t.0.clone());
+        let mut g = Grants::load(&paths);
+        assert_eq!(g.wait(), Some(DEFAULT_WAIT_SECS));
+        g.set_wait(&paths, None).unwrap();
+        assert_eq!(Grants::load(&paths).wait(), None, "no limit is kept");
+        g.set_wait(&paths, Some(5)).unwrap();
+        assert_eq!(Grants::load(&paths).wait(), Some(MIN_WAIT_SECS));
+        g.set_wait(&paths, Some(3600)).unwrap();
+        g.record(&paths, "session.steer", "a", "b", Answer::Always).unwrap();
+        let g = Grants::load(&paths);
+        assert_eq!((g.wait(), g.list().len()), (Some(3600), 1), "grants and the wait are kept together");
+        // An older file without the field: the default.
+        std::fs::write(file(&paths), r#"{"grants":[]}"#).unwrap();
+        assert_eq!(Grants::load(&paths).wait(), Some(DEFAULT_WAIT_SECS));
     }
 }

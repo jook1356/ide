@@ -9,9 +9,6 @@ use ide_proto::{APPROVAL_REQUEST, ApprovalInfo, ProtoError, Response};
 
 use super::UserCtx;
 
-/// How long the daemon waits for the user's answer.
-const ASK_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// Capabilities asked for (`docs/approvals.md`).
 pub(crate) const CAP_STEER: &str = "session.steer";
 pub(crate) const CAP_INTERRUPT: &str = "session.interrupt";
@@ -59,28 +56,32 @@ impl UserCtx {
             "target_title": self.target_title(capability, target),
             "detail": detail,
         });
-        let apps = self.subscriber_count() > 0;
         let r = crate::bridge::ask_app_within(
             &self.bridge,
             requester,
             APPROVAL_REQUEST,
             args.to_string(),
-            apps,
+            || self.subscriber_count() > 0,
             |n| self.notify(n),
-            ASK_TIMEOUT,
+            self.ask_wait(),
         )
         .await;
         let answer = if r.is_error { None } else { Answer::parse(&r.text) };
-        self.audit(
-            "approval",
-            &format!(
-                "{capability} {requester} -> {target}: {}",
-                answer.map_or("refused", Answer::as_str)
-            ),
-        );
+        // Why not: the user refused, nobody answered in time, no window (the audit tells them
+        // apart).
+        let why = match answer {
+            Some(a) => a.as_str(),
+            None => match r.text.as_str() {
+                crate::bridge::TIMED_OUT => "timed out",
+                crate::bridge::NO_WINDOW => "no window",
+                crate::bridge::GONE => "window closed",
+                _ => "refused",
+            },
+        };
+        self.audit("approval", &format!("{capability} {requester} -> {target}: {why}"));
         let Some(answer) = answer else {
             return Err(format!(
-                "the user did not allow it ({}): ask them in your reply instead, or do without",
+                "the user did not allow it ({}): do not retry or work around it; tell the user in your reply what was not allowed and ask them",
                 if r.text.is_empty() { "refused" } else { r.text.as_str() }
             ));
         };
@@ -90,6 +91,24 @@ impl UserCtx {
             .record(&self.paths, capability, requester, target, answer)
             .map_err(|e| format!("could not keep the approval: {e}"))?;
         Ok(())
+    }
+
+    /// How long a question to the user waits (`None`: until answered), as the user chose
+    /// (Settings -> 권한).
+    pub(crate) fn ask_wait(&self) -> Option<Duration> {
+        self.grants.lock().unwrap().wait().map(Duration::from_secs)
+    }
+
+    /// `approval.set_wait`.
+    pub(crate) fn approval_set_wait(&self, secs: Option<u64>) -> Result<Response, ProtoError> {
+        self.grants
+            .lock()
+            .unwrap()
+            .set_wait(&self.paths, secs)
+            .map_err(|e| super::core_error(&e))?;
+        let shown = secs.map_or("none".to_owned(), |s| s.to_string());
+        self.audit("approval.set_wait", &shown);
+        Ok(Response::Unit)
     }
 
     /// `approval.list`.

@@ -16,9 +16,6 @@ static DATA_LOCK: Mutex<()> = Mutex::new(());
 /// Serializes changes of the registry (read, change, save).
 static REG_LOCK: Mutex<()> = Mutex::new(());
 
-/// How long the agent's `register` waits for the user's answer.
-const ASK_TIMEOUT: Duration = Duration::from_secs(300);
-
 fn proto(e: WidgetError) -> ProtoError {
     ProtoError::new("widget").arg("detail", e.to_string())
 }
@@ -299,7 +296,7 @@ impl UserCtx {
         let (action2, id2) = (action.clone(), id.clone());
         // What the daemon answers itself (blocking: files, the registry); `Ok(None)`: ask an app
         // with these arguments.
-        let pre = tokio::task::spawn_blocking(move || -> Result<Result<AgentToolResult, (serde_json::Value, Duration)>, AgentToolResult> {
+        let pre = tokio::task::spawn_blocking(move || -> Result<Result<AgentToolResult, (serde_json::Value, Option<Duration>)>, AgentToolResult> {
             let s = me.resolve_session(&s).map_err(|e| err(format!("session not available: {e}")))?;
             let need_id = || {
                 if id2.is_empty() {
@@ -343,7 +340,7 @@ impl UserCtx {
                             "ask": kind,
                             "by": by,
                         }),
-                        ASK_TIMEOUT,
+                        me.ask_wait(),
                     )))
                 }
                 "unregister" => {
@@ -368,7 +365,7 @@ impl UserCtx {
                     }
                     Ok(Err((
                         serde_json::json!({ "action": action2, "widget": id2 }),
-                        crate::bridge::APP_TIMEOUT,
+                        Some(crate::bridge::APP_TIMEOUT),
                     )))
                 }
                 other => Err(err(format!(
@@ -382,13 +379,12 @@ impl UserCtx {
             Ok(Ok(Err(x))) => x,
             Err(_) => return err("the tool failed"),
         };
-        let apps = self.subscriber_count() > 0;
         crate::bridge::ask_app_within(
             &self.bridge,
             session,
             crate::bridge::TOOL_WIDGET,
             args.to_string(),
-            apps,
+            || self.subscriber_count() > 0,
             |n| self.notify(n),
             timeout,
         )

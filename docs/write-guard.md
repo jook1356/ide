@@ -54,8 +54,9 @@ folder as target.
 3. Not granted: the user is asked (`folder.write`, target = the folder). Refused, closed, timed
    out or no ide window open: the hook denies the tool call with a reason telling the agent not
    to work around it and to ask the user instead.
-4. The hook waits as long as the question can take (`PreToolUse` hook timeout 330 s, the hook
-   program 320 s once connected; other hooks stay at 10 s / 5 s).
+4. The hook waits as long as the question can take: the wait the user chose
+   (`docs/approvals.md`); `PreToolUse` hook timeout 1 day, the hook program a day less a minute
+   once connected, then it refuses; other hooks stay at 10 s / 5 s.
 
 ## Limits
 

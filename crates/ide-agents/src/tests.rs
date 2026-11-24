@@ -1050,6 +1050,14 @@ fn codex_integration() {
         trusted_mcp: None,
     };
     assert_eq!(Codex.integration_status(&acct, &moved), IntegrationStatus::Outdated);
+    // An older install's tool hook time limit (330 s): outdated; installing again fixes it.
+    assert_eq!(pre["hooks"][0]["timeout"], crate::hooks::TOOL_HOOK_SECS);
+    let mut old = v.clone();
+    old["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 330.into();
+    std::fs::write(acct.dir.join("hooks.json"), old.to_string()).unwrap();
+    assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Outdated);
+    Codex.integration_install(&acct, &targets).unwrap();
+    assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Installed);
     Codex.integration_uninstall(&acct).unwrap();
     assert_eq!(Codex.integration_status(&acct, &targets), IntegrationStatus::Missing);
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(acct.dir.join("hooks.json")).unwrap()).unwrap();

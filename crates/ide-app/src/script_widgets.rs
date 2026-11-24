@@ -28,8 +28,12 @@ pub(super) enum WStep {
     WaitPage(u64),
     /// Forget the page's lines.
     ClearConsole,
-    /// The daemon asks for an approval of this capability (as it hands it over).
-    AskApproval(&'static str),
+    /// The daemon asks for an approval of this capability (as it hands it over), as this request.
+    AskApproval(&'static str, u64),
+    /// The daemon stopped waiting for this request (timed out: `true`).
+    ApprovalEnded(u64, bool),
+    /// Settings -> 권한 shows this wait (seconds, `None`: no limit).
+    WaitApprovalWait(Option<u64>, u64),
     /// The approval dialog shows this capability (`None`: no dialog), with this many waiting.
     ApprovalShown(Option<&'static str>, usize),
     /// The agent's `ide_widget` (`register` / `open` / `close`) as the server hands it over.
@@ -198,9 +202,13 @@ fn steps() -> Vec<Step> {
         w(WStep::WaitTab(false, 5_000)),
         GoPage(Page::Work),
         // Approvals (`approvals_ui.rs`, docs/approvals.md): two questions, one at a time.
-        Log("--- approvals: the question, its queue, closing refuses, the settings list"),
-        w(WStep::AskApproval("session.steer")),
-        w(WStep::AskApproval("session.interrupt")),
+        Log("--- approvals: the question, its queue, ended questions, closing refuses, the settings list"),
+        w(WStep::AskApproval("session.steer", 1)),
+        w(WStep::AskApproval("session.interrupt", 2)),
+        w(WStep::AskApproval("folder.write", 3)),
+        w(WStep::ApprovalShown(Some("session.steer"), 2)),
+        // A waiting question the daemon stopped waiting for leaves the queue.
+        w(WStep::ApprovalEnded(3, true)),
         w(WStep::ApprovalShown(Some("session.steer"), 1)),
         SetLang(LanguagePref::Fixed(Lang::Ko)),
         Wait(300),
@@ -211,11 +219,30 @@ fn steps() -> Vec<Step> {
         Shot("approval_01_question"),
         A(Message::Approval(crate::approvals_ui::ApprovalMsg::Answer("once"))),
         w(WStep::ApprovalShown(Some("session.interrupt"), 0)),
+        // The shown question timed out: it closes (a toast says so), the next one shows.
+        w(WStep::AskApproval("folder.write", 4)),
+        w(WStep::ApprovalShown(Some("session.interrupt"), 1)),
+        w(WStep::ApprovalEnded(2, true)),
+        w(WStep::ApprovalShown(Some("folder.write"), 0)),
+        Wait(300),
+        Shot("approval_03_timed_out"),
+        // Ending another request changes nothing; closing refuses.
+        w(WStep::ApprovalEnded(1, false)),
+        w(WStep::ApprovalShown(Some("folder.write"), 0)),
         A(Message::CloseModal),
         w(WStep::ApprovalShown(None, 0)),
         GoPage(Page::Settings),
-        Wait(800),
+        w(WStep::WaitApprovalWait(Some(300), 5_000)),
+        Wait(500),
         Shot("approval_02_settings"),
+        A(Message::Approval(crate::approvals_ui::ApprovalMsg::SetWait(None))),
+        w(WStep::WaitApprovalWait(None, 5_000)),
+        SetLang(LanguagePref::Fixed(Lang::Ko)),
+        Wait(500),
+        Shot("ko_approval_02_settings_no_limit"),
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        A(Message::Approval(crate::approvals_ui::ApprovalMsg::SetWait(Some(300)))),
+        w(WStep::WaitApprovalWait(Some(300), 5_000)),
         GoPage(Page::Work),
     ]
 }
@@ -325,7 +352,7 @@ pub(super) fn run(sc: &mut Script, app: &mut App, st: WStep, el: Duration) -> (b
             crate::widgets_ui::clear_console();
             true
         }
-        WStep::AskApproval(capability) => {
+        WStep::AskApproval(capability, request) => {
             let args = serde_json::json!({
                 "capability": capability,
                 "requester": "p1",
@@ -335,8 +362,16 @@ pub(super) fn run(sc: &mut Script, app: &mut App, st: WStep, el: Duration) -> (b
                 "detail": "Stop here: the API changed, rebase on the parent first.",
             });
             // The answer goes to an unknown request: ignored by the server.
-            task = app.on_agent_request(u64::MAX, sid.clone(), ide_client::APPROVAL_REQUEST.into(), args.to_string());
+            task = app.on_agent_request(u64::MAX - request, sid.clone(), ide_client::APPROVAL_REQUEST.into(), args.to_string());
             true
+        }
+        WStep::ApprovalEnded(request, timed_out) => {
+            task = app.agent_request_ended(u64::MAX - request, timed_out);
+            true
+        }
+        WStep::WaitApprovalWait(want, ms) => {
+            let got = app.approvals.wait;
+            wait!(got == Some(want), ms, format!("approval wait {got:?} (want {want:?})"))
         }
         WStep::ApprovalShown(want, waiting) => {
             let shown = match &app.modal {

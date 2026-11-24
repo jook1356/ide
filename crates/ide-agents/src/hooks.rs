@@ -102,11 +102,15 @@ pub struct HookTargets {
     pub trusted_mcp: Option<String>,
 }
 
-/// How long a hook may run, in seconds: `PreToolUse` waits for the user's answer to a write
-/// outside the session (`docs/write-guard.md`; the daemon asks for up to 5 minutes), the others
-/// only report.
+/// How long a `PreToolUse` hook may run, in seconds: it waits for the user's answer to a write
+/// outside the session (`docs/write-guard.md`), as long as the user chose in ide's settings
+/// (`docs/approvals.md`), which ide keeps below this (a CLI needs a number).
+pub const TOOL_HOOK_SECS: u64 = 86_400;
+
+/// How long a hook may run, in seconds: `PreToolUse` waits for the user's answer
+/// ([`TOOL_HOOK_SECS`]), the others only report.
 pub fn hook_timeout_secs(event: &str) -> u64 {
-    if event == "PreToolUse" { 330 } else { 10 }
+    if event == "PreToolUse" { TOOL_HOOK_SECS } else { 10 }
 }
 
 impl HookTargets {
