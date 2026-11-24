@@ -33,6 +33,7 @@ use crate::{def, fsops, git, scripts, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 mod approvals;
+mod branch_badges;
 mod auto_answers;
 pub(crate) mod browser;
 mod terminals;
@@ -70,6 +71,10 @@ pub struct ServerConfig {
     /// The agent bridge's socket and program (`docs/agent-bridge.md`); set by the daemon,
     /// `None` = sessions get no bridge.
     pub bridge: Option<crate::bridge::BridgeConfig>,
+    /// Check the sessions' branch badges in the background while a client is connected
+    /// (`service/branch_badges.rs`; `IDE_BRANCH_BADGES=0` turns it off, e.g. for tests
+    /// that script every git / GitHub call).
+    pub branch_badges: bool,
 }
 
 impl ServerConfig {
@@ -98,9 +103,13 @@ impl ServerConfig {
                 .filter(|v| !v.is_empty()),
             git_credential_env: Vec::new(),
             bridge: None,
+            branch_badges: std::env::var(BRANCH_BADGES_ENV).map_or(true, |v| v != "0"),
         }
     }
 }
+
+/// `0` turns the background branch badge checks off (`ServerConfig::branch_badges`).
+pub const BRANCH_BADGES_ENV: &str = "IDE_BRANCH_BADGES";
 
 /// The server: per-user contexts, resume tokens, connection bookkeeping.
 pub struct Server {
@@ -171,7 +180,10 @@ impl Server {
         let _ = ctx.this.set(Arc::downgrade(&ctx));
         users.insert(user.id.clone(), ctx.clone());
         crate::bridge::spawn_screen_watch(Arc::downgrade(&ctx));
-        spawn_autostart(Arc::downgrade(&ctx));
+        spawn_resume_preparing(Arc::downgrade(&ctx));
+        if self.config.branch_badges {
+            branch_badges::spawn_branch_badges(Arc::downgrade(&ctx));
+        }
         Ok(ctx)
     }
 
@@ -244,17 +256,17 @@ impl Server {
     }
 }
 
-/// Restart the sessions that were running when the server last went away, resuming their
-/// conversations ([`Session::autostart`], [`UserCtx::start`]).
-fn spawn_autostart(ctx: std::sync::Weak<UserCtx>) {
+/// Create the worktrees a server that went away left half-way. Sessions that were running
+/// then ([`Session::autostart`]) are not restarted here: a client resumes each one when the
+/// user opens it (`SessionInfo::resume_on_open`), so a server start does not launch every
+/// agent CLI at once.
+fn spawn_resume_preparing(ctx: std::sync::Weak<UserCtx>) {
     let Ok(rt) = tokio::runtime::Handle::try_current() else {
         return;
     };
     rt.spawn(async move {
         if let Some(c) = ctx.upgrade() {
-            // Worktrees a server that went away left half-way are created now.
             c.resume_preparing();
-            let _ = tokio::task::spawn_blocking(move || c.autostart()).await;
         }
     });
 }
@@ -311,6 +323,8 @@ pub struct UserCtx {
     /// Sessions whose pending worktrees a background job is creating
     /// ([`UserCtx::spawn_prepare`]).
     preparing: Mutex<HashSet<String>>,
+    /// The session list's branch badges, kept across restarts (`branch_badges.rs`).
+    branch_badges: branch_badges::BranchBadges,
 }
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
@@ -369,6 +383,8 @@ impl UserCtx {
         let providers = Providers::load(&paths.providers_dir());
         let grants = ide_core::approval::Grants::load(&paths);
         let auto_answers = ide_core::auto_answer::AutoAnswers::load(&paths);
+        let branch_badges =
+            branch_badges::BranchBadges::load(paths.root().join("branch-badges.json"));
         Ok(UserCtx {
             user,
             paths,
@@ -393,6 +409,7 @@ impl UserCtx {
             answered: Mutex::new(HashMap::new()),
             this: std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
+            branch_badges,
         })
     }
 
@@ -407,6 +424,10 @@ impl UserCtx {
     }
 
     fn notify(&self, n: Notify) {
+        // Edits and git changes make the session's branch badge stale.
+        if let Notify::FsChanged { session, .. } | Notify::GitChanged { session, .. } = &n {
+            self.branch_badges.mark(session);
+        }
         let _ = self.events.send(n);
     }
 
@@ -1260,6 +1281,10 @@ impl UserCtx {
             writer: self.shares_folder(s)
                 && self.bridge.writer(self.folder_owner(s).as_str()) == s.id.as_str(),
             preparing: s.preparing(),
+            resume_on_open: s.autostart
+                && s.kind == SessionKind::Agent
+                && !host.as_ref().is_some_and(|h| h.is_running()),
+            branch: self.branch_badges.get(s.id.as_str()),
         }
     }
 
@@ -2175,7 +2200,14 @@ impl UserCtx {
             } => self.attach_put(&session, &name, upload.as_deref(), &data),
             Request::SessionStart { id } => {
                 let s = self.resolve_session(&id)?;
-                self.start(&s)?;
+                if let Err(e) = self.start(&s) {
+                    // A session waiting to be resumed that cannot start is not offered again.
+                    if s.autostart {
+                        tracing::warn!("session {}: resume failed: {e:?}", s.id);
+                        let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
+                    }
+                    return Err(e);
+                }
                 Ok(Response::Session(self.info(&s)))
             }
             Request::SessionStop { id } => {
@@ -2999,8 +3031,8 @@ impl UserCtx {
         Ok(())
     }
 
-    /// The session's provider resumes conversations (only those sessions are restarted when
-    /// the server starts: anything else would come back as a fresh conversation).
+    /// The session's provider resumes conversations (only those sessions are offered for a
+    /// resume after a server start: anything else would come back as a fresh conversation).
     fn resumable(&self, s: &Session) -> bool {
         self.provider(&s.provider)
             .is_ok_and(|p| p.capabilities().resume)
@@ -3036,35 +3068,6 @@ impl UserCtx {
                 }
             }
         });
-    }
-
-    /// Restart the sessions marked [`Session::autostart`] (server start). Blocking.
-    fn autostart(&self) {
-        let due: Vec<Session> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .list()
-            .iter()
-            .filter(|s| s.autostart && s.kind == SessionKind::Agent)
-            .cloned()
-            .collect();
-        for s in due {
-            if !self.resumable(&s) {
-                let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
-                continue;
-            }
-            if self.existing_host(s.id.as_str()).is_some_and(|h| h.is_running()) {
-                continue;
-            }
-            match self.start(&s) {
-                Ok(()) => self.audit("session.autostart", s.id.as_str()),
-                Err(e) => {
-                    tracing::warn!("session {}: restart after server start failed: {e:?}", s.id);
-                    let _ = self.sessions.lock().unwrap().set_autostart(&s.id, false);
-                }
-            }
-        }
     }
 
     fn stop(&self, s: &Session) {

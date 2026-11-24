@@ -211,7 +211,8 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
     /// The process was running when the server last went away (set at start, cleared when the
-    /// user stops it or it exits by itself): the next server start restarts it.
+    /// user stops it or it exits by itself): after a server start a client resumes it when the
+    /// user opens the session (the server does not restart it by itself).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autostart: bool,
     /// Legacy `profile` field (read only, for migration).
