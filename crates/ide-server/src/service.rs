@@ -246,6 +246,8 @@ fn spawn_autostart(ctx: std::sync::Weak<UserCtx>) {
     };
     rt.spawn(async move {
         if let Some(c) = ctx.upgrade() {
+            // Worktrees a server that went away left half-way are created now.
+            c.resume_preparing();
             let _ = tokio::task::spawn_blocking(move || c.autostart()).await;
         }
     });
@@ -294,6 +296,9 @@ pub struct UserCtx {
     bridge: crate::bridge::BridgeState,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
+    /// Sessions whose pending worktrees a background job is creating
+    /// ([`UserCtx::spawn_prepare`]).
+    preparing: Mutex<HashSet<String>>,
 }
 
 /// How a user context reaches GitHub: credential-token cache + HTTPS client, `gh` fallback.
@@ -370,6 +375,7 @@ impl UserCtx {
             github,
             bridge: crate::bridge::BridgeState::new(bridge),
             this: std::sync::OnceLock::new(),
+            preparing: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1025,6 +1031,7 @@ impl UserCtx {
             shared: s.shared,
             writer: self.shares_folder(s)
                 && self.bridge.writer(self.folder_owner(s).as_str()) == s.id.as_str(),
+            preparing: s.preparing(),
         }
     }
 
@@ -1203,6 +1210,7 @@ impl UserCtx {
             }
             Request::SessionAttachRepo { id, repo, base } => {
                 let s = self.resolve_session(&id)?;
+                Self::not_preparing(&s)?;
                 let rid = self.parse_repo(&repo)?;
                 let r = self.repos.lock().unwrap().require(&rid).map_err(core)?.clone();
                 let mut updated = s.clone();
@@ -1235,6 +1243,7 @@ impl UserCtx {
             }
             Request::SessionDetachRepo { id, repo } => {
                 let s = self.resolve_session(&id)?;
+                Self::not_preparing(&s)?;
                 let rid = self.parse_repo(&repo)?;
                 let r = self.repos.lock().unwrap().get(&rid).cloned();
                 if s.shared {
@@ -1306,6 +1315,7 @@ impl UserCtx {
     ) -> Result<Response, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let ps = self.resolve_session(parent)?;
+        Self::not_preparing(&ps)?;
         let p = self.provider(&ps.provider)?;
         let repo_ids = repos
             .iter()
@@ -2409,6 +2419,7 @@ impl UserCtx {
                 .iter()
                 .filter_map(|(k, v)| RepoId::parse(k).ok().map(|k| (k, v.clone())))
                 .collect(),
+            background: req.background,
         };
         // The program must resolve before the folder and worktrees are created. Worktrees
         // (and 기준 브랜치 최신화 fetches) run on a snapshot of the registry, not under its lock.
@@ -2418,26 +2429,7 @@ impl UserCtx {
                 p.program_path(&self.launch_env).map(drop)
             })
             .map_err(core)?;
-        // Desk: rule picks that changed are reported ("기준 브랜치가 규칙에 따라 바뀌었습니다").
-        let mut base_changes = Vec::new();
-        {
-            let mut repos = self.repos.lock().unwrap();
-            for (rid, plan) in &plans {
-                let before = repos.get(rid).and_then(|r| r.rule_resolved.clone());
-                let name = repos.get(rid).map(|r| r.name.clone()).unwrap_or_default();
-                if let (Some(b), Some(a)) = (&before, &plan.rule_resolved)
-                    && b != a
-                {
-                    let short = |x: &str| x.trim_start_matches("refs/remotes/").to_owned();
-                    base_changes.push(format!("{name}: {} → {}", short(b), short(a)));
-                }
-                let _ = repos.record_plan(
-                    rid,
-                    plan.rule_resolved.as_deref(),
-                    plan.fixed_upgrade.as_deref(),
-                );
-            }
-        }
+        let base_changes = self.record_plans(&plans);
         self.sessions
             .lock()
             .unwrap()
@@ -2488,6 +2480,11 @@ impl UserCtx {
             // Write the session folder's files now (guidance, skills), not only at start.
             self.refresh_root(&session);
         }
+        // Background mode: the agent already runs (its guidance lists the worktrees as being
+        // created); they follow now.
+        if session.preparing() {
+            self.spawn_prepare(&session.id);
+        }
         Ok(Response::SessionCreated {
             base_changes,
             session: self.info(&session),
@@ -2500,6 +2497,175 @@ impl UserCtx {
                 })
                 .collect(),
         })
+    }
+
+    /// Desk: rule picks that changed are reported ("기준 브랜치가 규칙에 따라 바뀌었습니다").
+    /// Records each worktree's base plan in the registry and returns those changes.
+    fn record_plans(&self, plans: &[(RepoId, ide_core::BasePlan)]) -> Vec<String> {
+        let mut base_changes = Vec::new();
+        let mut repos = self.repos.lock().unwrap();
+        for (rid, plan) in plans {
+            let before = repos.get(rid).and_then(|r| r.rule_resolved.clone());
+            let name = repos.get(rid).map(|r| r.name.clone()).unwrap_or_default();
+            if let (Some(b), Some(a)) = (&before, &plan.rule_resolved)
+                && b != a
+            {
+                let short = |x: &str| x.trim_start_matches("refs/remotes/").to_owned();
+                base_changes.push(format!("{name}: {} → {}", short(b), short(a)));
+            }
+            let _ = repos.record_plan(
+                rid,
+                plan.rule_resolved.as_deref(),
+                plan.fixed_upgrade.as_deref(),
+            );
+        }
+        base_changes
+    }
+
+    /// `session-preparing` while a session's worktrees are still being created (attach,
+    /// detach and children would race the background job).
+    fn not_preparing(s: &Session) -> Result<(), ProtoError> {
+        if s.preparing() {
+            return Err(ProtoError::new("session-preparing").arg("id", s.id.as_str()));
+        }
+        Ok(())
+    }
+
+    /// Start the background job that creates `id`'s pending worktrees (one job per session).
+    fn spawn_prepare(&self, id: &SessionId) {
+        let Some(ctx) = self.this.get().and_then(std::sync::Weak::upgrade) else {
+            tracing::warn!("session {id}: no context for creating its worktrees");
+            return;
+        };
+        if !self.preparing.lock().unwrap().insert(id.to_string()) {
+            return;
+        }
+        let id = id.clone();
+        std::thread::spawn(move || {
+            ctx.prepare_worktrees(&id);
+            ctx.preparing.lock().unwrap().remove(id.as_str());
+        });
+    }
+
+    /// Resume the worktree creation of sessions that still have pending worktrees (server
+    /// start).
+    fn resume_preparing(&self) {
+        let ids: Vec<SessionId> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .filter(|s| s.preparing())
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.spawn_prepare(&id);
+        }
+    }
+
+    /// Create a session's pending worktrees one after the other (Desk's order of
+    /// `createSession`), outside the store's lock: after each one the session gets the worktree
+    /// (or loses the pending entry on failure), its guidance is rewritten, the marker file lists
+    /// what is left and the app is told. At the end `SessionPrepared` carries the failures and
+    /// base changes. A session deleted meanwhile gets the worktree just made removed again.
+    fn prepare_worktrees(&self, id: &SessionId) {
+        let mut failures = Vec::new();
+        let mut base_changes = Vec::new();
+        loop {
+            let Some(s) = self.sessions.lock().unwrap().get(id).cloned() else {
+                return;
+            };
+            let Some(p) = s.pending.first().cloned() else {
+                break;
+            };
+            let r = self.repos.lock().unwrap().get(&p.repo).cloned();
+            let mut work = s.clone();
+            work.pending.retain(|x| x.repo != p.repo);
+            let result = match &r {
+                Some(r) => ide_core::add_worktree(&mut work, r, p.refresh, p.pick.as_deref()),
+                None => Err(ide_core::Error::RepoNotFound(p.repo.to_string())),
+            };
+            let wt = result.as_ref().ok().and_then(|_| work.worktree(&p.repo).cloned());
+            let base = work.bases.get(&p.repo).cloned();
+            // Into the stored session as it is now (it may have changed meanwhile).
+            let updated = {
+                let mut sessions = self.sessions.lock().unwrap();
+                if sessions.get(id).is_some() {
+                    let stored = sessions.update(id, |cur| {
+                        cur.pending.retain(|x| x.repo != p.repo);
+                        if let Some(w) = &wt
+                            && cur.worktree(&w.repo).is_none()
+                        {
+                            cur.worktrees.push(w.clone());
+                            if let Some(b) = &base {
+                                cur.bases.insert(p.repo.clone(), b.clone());
+                            }
+                        }
+                    });
+                    if let Err(e) = stored {
+                        tracing::warn!("session {id}: saving its new worktree failed: {e}");
+                    }
+                    sessions.get(id).cloned()
+                } else {
+                    None
+                }
+            };
+            let Some(updated) = updated else {
+                // Deleted while the worktree was being made: remove it again (with its branch).
+                if let Some(w) = wt {
+                    let mut gone = work;
+                    gone.worktrees = vec![w];
+                    let repos = self.repos.lock().unwrap();
+                    if let Err(e) = ide_core::remove_session_files(&self.paths, &gone, &repos, true) {
+                        tracing::warn!("session {id}: removing a worktree of a deleted session failed: {e}");
+                    }
+                }
+                self.notify(Notify::ReposChanged);
+                return;
+            };
+            match result {
+                Ok(plan) => {
+                    base_changes.extend(self.record_plans(&[(p.repo.clone(), plan)]));
+                    self.audit("session.prepare.repo", &format!("{id} {}", p.repo));
+                }
+                Err(error) => {
+                    self.audit(
+                        "session.create.repo_failed",
+                        &format!("{id} {} {error}", p.repo),
+                    );
+                    failures.push(RepoFailureInfo {
+                        repo: p.repo.to_string(),
+                        name: r.as_ref().map_or_else(|| p.name.clone(), |r| r.name.clone()),
+                        error: core_error(&error),
+                    });
+                }
+            }
+            // The guidance first, then the marker: once the marker is gone the guidance is
+            // final.
+            self.refresh_root(&updated);
+            if let Err(e) = ide_core::write_pending_marker(&updated) {
+                tracing::warn!("session {id}: updating its pending-worktrees file failed: {e}");
+            }
+            self.sync_shared_children(&updated);
+            self.notify(Notify::SessionsChanged);
+            self.notify(Notify::ReposChanged);
+            if let Some(w) = updated.worktree(&p.repo) {
+                self.notify(Notify::GitChanged {
+                    session: id.to_string(),
+                    repo: w.repo.to_string(),
+                });
+            }
+        }
+        // A marker left behind (e.g. pending emptied elsewhere) goes too.
+        if let Some(s) = self.sessions.lock().unwrap().get(id).cloned() {
+            let _ = ide_core::write_pending_marker(&s);
+        }
+        self.notify(Notify::SessionPrepared {
+            session: id.to_string(),
+            failures,
+            base_changes,
+        });
     }
 
     /// The launch spec of a session (generates its scratch files).

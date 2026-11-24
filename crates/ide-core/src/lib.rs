@@ -22,6 +22,7 @@
 //!     repos: vec![repo.id.clone()],
 //!     original_repo: None,
 //!     refresh_base: true, // 기준 브랜치 최신화
+//!     background: false,
 //!     bases: Default::default(),
 //! };
 //! // The precheck resolves the agent program before anything is created.
@@ -68,15 +69,15 @@ pub use ops::{create_login_session, remove_session_dir};
 pub use base::{BasePlan, BaseBranchRule, BaseRuleResult, repo_default_base, short_branch};
 pub use registry::{BaseBranch, RegisteredRepo, RepoId, RepoStore, detect_base};
 pub use workspace::{
-    NewSession, RepoFailure, WorkspaceMigration, attach_repo, create_session, detach_repo,
-    is_managed_path, migrate_workspaces, pin_session_bases, remove_session_files, session_guidance,
-    set_session_base,
+    NewSession, PENDING_MARKER, RepoFailure, WorkspaceMigration, add_worktree, attach_repo,
+    create_session, detach_repo, is_managed_path, migrate_workspaces, pin_session_bases,
+    remove_session_files, session_guidance, set_session_base, write_pending_marker,
 };
 pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};
 pub use session::{
-    Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore, SessionTarget,
-    SessionWorktree,
+    PendingWorktree, Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore,
+    SessionTarget, SessionWorktree,
 };
 pub use skill::{SKILL_FILE, SkillEntry};
 pub use slug::{slugify, validate_slug};

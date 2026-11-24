@@ -46,6 +46,7 @@ fn shell(repos: Vec<String>) -> NewSession {
         repos,
         original_repo: None,
         refresh_base: false,
+        background: false,
         bases: Default::default(),
         title: String::new(),
         start: false,
@@ -176,6 +177,7 @@ async fn registry_workspaces_attach_detach_delete() {
         .create_session(NewSession {
             original_repo: Some(rx.id.clone()),
             refresh_base: false,
+            background: false,
             bases: Default::default(),
             ..shell(Vec::new())
         })
@@ -430,6 +432,7 @@ async fn base_branches_fetch_offline_and_plain_folder_init() {
     let (s, f) = c
         .create_session(NewSession {
             refresh_base: true,
+            background: false,
             ..shell(vec![rp.id.clone()])
         })
         .await
@@ -440,6 +443,73 @@ async fn base_branches_fetch_offline_and_plain_folder_init() {
     for id in made {
         c.delete_session(&id, true).await.unwrap();
     }
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `NewSession::background`: the answer comes once the folder exists (worktrees pending, the
+/// marker file and the guidance say so, `preparing` is set, attach is refused); the worktrees
+/// follow in the background, then `SessionPrepared` reports the failures and the marker goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_worktrees() {
+    let dir = tmp_dir("repos-background");
+    let a = dir.join("src").join("app");
+    let b = dir.join("src").join("lib");
+    for r in [&a, &b] {
+        init_repo(r);
+    }
+    let server = server(&dir.join("data"));
+    let c = Client::connect(memory(&server), ClientOptions::default())
+        .await
+        .unwrap();
+    let col = collect(&c, Arc::default());
+    let ra = c.register_repo(&a.display().to_string()).await.unwrap();
+    let rb = c.register_repo(&b.display().to_string()).await.unwrap();
+    // `lib`'s picked base does not exist on origin: that worktree fails, `app`'s is made.
+    let (s, failures) = c
+        .create_session(NewSession {
+            background: true,
+            bases: [(rb.id.clone(), "no-such-branch".to_owned())].into_iter().collect(),
+            ..shell(vec![ra.id.clone(), rb.id.clone()])
+        })
+        .await
+        .unwrap();
+    assert!(failures.is_empty());
+    let root = PathBuf::from(&s.root);
+    assert!(root.is_dir());
+    let prepared = |col: &Shared| {
+        col.lock().unwrap().notifies.iter().find_map(|n| match n {
+            Notify::SessionPrepared { session, failures, .. } if session == &s.id => {
+                Some(failures.clone())
+            }
+            _ => None,
+        })
+    };
+    if prepared(&col).is_none() {
+        // Still being made (usually): the session says so.
+        let now = c.sessions().await.unwrap().into_iter().find(|x| x.id == s.id).unwrap();
+        if now.preparing {
+            assert_eq!(
+                c.attach_repo(&s.id, &ra.id).await.unwrap_err().id,
+                "session-preparing"
+            );
+        }
+    }
+    assert!(wait_until(std::time::Duration::from_secs(60), || prepared(&col).is_some()).await);
+    let failures = prepared(&col).unwrap();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].repo, rb.id);
+    assert!(!root.join(ide_core::PENDING_MARKER).exists());
+    let done = c.sessions().await.unwrap().into_iter().find(|x| x.id == s.id).unwrap();
+    assert!(!done.preparing);
+    assert_eq!(done.repos.len(), 1);
+    assert_eq!(done.repos[0].folder, "app");
+    assert!(root.join("app").join("README.md").is_file());
+    assert!(!root.join("lib").exists());
+    // Ready: attaching works again.
+    assert_eq!(c.detach_repo(&s.id, &ra.id).await.unwrap().repos.len(), 0);
+    c.delete_session(&s.id, true).await.unwrap();
+    assert!(!root.exists());
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }

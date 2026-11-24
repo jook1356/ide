@@ -877,8 +877,10 @@ impl App {
         } else {
             title.boxed()
         };
-        // Desk's phase (답변 중 / 응답 필요 / 새 답변) leads the second line.
+        // Desk's phase (답변 중 / 응답 필요 / 새 답변) leads the second line; worktrees still
+        // being created in the background (워크트리 생성 중) come first.
         let phase = match s.activity {
+            _ if s.preparing => Some((tr::activity_preparing(), style::AMBER)),
             ide_client::AgentActivity::Working => Some((tr::activity_working(), style::ACCENT_TEXT)),
             ide_client::AgentActivity::NeedsInput => {
                 Some((tr::activity_needs_input(), style::AMBER))
