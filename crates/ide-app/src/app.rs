@@ -559,6 +559,8 @@ pub enum Modal {
     SelfUpdate,
     /// An agent asks to register a widget (`widgets_ui.rs`).
     WidgetRegister(crate::widgets_ui::RegisterForm),
+    /// The daemon asks the user to approve something (`approvals_ui.rs`).
+    Approval(crate::approvals_ui::ApprovalForm),
 }
 
 /// The configuration editor of the configurations page (plain fields; the user will redesign it).
@@ -957,6 +959,7 @@ pub enum Message {
     /// Browser tabs and 즐겨찾기 (`browser.rs`).
     Browser(crate::browser::BrowserMsg),
     Widget(crate::widgets_ui::WidgetMsg),
+    Approval(crate::approvals_ui::ApprovalMsg),
     /// The input box under an agent terminal.
     Composer(crate::composer::ComposerMsg),
     /// An in-app file drag: the pointer entered (`Some`) or left a drop target, and moved.
@@ -1184,6 +1187,8 @@ pub struct App {
     pub new_menu: bool,
     /// Registered widgets and their open tabs, page and launcher state (`widgets_ui.rs`).
     pub widgets: crate::widgets_ui::WidgetsState,
+    /// Approval questions waiting and the kept grants (`approvals_ui.rs`).
+    pub approvals: crate::approvals_ui::ApprovalsState,
     /// "+ 새로 열기" opens 공용 items (no session) instead of the session's.
     pub new_global: bool,
     /// Its address field, and the bookmark being renamed (url, name).
@@ -1329,6 +1334,7 @@ impl App {
             item_drag: None,
             new_menu: false,
             widgets: Default::default(),
+            approvals: Default::default(),
             new_global: false,
             new_address: String::new(),
             bookmark_edit: None,
@@ -2054,6 +2060,8 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
+        // An approval question waits for the dialog in front of it to close.
+        self.next_approval();
         // Toasts the detail panes asked for go to the notification centre.
         self.take_detail_toasts();
         self.sync_state_notices();
@@ -2568,7 +2576,7 @@ impl App {
                     return Task::none();
                 }
                 // A widget registration closed without 허용 is refused (the agent is told).
-                let refused = self.widget_register_closed();
+                let refused = Task::batch([self.widget_register_closed(), self.approval_closed()]);
                 self.modal = None;
                 Task::batch([refused, self.after_select()])
             }
@@ -2634,7 +2642,7 @@ impl App {
                             Page::Widgets => self.load_widgets(),
                             Page::Settings => {
                                 self.settings.reset_server(&self.ui.server);
-                                Task::none()
+                                self.load_approvals()
                             }
                             _ => Task::none(),
                         };
@@ -3780,6 +3788,7 @@ impl App {
             Message::UTerm(m) => self.on_uterm(m),
             Message::Browser(m) => self.on_browser(m),
             Message::Widget(m) => self.on_widget(m),
+            Message::Approval(m) => self.on_approval(m),
             Message::Composer(m) => self.on_composer(m),
             Message::FileDropped(p) => self.on_file_dropped(p),
             Message::DropHover(t, entered) => {

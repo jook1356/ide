@@ -1,0 +1,246 @@
+//! Approvals in the app (`docs/approvals.md`): the daemon asks (`Notify::AgentRequest`,
+//! `ide.approval`) before an agent acts beyond its session; the app shows one question at a
+//! time (others wait in a queue) and answers `once` / `session` / `always`, or refuses (also
+//! when the dialog is closed). Settings -> 권한 lists the kept grants with 취소.
+
+use std::collections::VecDeque;
+
+use iced::widget::{Column, button, column, container, row, space, text};
+use iced::{Alignment, Element, Fill, Task, Widget as _};
+use ide_client::{ApprovalInfo, ProtoError};
+
+use crate::app::{App, Message, Modal};
+use crate::i18n::tr;
+use crate::style;
+
+type El<'a> = Element<'a, Message>;
+
+/// A question of the daemon.
+#[derive(Debug, Clone)]
+pub struct ApprovalForm {
+    /// The request to answer.
+    pub request: u64,
+    pub capability: String,
+    pub requester_title: String,
+    pub target_title: String,
+    /// What exactly (e.g. the message), shown as is.
+    pub detail: String,
+}
+
+/// Questions waiting behind the shown one, and the settings list.
+#[derive(Default)]
+pub struct ApprovalsState {
+    pub queue: VecDeque<ApprovalForm>,
+    pub list: Vec<ApprovalInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ApprovalMsg {
+    /// The dialog's answer: `once` / `session` / `always`.
+    Answer(&'static str),
+    Listed(Result<Vec<ApprovalInfo>, ProtoError>),
+    Revoke(String),
+    Revoked(Result<(), ProtoError>),
+}
+
+fn am(m: ApprovalMsg) -> Message {
+    Message::Approval(m)
+}
+
+/// What the user is asked to allow, in words.
+fn question(f: &ApprovalForm) -> String {
+    let (who, whom) = (f.requester_title.as_str(), f.target_title.as_str());
+    match f.capability.as_str() {
+        "session.steer" => tr::approval_steer(who, whom),
+        "session.interrupt" => tr::approval_interrupt(who, whom),
+        other => tr::approval_other(who, other, whom),
+    }
+}
+
+/// A capability in a short phrase (the settings list).
+fn capability_text(c: &str) -> String {
+    match c {
+        "session.steer" => tr::approval_cap_steer(),
+        "session.interrupt" => tr::approval_cap_interrupt(),
+        other => other.to_owned(),
+    }
+}
+
+impl App {
+    /// The daemon asks for an approval (answered when the user decides).
+    pub(crate) fn approval_request(&mut self, request: u64, args: &serde_json::Value) -> Task<Message> {
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let title = |t: String, id: String| if t.is_empty() { id } else { t };
+        let f = ApprovalForm {
+            request,
+            capability: s("capability"),
+            requester_title: title(s("requester_title"), s("requester")),
+            target_title: title(s("target_title"), s("target")),
+            detail: s("detail"),
+        };
+        crate::script::log(&format!("approval asked: {} {} -> {}", f.capability, f.requester_title, f.target_title));
+        self.approvals.queue.push_back(f);
+        self.next_approval();
+        Task::none()
+    }
+
+    /// Show the next waiting question when no dialog is open.
+    pub(crate) fn next_approval(&mut self) {
+        if self.modal.is_none()
+            && let Some(f) = self.approvals.queue.pop_front()
+        {
+            self.modal = Some(Modal::Approval(f));
+        }
+    }
+
+    fn reply(&self, request: u64, result: Result<String, String>) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let _ = c.agent_reply(request, result).await;
+            },
+            |_| (),
+        )
+        .discard()
+    }
+
+    /// The question's dialog closes without an answer: refused.
+    pub(crate) fn approval_closed(&self) -> Task<Message> {
+        match &self.modal {
+            Some(Modal::Approval(f)) => self.reply(f.request, Err("refused by the user".into())),
+            _ => Task::none(),
+        }
+    }
+
+    /// Load the kept grants (settings).
+    pub(crate) fn load_approvals(&self) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        Task::perform(async move { c.approval_list().await }, |r| am(ApprovalMsg::Listed(r)))
+    }
+
+    pub(crate) fn on_approval(&mut self, m: ApprovalMsg) -> Task<Message> {
+        match m {
+            ApprovalMsg::Answer(answer) => {
+                let Some(Modal::Approval(f)) = self.modal.take() else {
+                    return Task::none();
+                };
+                crate::script::log(&format!("approval answered: {answer}"));
+                let t = self.reply(f.request, Ok(answer.to_owned()));
+                self.next_approval();
+                Task::batch([t, self.load_approvals()])
+            }
+            ApprovalMsg::Listed(r) => {
+                match r {
+                    Ok(list) => {
+                        self.approvals.list = list;
+                        self.approvals.error = None;
+                    }
+                    Err(e) => self.approvals.error = Some(crate::i18n::proto_error(&e)),
+                }
+                Task::none()
+            }
+            ApprovalMsg::Revoke(id) => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                Task::perform(async move { c.approval_revoke(&id).await }, |r| am(ApprovalMsg::Revoked(r)))
+            }
+            ApprovalMsg::Revoked(r) => {
+                if let Err(e) = r {
+                    self.approvals.error = Some(crate::i18n::proto_error(&e));
+                }
+                self.load_approvals()
+            }
+        }
+    }
+
+    /// The question.
+    pub(crate) fn approval_card<'a>(&'a self, f: &'a ApprovalForm) -> El<'a> {
+        let mut c: Column<El<'a>> = column![
+            text(tr::approval_title()).size(18).font(style::bold()).boxed(),
+            text(question(f)).size(13).boxed(),
+        ]
+        .spacing(10);
+        if !f.detail.is_empty() {
+            c = c.push(
+                container(text(f.detail.clone()).size(12).font(style::mono()))
+                    .padding([6, 10])
+                    .width(Fill)
+                    .style(style::card)
+                    .boxed(),
+            );
+        }
+        c = c.push(text(tr::approval_note()).size(12).color(style::DIM).boxed());
+        let b = |label: String, answer: &'static str, primary: bool| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(if primary { style::primary } else { style::secondary })
+                .on_press(am(ApprovalMsg::Answer(answer)))
+                .boxed()
+        };
+        c.push(
+            row![
+                button(text(tr::approval_refuse()).size(13))
+                    .padding([6, 12])
+                    .style(style::secondary)
+                    .on_press(Message::CloseModal),
+                space().width(Fill),
+                b(tr::approval_once(), "once", false),
+                b(tr::approval_session(), "session", false),
+                b(tr::approval_always(), "always", true),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .boxed(),
+        )
+        .width(560)
+        .boxed()
+    }
+
+    /// Settings -> 권한: the kept grants.
+    pub(crate) fn approvals_section(&self) -> El<'_> {
+        let mut c: Column<El<'_>> = Column::new().spacing(8);
+        c = c.push(text(tr::approvals_label()).size(11).color(style::DIM).boxed());
+        c = c.push(text(tr::approvals_note()).size(12).color(style::DIM).boxed());
+        if let Some(e) = &self.approvals.error {
+            c = c.push(crate::view::error_box(e));
+        }
+        if self.approvals.list.is_empty() {
+            c = c.push(text(tr::approvals_none()).size(13).color(style::DIM).boxed());
+        }
+        let online = self.connected();
+        for g in &self.approvals.list {
+            // A session that went (its grants go with it; a race shows its gone name).
+            let name = |t: &str| if t.is_empty() { tr::widget_session_gone() } else { t.to_owned() };
+            let how = if g.always { tr::approvals_always() } else { tr::approvals_until_restart() };
+            c = c.push(
+                row![
+                    column![
+                        text(tr::approvals_row(
+                            &name(&g.requester_title),
+                            &capability_text(&g.capability),
+                            &name(&g.target_title),
+                        ))
+                        .size(13),
+                        text(how).size(11).color(style::DIM),
+                    ]
+                    .spacing(2)
+                    .width(Fill),
+                    button(text(tr::approvals_revoke()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe(online.then(|| am(ApprovalMsg::Revoke(g.id.clone())))),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .boxed(),
+            );
+        }
+        c.boxed()
+    }
+}

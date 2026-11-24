@@ -4,7 +4,7 @@
 //! older app next to a newer server fails the call instead of leaving the agent waiting.
 
 use iced::Task;
-use ide_client::{AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET};
+use ide_client::{AGENT_TOOL_SHOW_MESSAGE, AGENT_TOOL_WIDGET, APPROVAL_REQUEST};
 
 use crate::app::{App, Message};
 
@@ -17,6 +17,10 @@ impl App {
         args: String,
     ) -> Task<Message> {
         let args: serde_json::Value = serde_json::from_str(&args).unwrap_or_default();
+        if tool == APPROVAL_REQUEST {
+            // Answered when the user decides (`approvals_ui.rs`).
+            return self.approval_request(request, &args);
+        }
         if tool == AGENT_TOOL_WIDGET {
             // Answered when done (after fetching the widget's info).
             return self.agent_widget(request, session, &args);
