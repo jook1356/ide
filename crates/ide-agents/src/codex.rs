@@ -8,6 +8,7 @@
 //! | Skills | workspace: `<session folder>/.agents/skills/<name>/` (discovered from the cwd, also outside git: verified); original repo: fallback, listed in the developer instructions (nothing may be written into the repo; see docs/agent-providers.md for the rejected CODEX_HOME overlay) |
 //! | Guidance | workspace: `<session folder>/AGENTS.md` (verified: read from a non-git cwd) |
 //! | Outside dirs | `--add-dir` (writable: legacy worktrees, the repositories' git dirs) |
+//! | Sandbox | `--sandbox workspace-write` unless the account's `config.toml` sets `sandbox_mode` (a session folder is not a trusted project: Codex would start read-only and refuse `--add-dir`, v 0.172.0) |
 //! | MCP | `-c mcp_servers.<name>={command="..", args=[..], env={..}}` |
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
 //! | Hooks | account integration (user-installed): ide's entries in `CODEX_HOME/hooks.json`, approved once in Codex with `/hooks` (d) |
@@ -29,6 +30,29 @@ pub struct Codex;
 /// Codex's screen rules (`screens/codex.toml`): its status without hooks.
 static SCREEN: std::sync::LazyLock<crate::screen::ScreenManifest> =
     std::sync::LazyLock::new(|| crate::screen::bundled(include_str!("../screens/codex.toml")));
+
+/// Codex's config home: the account's dir, else `CODEX_HOME`, else `~/.codex`.
+fn codex_home(acct: Option<&AccountDir>) -> Option<std::path::PathBuf> {
+    if let Some(a) = acct {
+        return Some(a.dir.clone());
+    }
+    if let Some(d) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+        return Some(d.into());
+    }
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join(".codex"))
+}
+
+/// The user set `sandbox_mode` in Codex's `config.toml` (read only; an unreadable file counts
+/// as not set).
+pub(crate) fn sets_sandbox(acct: Option<&AccountDir>) -> bool {
+    codex_home(acct)
+        .and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok())
+        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        .is_some_and(|t| t.contains_key("sandbox_mode"))
+}
 
 /// The `-c` override value for one MCP server (an inline TOML table).
 pub(crate) fn mcp_override(s: &McpServer) -> String {
@@ -302,6 +326,13 @@ impl AgentProvider for Codex {
             plan.env.extend(self.account_env(a));
         }
         plan.arg("--no-daemon");
+        // A session folder is neither a git repository nor a trusted project, so Codex would
+        // start read-only and refuse `--add-dir` ("the effective permissions do not allow
+        // additional writable roots", v 0.172.0). Ask for what a trusted project gets, unless
+        // the user chose a sandbox in the account's config.toml.
+        if !sets_sandbox(acct) {
+            plan.arg("--sandbox").arg("workspace-write");
+        }
     }
 
     fn prepare_root(

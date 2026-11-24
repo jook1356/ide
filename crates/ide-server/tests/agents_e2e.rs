@@ -241,8 +241,11 @@ async fn claude_and_codex_specs_from_a_configuration() {
             );
         } else {
             assert_eq!(spec.args[0], "--no-daemon");
+            // No sandbox in the account's config.toml: what a trusted project gets.
+            assert_eq!(spec.args[1..3], ["--sandbox".to_owned(), "workspace-write".into()]);
+            let a = spec.args[2..].to_vec();
             assert_eq!(
-                spec.args[1..4],
+                a[1..4],
                 [
                     "-c".to_owned(),
                     r#"mcp_servers.docs={command="node", args=["docs.js"], env={"TOKEN"="t"}}"#
@@ -251,9 +254,9 @@ async fn claude_and_codex_specs_from_a_configuration() {
                 ]
             );
             assert!(
-                spec.args[4].starts_with("developer_instructions=\"Review only.\\n\\n## Skills\\n"),
+                a[4].starts_with("developer_instructions=\"Review only.\\n\\n## Skills\\n"),
                 "{}",
-                spec.args[4]
+                a[4]
             );
             assert_eq!(env("CODEX_HOME"), Some(acct_dir.clone()));
         }
