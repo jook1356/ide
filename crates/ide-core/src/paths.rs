@@ -103,6 +103,12 @@ impl Paths {
         self.session_dir(id).join("agent")
     }
 
+    /// `sessions/<id>/output.log`: the tail of the session terminal's output, kept so a
+    /// restarted server can replay it (removed with the session's folder).
+    pub fn session_output_log(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("output.log")
+    }
+
     /// `repos.json`.
     pub fn repos_file(&self) -> PathBuf {
         self.root.join("repos.json")

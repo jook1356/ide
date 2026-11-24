@@ -17,6 +17,7 @@ use ide_proto::{Notify, ProtoError, SessionState};
 use portable_pty::{ChildKiller, MasterPty, PtySize};
 use tokio::sync::{broadcast, watch};
 
+use crate::outlog::{LOG_CAP, OutputLog, RESUME_TRAILER};
 use crate::ring::{RING_CAPACITY, Ring, RingRead};
 use crate::runner::PtyChild;
 
@@ -156,6 +157,11 @@ pub struct TermHost {
     events: broadcast::Sender<Notify>,
     generation: AtomicU64,
     stopping: AtomicBool,
+    /// On-disk copy of the output ([`TermHost::attach_log`]).
+    log: Mutex<Option<OutputLog>>,
+    /// The ring starts with output restored from the log that no process has followed yet:
+    /// the next start writes [`RESUME_TRAILER`] first.
+    restored: AtomicBool,
 }
 
 impl TermHost {
@@ -233,6 +239,8 @@ impl TermHost {
             events,
             generation: AtomicU64::new(0),
             stopping: AtomicBool::new(false),
+            log: Mutex::new(None),
+            restored: AtomicBool::new(false),
         })
     }
 
@@ -291,7 +299,7 @@ impl TermHost {
         self.ring.lock().unwrap().read(from, max)
     }
 
-    /// Feed process output: parse (answering queries) and append to the ring.
+    /// Feed process output: parse (answering queries) and append to the ring (and the log).
     pub fn ingest(&self, data: &[u8]) {
         {
             let mut guard = self.core.lock().unwrap();
@@ -301,9 +309,62 @@ impl TermHost {
         let end = {
             let mut ring = self.ring.lock().unwrap();
             ring.push(data);
+            // Under the ring lock: the log keeps the ring's order.
+            self.log_append(data);
             ring.end()
         };
         self.end_tx.send_replace(end);
+    }
+
+    fn log_append(&self, data: &[u8]) {
+        let mut log = self.log.lock().unwrap();
+        if let Some(l) = log.as_mut()
+            && let Err(e) = l.append(data)
+        {
+            tracing::warn!(
+                "session {}: output log {} failed, no longer written: {e}",
+                self.session,
+                l.path().display()
+            );
+            *log = None;
+        }
+    }
+
+    /// Keep a copy of the output in the file at `path` (`sessions/<id>/output.log`, see
+    /// [`crate::outlog`]). Output an earlier server wrote there is put into the (still empty)
+    /// ring first, so clients replay it as scrollback; the next process start is preceded by
+    /// [`RESUME_TRAILER`]. The server-side `Term` does not see the old output (its queries,
+    /// titles and bells belong to a process that is gone). A log that cannot be opened is
+    /// skipped (logged).
+    pub fn attach_log(&self, path: &std::path::Path) {
+        self.attach_log_capped(path, LOG_CAP);
+    }
+
+    fn attach_log_capped(&self, path: &std::path::Path, cap: usize) {
+        let (log, kept) = match OutputLog::open(path, cap) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("session {}: output log {}: {e}", self.session, path.display());
+                return;
+            }
+        };
+        let end = {
+            let mut ring = self.ring.lock().unwrap();
+            if ring.end() == 0 && !kept.is_empty() {
+                ring.push(&kept);
+                self.restored.store(true, Ordering::Release);
+            }
+            *self.log.lock().unwrap() = Some(log);
+            ring.end()
+        };
+        self.end_tx.send_replace(end);
+    }
+
+    /// Stop writing the output log (closes the file, e.g. before the session's folder is
+    /// removed).
+    pub fn detach_log(&self) {
+        let _ring = self.ring.lock().unwrap();
+        *self.log.lock().unwrap() = None;
     }
 
     /// The visible screen as text, one string per row (trailing blanks trimmed), for screen
@@ -393,6 +454,11 @@ impl TermHost {
         let mut proc = self.proc.lock().unwrap();
         if proc.is_some() {
             return Err(ProtoError::new("session-running").arg("id", &self.session));
+        }
+        // Output restored from an earlier server ends here: reset the modes the old process left
+        // and push its screen into the scrollback before the new one draws.
+        if self.restored.swap(false, Ordering::AcqRel) {
+            self.ingest(RESUME_TRAILER);
         }
         let (cols, rows) = self.size();
         let PtyChild {
@@ -566,7 +632,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[?6c");
         host.ingest(b"\x1b]11;?\x07");
         let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
-        assert!(reply.starts_with("\x1b]11;rgb:1e1e/1e1e/1e1e"), "{reply:?}");
+        assert!(reply.starts_with("\x1b]11;rgb:2626/2828/2d2d"), "{reply:?}");
         host.ingest(b"\x1b]0;hello\x07\x07");
         assert_eq!(host.title(), "hello");
         assert_eq!(
@@ -601,5 +667,69 @@ mod tests {
             "session-not-running"
         );
         assert_eq!(host.state(), SessionState::Stopped);
+    }
+
+    #[test]
+    fn output_log_is_restored_into_the_ring() {
+        let dir = std::env::temp_dir().join(format!("ide-pty-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("output.log");
+        let (ev, _) = broadcast::channel(16);
+        let old = TermHost::new("s3", 80, 24, ev);
+        old.attach_log(&path);
+        assert!(!old.restored.load(Ordering::Acquire), "nothing to restore");
+        old.ingest(b"line 1\r\nline 2\x07\r\n");
+        drop(old);
+        // A later server: the old output is in the ring for clients to replay, the server-side
+        // Term did not see it (no bell / title again), and the next start writes the trailer.
+        let (ev, mut ev_rx) = broadcast::channel(16);
+        let new = TermHost::new("s3", 80, 24, ev);
+        new.attach_log(&path);
+        assert_eq!(new.read(0, 100).bytes, b"line 1\r\nline 2\x07\r\n");
+        assert!(new.restored.load(Ordering::Acquire));
+        assert!(ev_rx.try_recv().is_err());
+        assert_eq!(new.screen_text()[0], "");
+        new.ingest(b"more");
+        new.detach_log();
+        new.ingest(b" not logged");
+        assert_eq!(std::fs::read(&path).unwrap(), b"line 1\r\nline 2\x07\r\nmore");
+        drop(new);
+        // A smaller cap keeps the tail from a line start.
+        let (ev, _) = broadcast::channel(16);
+        let small = TermHost::new("s3", 80, 24, ev);
+        small.attach_log_capped(&path, 12);
+        assert_eq!(small.read(0, 100).bytes, b"more");
+        drop(small);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trailer_leaves_a_clean_screen_and_default_modes() {
+        use alacritty_terminal::term::TermMode;
+        let (ev, _) = broadcast::channel(16);
+        let host = TermHost::new("s4", 80, 24, ev);
+        host.ingest(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b[5;10ralt");
+        // The old output may end inside a sequence.
+        host.ingest(b"\x1b]0;unterminated");
+        host.ingest(RESUME_TRAILER);
+        let mode = *host.core.lock().unwrap().term.mode();
+        assert!(
+            !mode.intersects(
+                TermMode::ALT_SCREEN
+                    | TermMode::MOUSE_MODE
+                    | TermMode::SGR_MOUSE
+                    | TermMode::BRACKETED_PASTE
+                    | TermMode::APP_CURSOR
+            ),
+            "{mode:?}"
+        );
+        assert!(
+            host.screen_text().iter().all(String::is_empty),
+            "{:?}",
+            host.screen_text()
+        );
+        let core = host.core.lock().unwrap();
+        let cursor = core.term.grid().cursor.point;
+        assert_eq!((cursor.line.0, cursor.column.0), (0, 0));
     }
 }
