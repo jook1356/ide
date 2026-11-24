@@ -42,6 +42,10 @@ mod write_guard;
 mod previews;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an agent CLI must wait at its input (and no dialog of it be auto-answered)
+/// before a queued prompt is typed in: start dialogs come one after the other, with a blank
+/// screen between them (`UserCtx::input_settled`).
+const INPUT_SETTLE: Duration = Duration::from_millis(1500);
 /// Env var naming the `gh` program ([`ServerConfig::gh`]).
 pub const GH_ENV: &str = "IDE_GH";
 const DEFAULT_COLS: u16 = 120;
@@ -318,6 +322,9 @@ pub struct UserCtx {
     /// session's dialog was last answered.
     auto_answers: Mutex<ide_core::auto_answer::AutoAnswers>,
     answered: Mutex<HashMap<String, std::time::Instant>>,
+    /// Since when each running agent session's screen shows its CLI at its input
+    /// ([`ide_agents::screen::ScreenManifest::at_input`]); queued prompts wait for it.
+    at_input: Mutex<HashMap<String, std::time::Instant>>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
     /// Sessions whose pending worktrees a background job is creating
@@ -407,7 +414,8 @@ impl UserCtx {
             grants: Mutex::new(grants),
             auto_answers: Mutex::new(auto_answers),
             answered: Mutex::new(HashMap::new()),
-            this: std::sync::OnceLock::new(),
+            at_input: Mutex::new(HashMap::new()),
+            this:std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
             branch_badges,
         })
@@ -479,6 +487,8 @@ impl UserCtx {
                             "shared_folder": x.shared,
                             "running": info.state == SessionState::Running,
                             "activity": format!("{:?}", info.activity),
+                            // Messages (a child's first prompt too) not typed in yet.
+                            "queued_messages": self.bridge.pending(x.id.as_str()),
                             "repositories": x.worktrees.iter().map(|w| serde_json::json!({
                                 "name": repos.get(&w.repo).map_or_else(|| w.name.clone(), |r| r.name.clone()),
                                 "branch": w.branch,
@@ -509,10 +519,13 @@ impl UserCtx {
                         None => return Some(err(format!("this session has no repository `{want}`"))),
                     }
                 }
-                match self.session_create_child(session, shared, &ids, &text("title"), true, (0, 0)) {
-                    Ok(Response::SessionCreated { session: c, failures, .. }) => {
-                        let prompt = text("prompt");
-                        if !prompt.is_empty() {
+                let prompt = text("prompt");
+                let first = Some(prompt.as_str()).filter(|p| !p.is_empty());
+                match self.create_child(session, shared, &ids, &text("title"), Some(first), (0, 0)) {
+                    Ok((Response::SessionCreated { session: c, failures, .. }, in_args)) => {
+                        // On its command line the CLI submits it itself after its start
+                        // dialogs; otherwise it is typed in once the CLI is at its input.
+                        if first.is_some() && !in_args {
                             self.bridge.enqueue(&c.id, Some(s.id.as_str()), prompt.clone());
                             self.deliver_pending(&c.id);
                         }
@@ -525,7 +538,11 @@ impl UserCtx {
                                 "name": r.name, "branch": r.branch, "base": r.base, "folder": r.path,
                             })).collect::<Vec<_>>(),
                             "failed_repositories": failures.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-                            "first_prompt": if prompt.is_empty() { "none" } else { "queued until it is ready" },
+                            "first_prompt": match (first, in_args) {
+                                (None, _) => "none",
+                                (Some(_), true) => "passed on its command line: its agent starts on it",
+                                (Some(_), false) => "queued until it is ready",
+                            },
                         }))
                     }
                     Ok(_) => err("unexpected answer".into()),
@@ -550,9 +567,11 @@ impl UserCtx {
                 let tid = target.id.as_str();
                 // A session that was running when the server went away and has not been
                 // opened since (`SessionInfo::resume_on_open`) is woken by the message: its
-                // conversation resumes and the message is typed in once it is ready.
+                // conversation resumes and the message is typed in once it is ready. So is a
+                // stopped child of the sender (its CLI ended, e.g. it exited at a start dialog):
+                // the parent hands it work and nobody else would start it again.
                 let mut woken = false;
-                if target.autostart
+                if (target.autostart || target.parent.as_ref() == Some(&s.id))
                     && target.kind == SessionKind::Agent
                     && !self.existing_host(tid).is_some_and(|h| h.is_running())
                 {
@@ -818,17 +837,59 @@ impl UserCtx {
         ) {
             return;
         }
+        if self.bridge.pending(session) == 0 || !self.input_settled(session) {
+            return;
+        }
         let Some(msg) = self.bridge.dequeue(session) else {
             return;
         };
         match self.send_prompt(session, &msg.text) {
             Ok(()) => {
                 // Typed in: the turn starts (hooks / the screen confirm it).
+                self.at_input.lock().unwrap().remove(session);
                 self.set_activity(session, AgentActivity::Working);
             }
-            Err(e) if e.id == "prompt-not-ready" => self.bridge.requeue(session, msg),
+            // Not ready, or not running (yet / any more): it waits for the next start.
+            Err(e) if e.id == "prompt-not-ready" || e.id == "session-not-running" => {
+                self.bridge.requeue(session, msg)
+            }
             Err(e) => tracing::warn!("session {session}: a queued message was dropped: {e}"),
         }
+    }
+
+    /// `session`'s CLI can take a typed prompt: its screen rules show it at its input
+    /// (no start dialog, no auto-answered dialog) for [`INPUT_SETTLE`], and none of its
+    /// dialogs was auto-answered within that time (the next one may not be drawn yet).
+    /// Providers without screen rules: only the terminal's paste mode decides
+    /// (`ide_agents::prompt_writes`).
+    fn input_settled(&self, session: &str) -> bool {
+        let Ok(s) = self.resolve_session(session) else {
+            return true;
+        };
+        let Some(m) = self.providers.get(&s.provider).and_then(|p| p.screen_manifest()) else {
+            return true;
+        };
+        let Some(host) = self.existing_host(session) else {
+            return true; // `send_prompt` says it is not running
+        };
+        let lines = host.screen_text();
+        let title = host.title();
+        let since = {
+            let mut at = self.at_input.lock().unwrap();
+            if !m.at_input(&ide_agents::screen::ScreenInput { lines: &lines, title: &title }) {
+                at.remove(session);
+                return false;
+            }
+            *at.entry(session.to_owned()).or_insert_with(std::time::Instant::now)
+        };
+        let prefix = format!("{session} ");
+        let answered_now = self
+            .answered
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(k, t)| k.starts_with(&prefix) && t.elapsed() < INPUT_SETTLE);
+        since.elapsed() >= INPUT_SETTLE && !answered_now
     }
 
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
@@ -1017,49 +1078,68 @@ impl UserCtx {
             .map(|(k, h)| (k.clone(), h.clone()))
             .collect();
         seen.retain(|k, _| hosts.iter().any(|(id, _)| id == k));
+        self.at_input
+            .lock()
+            .unwrap()
+            .retain(|k, _| hosts.iter().any(|(id, _)| id == k));
         for (id, host) in hosts {
+            self.screen_read(&id, &host, seen);
+            // After the screen was read: a queued message waits for the CLI's input.
             if self.bridge.pending(&id) > 0 {
                 self.deliver_pending(&id);
             }
-            let key = (host.end(), host.title());
-            if seen.get(&id) == Some(&key) {
-                continue;
+        }
+    }
+
+    /// One session's part of [`Self::screen_tick`].
+    fn screen_read(&self, id: &str, host: &TermHost, seen: &mut HashMap<String, (u64, String)>) {
+        let key = (host.end(), host.title());
+        if seen.get(id) == Some(&key) {
+            return;
+        }
+        seen.insert(id.to_owned(), key.clone());
+        let Ok(s) = self.resolve_session(id) else {
+            return;
+        };
+        if s.kind != SessionKind::Agent {
+            return;
+        }
+        let Some(m) = self
+            .providers
+            .get(&s.provider)
+            .and_then(|p| p.screen_manifest())
+        else {
+            return;
+        };
+        let lines = host.screen_text();
+        let input = ide_agents::screen::ScreenInput {
+            lines: &lines,
+            title: &key.1,
+        };
+        {
+            let mut at = self.at_input.lock().unwrap();
+            if m.at_input(&input) {
+                at.entry(id.to_owned()).or_insert_with(std::time::Instant::now);
+            } else {
+                at.remove(id);
             }
-            seen.insert(id.clone(), key.clone());
-            let Ok(s) = self.resolve_session(&id) else {
-                continue;
-            };
-            if s.kind != SessionKind::Agent {
-                continue;
-            }
-            let Some(m) = self
-                .providers
-                .get(&s.provider)
-                .and_then(|p| p.screen_manifest())
-            else {
-                continue;
-            };
-            let lines = host.screen_text();
-            let input = ide_agents::screen::ScreenInput {
-                lines: &lines,
-                title: &key.1,
-            };
-            // A dialog ide answers by itself (`docs/auto-answers.md`).
-            if let Some(ans) = m.answer(&input)
-                && self.auto_answer(&s, &host, &ans)
-            {
-                // Held back for now: read this screen again on the next tick.
-                seen.remove(&id);
-            }
-            let Some(state) = m.detect(&input) else {
-                continue;
-            };
-            if let Some(a) = self
-                .bridge
-                .screen_says(&id, crate::bridge::screen_activity(state))
-            {
-                self.set_activity(&id, a);
-            }
+        }
+        // A dialog ide answers by itself (`docs/auto-answers.md`).
+        if let Some(ans) = m.answer(&input)
+            && self.auto_answer(&s, host, &ans)
+        {
+            // Answered or held back: read this screen again on the next tick even if it does
+            // not change (keys the CLI missed leave the dialog as it was).
+            seen.remove(id);
+        }
+        let Some(state) = m.detect(&input) else {
+            return;
+        };
+        if let Some(a) = self
+            .bridge
+            .screen_says(id, crate::bridge::screen_activity(state))
+        {
+            self.set_activity(id, a);
         }
     }
 
@@ -1584,8 +1664,24 @@ impl UserCtx {
         repos: &[String],
         title: &str,
         start: bool,
-        (cols, rows): (u16, u16),
+        size: (u16, u16),
     ) -> Result<Response, ProtoError> {
+        self.create_child(parent, shared, repos, title, start.then_some(None), size)
+            .map(|(r, _)| r)
+    }
+
+    /// [`Self::session_create_child`]; `start`: `Some(first prompt)` starts the child (the
+    /// prompt, when there is one, on its command line if its provider takes it there). The
+    /// `bool`: the prompt went on the command line (else the caller queues it).
+    fn create_child(
+        &self,
+        parent: &str,
+        shared: bool,
+        repos: &[String],
+        title: &str,
+        start: Option<Option<&str>>,
+        (cols, rows): (u16, u16),
+    ) -> Result<(Response, bool), ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let ps = self.resolve_session(parent)?;
         Self::not_preparing(&ps)?;
@@ -1633,14 +1729,16 @@ impl UserCtx {
         );
         self.notify(Notify::SessionsChanged);
         self.notify(Notify::ReposChanged);
-        if start {
-            self.start(&session)?;
-        } else {
-            self.refresh_root(&session);
-        }
+        let prompt_in_args = match start {
+            Some(prompt) => self.start_with(&session, prompt)?,
+            None => {
+                self.refresh_root(&session);
+                false
+            }
+        };
         // The parent's guidance lists its children.
         self.refresh_root(&ps);
-        Ok(Response::SessionCreated {
+        let r = Response::SessionCreated {
             base_changes: Vec::new(),
             session: self.info(&session),
             failures: failures
@@ -1651,7 +1749,8 @@ impl UserCtx {
                     error: core_error(&f.error),
                 })
                 .collect(),
-        })
+        };
+        Ok((r, prompt_in_args))
     }
 
     /// A child and its parent (`bad-request` for a session without a parent).
@@ -2962,11 +3061,12 @@ impl UserCtx {
 
     /// The launch spec of a session (generates its scratch files).
     pub fn launch_spec(&self, s: &Session) -> Result<LaunchSpec, ProtoError> {
-        Ok(self.assemble(s)?.spec)
+        Ok(self.assemble(s, None)?.spec)
     }
 
-    /// The assembled launch of a session: spec + the conversation it starts or resumes.
-    fn assemble(&self, s: &Session) -> Result<ide_agents::Assembled, ProtoError> {
+    /// The assembled launch of a session: spec + the conversation it starts or resumes (+ the
+    /// first prompt on the command line, when the provider takes it there).
+    fn assemble(&self, s: &Session, first_prompt: Option<&str>) -> Result<ide_agents::Assembled, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let p = self.provider(&s.provider)?;
         let account = match &s.account {
@@ -2988,6 +3088,7 @@ impl UserCtx {
                     spec,
                     notes: Vec::new(),
                     conversation: None,
+                    prompt_in_args: false,
                 })
                 .map_err(core);
         }
@@ -3017,7 +3118,8 @@ impl UserCtx {
             &repos,
             guidance,
         )
-        .with_bridge(self.bridge.for_session(s.id.as_str()));
+        .with_bridge(self.bridge.for_session(s.id.as_str()))
+        .with_first_prompt(first_prompt);
         drop(repos);
         let built = ide_agents::assemble(p, &input, &self.launch_env).map_err(core)?;
         for n in &built.notes {
@@ -3028,13 +3130,19 @@ impl UserCtx {
     }
 
     fn start(&self, s: &Session) -> Result<(), ProtoError> {
+        self.start_with(s, None).map(drop)
+    }
+
+    /// [`Self::start`] with a first prompt: `true` when it went on the command line
+    /// ([`ide_agents::Assembled::prompt_in_args`]); otherwise the caller queues it.
+    fn start_with(&self, s: &Session, first_prompt: Option<&str>) -> Result<bool, ProtoError> {
         if self
             .existing_host(s.id.as_str())
             .is_some_and(|h| matches!(h.state(), SessionState::Exited(_)))
         {
             self.after_exit(s);
         }
-        let built = self.assemble(s)?;
+        let built = self.assemble(s, first_prompt)?;
         // A new process: nothing reported yet.
         self.bridge.reset(s.id.as_str());
         let host = self.host(s);
@@ -3054,7 +3162,11 @@ impl UserCtx {
             }
         }
         self.audit("session.start", s.id.as_str());
-        Ok(())
+        if built.prompt_in_args {
+            let bytes = first_prompt.map_or(0, str::len);
+            self.audit("session.first_prompt_arg", &format!("{} {bytes} bytes", s.id));
+        }
+        Ok(built.prompt_in_args)
     }
 
     /// The session's provider resumes conversations (only those sessions are offered for a

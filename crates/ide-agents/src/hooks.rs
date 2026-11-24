@@ -25,6 +25,11 @@ pub enum HookEvent {
     PromptSubmitted,
     /// The turn finished.
     Stopped,
+    /// The turn finished, and the CLI's own record says exactly these ids of work that can
+    /// outlive the turn still run (the same id space as [`HookEvent::BackgroundStarted`]). For
+    /// work whose end no hook reports (Claude Code's background shells): it replaces what the
+    /// IDE counted, so an end it never saw cannot hold the session.
+    StoppedRunning { background: Vec<String> },
     /// The CLI waits for the user: a permission prompt (`permission`) or idle input.
     NeedsInput { permission: bool },
     /// The agent is about to use a tool.

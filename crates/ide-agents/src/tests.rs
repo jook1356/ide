@@ -122,6 +122,7 @@ fn input<'a>(
         configuration: cfg,
         conversation: None,
         bridge: None,
+        first_prompt: None,
     }
 }
 
@@ -392,6 +393,47 @@ fn codex_resume() {
         p(serde_json::json!({"session_id": "../../x"})),
         Some(HookEvent::SessionStart { conversation: None })
     );
+}
+
+/// A child's first prompt goes last on the command line, after `--` (the start dialogs can no
+/// longer take it, as typed text could: seen 2026-11-24); only for a new conversation.
+#[test]
+fn first_prompt_on_the_command_line() {
+    let f = fixture("agents-first-prompt");
+    let acct = account(&f, "claude");
+    let cfg = Configuration::empty("default", "default");
+    let task = "  --help me\r\nfix \x1b[31mit\x07  ";
+    let inp = input(&f, Some(&acct), &cfg).with_first_prompt(Some(task));
+    for p in [&Claude as &dyn AgentProvider, &Codex] {
+        let out = assemble(p, &inp, &f.env).unwrap();
+        assert!(out.prompt_in_args, "{}", p.id());
+        let n = out.spec.args.len();
+        assert_eq!(out.spec.args[n - 2..], ["--", "--help me\nfix [31mit"], "{}: cleaned, last", p.id());
+    }
+    // None given, empty, or too long: nothing on the command line.
+    let none = input(&f, Some(&acct), &cfg);
+    let blank = input(&f, Some(&acct), &cfg).with_first_prompt(Some(" \r\n"));
+    let long = "x".repeat(crate::MAX_ARG_PROMPT + 1);
+    let too_long = input(&f, Some(&acct), &cfg).with_first_prompt(Some(&long));
+    for i in [&none, &blank, &too_long] {
+        let out = assemble(&Claude, i, &f.env).unwrap();
+        assert!(!out.prompt_in_args);
+        assert!(!out.spec.args.contains(&"--".to_owned()));
+    }
+    // Resuming a conversation: never again.
+    let fresh = assemble(&Claude, &none, &f.env).unwrap();
+    let id = fresh.conversation.unwrap();
+    let project = acct.dir.join("projects").join("C--some-cwd");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{id}.jsonl")), "{}\n").unwrap();
+    let mut resume = input(&f, Some(&acct), &cfg).with_first_prompt(Some("again"));
+    resume.conversation = Some(&id);
+    let out = assemble(&Claude, &resume, &f.env).unwrap();
+    assert!(out.spec.args.contains(&"--resume".to_owned()));
+    assert!(!out.prompt_in_args && !out.spec.args.contains(&"again".to_owned()));
+    // Providers that take none (a shell): typed in later.
+    let out = assemble(&crate::Shell, &inp, &f.env).unwrap();
+    assert!(!out.prompt_in_args);
 }
 
 #[test]
@@ -1170,6 +1212,67 @@ fn codex_integration() {
     let deny = Codex.hook_reply("PreToolUse", &HookDecision::Deny { reason: "r".into() });
     let v: serde_json::Value = serde_json::from_str(&deny.stdout).unwrap();
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+/// Background tasks still running, from a transcript shaped like Claude Code 2.1.331's.
+#[test]
+fn claude_background_tasks() {
+    let note = |id: &str, status: &str| {
+        format!("<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>{status}</status>\n<summary>x</summary>\n</task-notification>")
+    };
+    let enqueue = |id: &str, status: &str| {
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": note(id, status)}).to_string()
+    };
+    let lines = [
+        // Two background shells (one moved there at its timeout) and a background agent.
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"","backgroundTaskId":"b2","timedOutAfterMs":120000}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#.to_owned(),
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"stdout":"plain foreground"}}"#.to_owned(),
+        // A subagent's own background shell is not the main conversation's.
+        r#"{"type":"user","isSidechain":true,"toolUseResult":{"backgroundTaskId":"s1"}}"#.to_owned(),
+        // Text that only mentions the markers (a command, its output) changes nothing.
+        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "input": {"command": note("b1", "completed")}}]}}).to_string(),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": note("b1", "completed")}]}, "toolUseResult": {"stdout": note("b1", "completed")}}).to_string(),
+    ]
+    .join("\n");
+    let run = crate::claude::background_running;
+    assert_eq!(run(&lines), ["b1", "b2", "a1"]);
+
+    // b1 ends (queued the moment it ends), a1 fails, b2 is stopped with TaskStop.
+    let ended = [
+        lines.clone(),
+        enqueue("b1", "completed"),
+        serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": note("a1", "failed"), "commandMode": "task-notification"}}).to_string(),
+    ]
+    .join("\n");
+    assert_eq!(run(&ended), ["b2"]);
+    let stopped = format!(
+        "{ended}\n{}",
+        r#"{"type":"user","message":{"content":[]},"toolUseResult":{"message":"Successfully stopped task: b2","task_id":"b2","task_type":"local_bash"}}"#
+    );
+    assert!(run(&stopped).is_empty());
+    // Older CLIs delivered the notification as a user message; "running" is no end.
+    let older = format!(
+        "{lines}\n{}\n{}",
+        serde_json::json!({"type": "user", "message": {"content": note("b2", "completed")}}),
+        enqueue("a1", "running"),
+    );
+    assert_eq!(run(&older), ["b1", "a1"]);
+
+    // The Stop hook reads the transcript it is given; without one it says nothing about tasks.
+    let t = TempDir::new("bgtasks");
+    let file = t.0.join("t.jsonl");
+    std::fs::write(&file, &lines).unwrap();
+    let stop = |j: serde_json::Value| Claude.parse_hook("Stop", j.to_string().as_bytes());
+    assert_eq!(
+        stop(serde_json::json!({"transcript_path": file})),
+        Some(HookEvent::StoppedRunning {
+            background: vec!["b1".into(), "b2".into(), "a1".into()]
+        })
+    );
+    assert_eq!(stop(serde_json::json!({"transcript_path": t.0.join("gone.jsonl")})), Some(HookEvent::Stopped));
+    assert_eq!(stop(serde_json::json!({"transcript_path": ""})), Some(HookEvent::Stopped));
 }
 
 #[test]

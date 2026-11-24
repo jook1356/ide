@@ -266,6 +266,14 @@ impl ScreenManifest {
         })
     }
 
+    /// The CLI waits at its input with nothing covering it: an explicit `idle` rule wins and
+    /// no dialog ide answers is shown. A queued prompt is typed in only then: a start dialog
+    /// (folder trust, one per added folder) would take its keys. The no-match fallback is not
+    /// enough (the blank screen between two start dialogs matches nothing).
+    pub fn at_input(&self, input: &ScreenInput<'_>) -> bool {
+        self.answer(input).is_none() && self.winner(input).is_some_and(|r| r.state == "idle")
+    }
+
     /// The winning rule (diagnostics, tests).
     pub fn winner(&self, input: &ScreenInput<'_>) -> Option<&Rule> {
         let mut best: Option<&Rule> = None;
@@ -627,6 +635,40 @@ regex=['(']").is_err());
         let bad = |extra: &str| ScreenManifest::parse(&format!("id = \"x\"\n[[answers]]\nid = \"a\"\ncontains = [\"y\"]\n{extra}")).unwrap_err();
         assert!(bad("keys = []").contains("no keys"));
         assert!(bad("keys = [\"\\r\"]\nchoose = \"yes\"").contains("not both"));
+    }
+
+    /// Seen 2026-11-24: a child session's first prompt was typed while Claude Code still showed
+    /// its start dialogs (bracketed paste was already on) and the dialog took it.
+    #[test]
+    fn at_input_only_with_an_idle_prompt() {
+        let at = |p: &dyn AgentProvider, rows: &[&str], title: &str| {
+            let lines = screen(rows);
+            p.screen_manifest().unwrap().at_input(&ScreenInput { lines: &lines, title })
+        };
+        let c = &crate::Claude;
+        let idle = ["", "────────────────────────────────", "> ", "────────────────────────────────", "  ? for shortcuts"];
+        assert!(at(c, &idle, ""));
+        assert!(at(c, &idle, "✳ Claude Code"));
+        assert!(!at(c, &idle, "⠂ Claude Code"), "working");
+        let trust = [
+            "────────────────────────────────",
+            " Accessing workspace:",
+            "",
+            " C:/w/s1",
+            "",
+            " ❯ No, exit",
+            "   Yes, I trust this folder",
+            "",
+            " Enter to confirm · Esc to cancel",
+        ];
+        assert!(!at(c, &trust, "✳ Claude Code"), "a start dialog");
+        let added = [" Adding a new directory:", "", " C:/r/.git", " ❯ No, exit", "   Yes, add it", " Esc to exit · To add it, press ↓ to Yes, then Enter"];
+        assert!(!at(c, &added, ""), "an answered dialog without a cancel footer");
+        assert!(!at(c, &[""], ""), "blank screen between two dialogs: nothing matched");
+        assert!(!at(c, &["  Claude Code v2", "  Welcome back!"], ""), "banner, no input box yet");
+        let x = &crate::Codex;
+        assert!(at(x, &["• Fixed.", "", "› ", "  ? for shortcuts"], "codex"));
+        assert!(!at(x, &["> You are in C:/w/s1", "", "  Do you trust the contents of this directory?", "› 1. Yes"], "codex"));
     }
 
     #[test]

@@ -47,6 +47,7 @@ mod uterm;
 mod script;
 mod scripts_view;
 mod session_edit;
+mod new_session_repos;
 mod session_menu;
 mod session_sort;
 mod side_popover;

@@ -44,9 +44,13 @@ the session). A provider answering the same kind reuses the id; a new kind needs
 - A rule with `path_after` answers only when the named folder is the session's folder, one of
   its worktrees or one of their repositories (a worktree's git dir lives there); otherwise the
   dialog stays for the user (logged). A folder line that is cut or wrapped does not match.
-- The same dialog (session, answer, folder) is answered at most once in 5 s; a dialog held back
-  by that is read again on the next tick, even when the screen does not change (one
-  "Adding a new directory" follows another, one per repository).
+- The same dialog (session, answer, folder) is answered at most once in 5 s; after an answer,
+  and while held back by that, the screen is read again on every tick, even when it does not
+  change (one "Adding a new directory" follows another, one per repository; keys the CLI missed
+  leave the dialog as it was, and it is answered again after 5 s; seen 2026-11-24: a missed
+  answer waited 23 s for an unrelated redraw).
+- Queued prompts wait until no dialog was answered for 1.5 s and the CLI shows its input
+  (`docs/session-family.md`).
 - `choose` reads where the list's cursor (`❯`) is and types Down / Up to the entry, then Enter;
   when the cursor is on it already (an Enter the CLI missed), only Enter. It never moves past the
   entry, and nothing is typed without a cursor next to it.
