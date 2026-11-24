@@ -1014,6 +1014,8 @@ fn codex_integration() {
     let f = fixture("agents-codex-integration");
     let acct = account(&f, "codex");
     std::fs::create_dir_all(&acct.dir).unwrap();
+    // Windows: a sandbox counts as set up, so install never starts the real (UAC) setup here.
+    std::fs::write(acct.dir.join("config.toml"), "[windows]\nsandbox = \"unelevated\"\n").unwrap();
     let program = f.bin.join(exe("ide-server"));
     let targets = HookTargets {
         program: Some(program.clone()),
@@ -1134,4 +1136,24 @@ fn claude_transcripts() {
     assert!(Shell.transcript(None, id, 10).is_none());
     assert_eq!(Claude.interrupt_keys(), Some(&b"\x1b"[..]));
     assert!(Claude.steers() && !Shell.steers());
+}
+
+#[test]
+fn codex_windows_sandbox_readiness() {
+    use crate::codex::sandbox_ready_in as ready;
+    let f = fixture("agents-codex-sandbox");
+    let acct = account(&f, "codex");
+    std::fs::create_dir_all(&acct.dir).unwrap();
+    let cfg = |t: &str| std::fs::write(acct.dir.join("config.toml"), t).unwrap();
+    assert!(ready(Some(&acct), false), "only Windows needs it");
+    assert!(!ready(Some(&acct), true), "no config: not set up");
+    cfg("[windows]\nsandbox = \"elevated\"\n");
+    assert!(!ready(Some(&acct), true), "elevated without its setup marker");
+    std::fs::create_dir_all(acct.dir.join(".sandbox")).unwrap();
+    std::fs::write(acct.dir.join(".sandbox").join("setup_marker.json"), "{}").unwrap();
+    assert!(ready(Some(&acct), true));
+    cfg("[windows]\nsandbox = \"unelevated\"\n");
+    assert!(ready(Some(&acct), true), "the user's other choice");
+    cfg("sandbox_mode = \"read-only\"\n");
+    assert!(ready(Some(&acct), true), "the user's own sandbox_mode");
 }

@@ -527,11 +527,37 @@ regex=['(']").is_err());
         ]);
         let (a, path) = m.answer(&ScreenInput { lines: &dir, title: "" }).expect("added dir");
         assert_eq!((a.id.as_str(), path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/ide/.git")));
+        // The other footer (seen 2026-11-24, the second repository's git dir).
+        let other_footer = screen(&[
+            " Adding a new directory:",
+            "",
+            " C:/Users/jook1/Desktop/powered_ide/.git",
+            "",
+            " This directory is part of the repository at C:/Users/jook1/Desktop/powered_ide.",
+            " Security guide",
+            "",
+            " ❯ No, exit",
+            "   Yes, add it",
+            "",
+            " Esc to exit · To add it, press ↓ to Yes, then Enter",
+        ]);
+        let (a, path) = m.answer(&ScreenInput { lines: &other_footer, title: "" }).expect("other footer");
+        assert_eq!((a.id.as_str(), path.as_deref()), ("trust_added_dir", Some("C:/Users/jook1/Desktop/powered_ide/.git")));
+        // The cursor already on Yes (keys on their way): not answered again.
+        let moved: Vec<String> = other_footer
+            .iter()
+            .map(|l| match l.as_str() {
+                " ❯ No, exit" => "   No, exit".to_owned(),
+                "   Yes, add it" => " ❯ Yes, add it".to_owned(),
+                x => x.to_owned(),
+            })
+            .collect();
+        assert!(m.answer(&ScreenInput { lines: &moved, title: "" }).is_none());
         // Other dialogs and a missing folder line are not answered.
         let perm = screen(&[" Do you want to run this command?", " ❯ 1. Yes", " Enter to confirm · Esc to cancel"]);
         assert!(m.answer(&ScreenInput { lines: &perm, title: "" }).is_none());
-        let cut = screen(&[" Accessing workspace:", "", "   Yes, I trust this folder", " Enter to confirm"]);
-        assert_eq!(m.answer(&ScreenInput { lines: &cut, title: "" }).map(|(a, p)| (a.id.clone(), p)), Some(("trust_workspace".into(), Some("Yes, I trust this folder".into()))), "the server checks the folder");
+        let cut = screen(&[" Accessing workspace:", "", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm"]);
+        assert_eq!(m.answer(&ScreenInput { lines: &cut, title: "" }).map(|(a, p)| (a.id.clone(), p)), Some(("trust_workspace".into(), Some("❯ No, exit".into()))), "the server checks the folder");
         let bad = r#"id = "x"
 [[answers]]
 id = "a"

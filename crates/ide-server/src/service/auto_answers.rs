@@ -65,24 +65,28 @@ impl UserCtx {
     }
 
     /// Answer the dialog `a` on `s`'s screen when the user left it on, it names one of the
-    /// session's folders (when it names one) and it was not just answered.
-    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, a: &AutoAnswer, path: Option<&str>) {
+    /// session's folders (when it names one) and that dialog (the same folder) was not just
+    /// answered. `true`: held back by [`COOLDOWN`] only, so the screen must be read again later
+    /// even if it does not change (one dialog per repository may follow another).
+    pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, a: &AutoAnswer, path: Option<&str>) -> bool {
         let on = self.auto_answers.lock().unwrap().enabled(&s.provider, &a.id, a.default);
         if !on {
-            return;
+            return false;
         }
         if let Some(p) = path
             && !ide_core::auto_answer::inside_any(p, &self.own_folders(s))
         {
             tracing::info!("session {}: {} not answered: {p} is not one of its folders", s.id, a.id);
-            return;
+            return false;
         }
         {
             let mut last = self.answered.lock().unwrap();
-            let key = format!("{} {}", s.id, a.id);
+            // Per folder: each repository's git dir is its own dialog.
+            let key = format!("{} {} {}", s.id, a.id, path.unwrap_or(""));
             if last.get(&key).is_some_and(|t| t.elapsed() < COOLDOWN) {
-                return;
+                return true;
             }
+            last.retain(|_, t| t.elapsed() < COOLDOWN);
             last.insert(key, Instant::now());
         }
         for (i, k) in a.keys.iter().enumerate() {
@@ -91,9 +95,10 @@ impl UserCtx {
             }
             if let Err(e) = host.write(k.as_bytes().to_vec()) {
                 tracing::warn!("session {}: auto answer {}: {e}", s.id, a.id);
-                return;
+                return false;
             }
         }
         self.audit("auto_answer", &format!("{} {} {}", s.id, a.id, path.unwrap_or("")));
+        false
     }
 }

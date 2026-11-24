@@ -12,6 +12,7 @@
 //! | MCP | `-c mcp_servers.<name>={command="..", args=[..], env={..}}` |
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
 //! | Hooks | account integration (user-installed): ide's entries in `CODEX_HOME/hooks.json`, approved once in Codex with `/hooks` (d) |
+//! | Windows sandbox | account integration also runs `codex sandbox setup --elevated --current-user` once per Codex home (UAC; it writes `[windows] sandbox = "elevated"` and `.sandbox/setup_marker.json`, v 0.172.0): without it Codex is read-only and refuses `--add-dir` |
 
 use ide_core::{McpServer, Result};
 
@@ -48,10 +49,87 @@ fn codex_home(acct: Option<&AccountDir>) -> Option<std::path::PathBuf> {
 /// The user set `sandbox_mode` in Codex's `config.toml` (read only; an unreadable file counts
 /// as not set).
 pub(crate) fn sets_sandbox(acct: Option<&AccountDir>) -> bool {
+    config_table(acct).contains_key("sandbox_mode")
+}
+
+/// Codex's `config.toml` of a Codex home as a table (missing or unreadable: empty).
+fn config_table(acct: Option<&AccountDir>) -> toml::Table {
     codex_home(acct)
         .and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok())
         .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
-        .is_some_and(|t| t.contains_key("sandbox_mode"))
+        .unwrap_or_default()
+}
+
+/// Can Codex write in this home's sessions? Outside Windows always; on Windows Codex runs
+/// commands only inside its Windows sandbox, set up once per Codex home (`codex sandbox setup
+/// --elevated`, which writes `[windows] sandbox = "elevated"` and `.sandbox/setup_marker.json`,
+/// v 0.172.0); without it every session is read-only and `--add-dir` is refused. A user who
+/// chose `sandbox_mode` or another `windows.sandbox` themselves is left alone.
+pub(crate) fn sandbox_ready(acct: Option<&AccountDir>) -> bool {
+    sandbox_ready_in(acct, cfg!(windows))
+}
+
+pub(crate) fn sandbox_ready_in(acct: Option<&AccountDir>, windows: bool) -> bool {
+    if !windows {
+        return true;
+    }
+    let t = config_table(acct);
+    if t.contains_key("sandbox_mode") {
+        return true;
+    }
+    match t.get("windows").and_then(|w| w.get("sandbox")).and_then(|s| s.as_str()) {
+        None => false,
+        Some("elevated") => codex_home(acct)
+            .is_some_and(|h| h.join(".sandbox").join("setup_marker.json").is_file()),
+        Some(_) => true,
+    }
+}
+
+/// Run `codex sandbox setup --elevated --current-user` for the Codex home `home`, elevated:
+/// Windows shows its UAC prompt (the user's consent; refusing it is an error). Blocking.
+fn setup_windows_sandbox(codex: &std::path::Path, home: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+    let fail = |d: String| ide_core::Error::SandboxSetup(d);
+    // Never from tests: it changes the machine and asks the user (UAC).
+    if cfg!(test) || std::env::var_os("IDE_TEST_TMP").is_some() {
+        return Err(fail("not run from tests".into()));
+    }
+    let q = |p: &std::path::Path| p.display().to_string().replace('\'', "''");
+    let tag = format!("ide-codex-sandbox-{}", std::process::id());
+    let dir = std::env::temp_dir();
+    let (script, log) = (dir.join(format!("{tag}.ps1")), dir.join(format!("{tag}.log")));
+    // The elevated process gets a fresh environment: CODEX_HOME is set inside the script.
+    let body = format!(
+        "$env:CODEX_HOME = '{home}'\r\n& '{codex}' sandbox setup --elevated --current-user --codex-home '{home}' *> '{log}'\r\nexit $LASTEXITCODE\r\n",
+        home = q(home),
+        codex = q(codex),
+        log = q(&log),
+    );
+    std::fs::write(&script, body).map_err(|e| fail(e.to_string()))?;
+    // Start-Process joins the argument list with blanks: the script path is quoted for it.
+    let outer = format!(
+        "try {{ $p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
+         -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','\"{}\"'); exit $p.ExitCode }} \
+         catch {{ exit 1223 }}",
+        q(&script)
+    );
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &outer])
+        .status();
+    let detail = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(&log);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        // ERROR_CANCELLED: the UAC prompt was refused.
+        Ok(s) if s.code() == Some(1223) => Err(fail("the administrator prompt was refused".into())),
+        Ok(s) => Err(fail(format!(
+            "exit {}: {}",
+            s.code().unwrap_or(-1),
+            detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
+        ))),
+        Err(e) => Err(fail(e.to_string())),
+    }
 }
 
 /// The `-c` override value for one MCP server (an inline TOML table).
@@ -167,10 +245,13 @@ impl AgentProvider for Codex {
         let ours = our_commands(&v);
         if ours.is_empty() {
             IntegrationStatus::Missing
-        } else if ours == expected_commands(program) {
-            IntegrationStatus::Installed
-        } else {
+        } else if ours != expected_commands(program) {
             IntegrationStatus::Outdated
+        } else if !sandbox_ready(Some(acct)) {
+            // The Windows sandbox of this Codex home is not set up yet: install does it.
+            IntegrationStatus::Missing
+        } else {
+            IntegrationStatus::Installed
         }
     }
 
@@ -216,6 +297,16 @@ impl AgentProvider for Codex {
         let text = serde_json::to_string_pretty(&v).expect("json");
         std::fs::write(&path, text)
             .map_err(|e| ide_core::Error::io(ide_core::IoAction::Writing, &path, e))?;
+        // Windows: Codex writes only inside its sandbox, set up once per Codex home (UAC).
+        if !sandbox_ready(Some(acct)) {
+            let codex = self.program_path(&crate::HostEnv::from_process())?;
+            setup_windows_sandbox(&codex, &acct.dir)?;
+            if !sandbox_ready(Some(acct)) {
+                return Err(ide_core::Error::SandboxSetup(
+                    "Codex reported success but its sandbox setup is not recorded".into(),
+                ));
+            }
+        }
         Ok(IntegrationReport {
             approve_with: Some("/hooks".into()),
         })

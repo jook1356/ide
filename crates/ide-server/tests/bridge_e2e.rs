@@ -618,6 +618,10 @@ async fn account_integration() {
     let claude = c.create_account("claude", "Work").await.unwrap();
     assert_eq!(c.account_integration("claude", &claude.slug, A::Status).await.unwrap().state, S::NotNeeded);
     assert_eq!(c.account_integration("codex", &codex.slug, A::Status).await.unwrap().state, S::Missing);
+    // Windows: a sandbox counts as set up, so install never starts the real (UAC) setup here.
+    let home = data.join("accounts").join("codex").join(&codex.slug);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[windows]\nsandbox = \"unelevated\"\n").unwrap();
     let i = c.account_integration("codex", &codex.slug, A::Install).await.unwrap();
     assert_eq!((i.state, i.approve_with.as_deref()), (S::Installed, Some("/hooks")));
     let hooks = data.join("accounts").join("codex").join(&codex.slug).join("hooks.json");

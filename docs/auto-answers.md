@@ -42,8 +42,11 @@ the session). A provider answering the same kind reuses the id; a new kind needs
 - A rule with `path_after` answers only when the named folder is the session's folder, one of
   its worktrees or one of their repositories (a worktree's git dir lives there); otherwise the
   dialog stays for the user (logged). A folder line that is cut or wrapped does not match.
-- The same dialog of a session is answered at most once in 5 s (a list must not be moved past
-  its answer while the CLI redraws).
+- The same dialog (session, answer, folder) is answered at most once in 5 s; a dialog held back
+  by that is read again on the next tick, even when the screen does not change (one
+  "Adding a new directory" follows another, one per repository).
+- Claude Code's rules answer only while the cursor is on "No, exit": a second Down could wrap a
+  list back to it.
 - Every answer is audited (`auto_answer <session> <id> <folder>`).
 - Only agent sessions (not shells or login terminals) are read.
 
@@ -52,7 +55,7 @@ the session). A provider answering the same kind reuses the id; a new kind needs
 | Agent | Id | Dialog | Keys |
 |---|---|---|---|
 | Claude Code | `trust_workspace` | "Accessing workspace: <folder> … ❯ No, exit / Yes, I trust this folder" (v: seen 2026-11-24) | Down, Enter |
-| Claude Code | `trust_added_dir` | "Adding a new directory: <folder> … ❯ No, exit / Yes, add it" (an `--add-dir` folder such as a repository's git dir) (v) | Down, Enter |
+| Claude Code | `trust_added_dir` | "Adding a new directory: <folder> … ❯ No, exit / Yes, add it" (an `--add-dir` folder such as a repository's git dir; one per repository; footers "Enter to confirm · Esc to cancel" or "Esc to exit · … press ↓ to Yes, then Enter") (v) | Down, Enter |
 
 Codex: its trust question ("Do you trust the contents of this directory?", numbered choices)
 has no rule yet: the folder is not on a line of its own and the keys were not checked.
