@@ -20,11 +20,15 @@ use crate::app::{
 };
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon};
+use crate::new_session_repos;
 use crate::session_sort::{SortDir, SortItem, SortKey};
 use crate::style;
 use crate::ui_state::{CloseAction, FontSlot, LOGIN_GROUP, Page, ServerPref};
 
 type El<'a> = Element<'a, Message>;
+
+/// Most the new-session dialog's repo list grows to (about eight rows) before it scrolls.
+const REPO_LIST_MAX_H: f32 = 232.0;
 
 // Symbols (Segoe UI Symbol / system fallback fonts on Windows).
 const I_PLUS: &str = "+";
@@ -1298,9 +1302,19 @@ impl App {
         .boxed()
     }
 
+    /// Registered repos, most recently used first (`new_session_repos::recent_order`).
+    pub(crate) fn repos_by_recent(&self) -> Vec<&ide_client::RepoInfo> {
+        new_session_repos::recent_order(&self.repos, self.sessions.iter().map(|l| &l.info))
+            .into_iter()
+            .map(|i| &self.repos[i])
+            .collect()
+    }
+
     /// The new-session dialog's "워크스페이스" part (Desk's `NewSessionModal`): "use worktrees"
     /// with a checkbox per registered repo (pre-checked: the configuration's default repos;
-    /// none = an empty workspace), or one repo to work in directly.
+    /// none = an empty workspace), or one repo to work in directly. Repos are listed most
+    /// recently used first; the list scrolls past `REPO_LIST_MAX_H`, and from
+    /// `SEARCH_MIN_REPOS` repos on it gets a search box and the checked repos as chips.
     fn new_workspace_section<'a>(&'a self, f: &'a NewForm) -> El<'a> {
         let mut c = column![
             label(tr::workspace_label()),
@@ -1312,10 +1326,61 @@ impl App {
             text(tr::use_worktrees_note()).size(11).color(style::FAINT),
         ]
         .spacing(6);
+        let recent = self.repos_by_recent();
+        // Many repos: a search box, the checked ones as chips (they may be scrolled or
+        // filtered out of the list) and a count beside the label.
+        let many = self.repos.len() >= new_session_repos::SEARCH_MIN_REPOS;
         if f.use_worktrees {
-            c = c.push(text(tr::worktree_repos_label()).size(12).font(style::bold()).boxed());
+            let mut head = row![text(tr::worktree_repos_label()).size(12).font(style::bold())]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            if many {
+                head = head.push(space().width(Fill).boxed()).push(
+                    text(tr::new_repos_selected(f.repos.len() as i64))
+                        .size(11)
+                        .color(style::DIM)
+                        .boxed(),
+                );
+            }
+            c = c.push(head.boxed());
+            if many && !f.repos.is_empty() {
+                let mut chips = row![].spacing(4);
+                for r in f.repos.iter().filter_map(|id| self.repos.iter().find(|r| &r.id == id)) {
+                    let chip = button(
+                        row![
+                            text(r.name.as_str()).size(12),
+                            icons::icon(Icon::X, 12.0, style::DIM),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([2, 8])
+                    .style(style::choice(true))
+                    .on_press(Message::NewRepoChecked(r.id.clone(), false));
+                    chips = chips.push(tip(
+                        chip.boxed(),
+                        format!("{} · {}", r.path, tr::new_repo_chip_remove()),
+                    ));
+                }
+                c = c.push(chips.wrap().vertical_spacing(4).boxed());
+            }
+            if many {
+                c = c.push(
+                    text_input(tr::new_repos_search(), &f.repo_filter)
+                        .on_input(Message::NewRepoFilter)
+                        .size(12)
+                        .padding([5, 8])
+                        .style(style::input)
+                        .boxed(),
+                );
+            }
             let mut list: Column<El<'_>> = Column::new().spacing(3);
-            for r in &self.repos {
+            let shown = recent
+                .iter()
+                .filter(|r| new_session_repos::matches(&f.repo_filter, r));
+            let mut any = false;
+            for r in shown {
+                any = true;
                 let id = r.id.clone();
                 let checked = f.repos.contains(&r.id);
                 let mut line = row![
@@ -1340,7 +1405,22 @@ impl App {
                 }
                 list = list.push(line.boxed());
             }
-            c = c.push(list.boxed());
+            if !any && !self.repos.is_empty() {
+                list = list.push(
+                    text(tr::new_repos_search_none())
+                        .size(12)
+                        .color(style::DIM)
+                        .boxed(),
+                );
+            }
+            // At most `REPO_LIST_MAX_H` tall; longer lists scroll inside the dialog.
+            c = c.push(
+                scrollable(list)
+                    .width(Fill)
+                    .height(Length::Fit.max(REPO_LIST_MAX_H))
+                    .spacing(6)
+                    .boxed(),
+            );
             c = c.push(
                 text(if self.repos.is_empty() {
                     tr::no_repos_empty_workspace()
@@ -1375,8 +1455,7 @@ impl App {
                     .boxed(),
             );
             c = c.push(text(tr::original_repo_label()).size(12).font(style::bold()).boxed());
-            let choices: Vec<Choice> = self
-                .repos
+            let choices: Vec<Choice> = recent
                 .iter()
                 .map(|r| Choice {
                     key: r.id.clone(),
@@ -2764,8 +2843,7 @@ impl App {
                 } else {
                     space().height(0).boxed()
                 };
-                let mut c = column![
-                    text(tr::new_session()).size(18).font(style::bold()),
+                let body = column![
                     label(tr::agent_label()),
                     providers,
                     account_row,
@@ -2784,6 +2862,14 @@ impl App {
                         .padding([6, 8])
                         .style(style::input),
                     self.new_workspace_section(f),
+                ]
+                .spacing(8);
+                // The title and the buttons stay put; the fields between them scroll when the
+                // dialog would be taller than the window (`fit_up_to_room`: as tall as the
+                // fields, at most the room the title and buttons leave).
+                let mut c = column![
+                    text(tr::new_session()).size(18).font(style::bold()),
+                    scrollable(body).height(fit_up_to_room()).spacing(6),
                 ]
                 .spacing(8);
                 if let Some(e) = &f.error {
@@ -3164,7 +3250,10 @@ impl App {
         };
         opaque(
             mouse_area(
+                // The margin keeps a dialog clear of the window's edges when it is as tall as
+                // the window allows (the new-session dialog then scrolls its fields).
                 center(opaque(container(card).padding(20).style(style::modal_card)))
+                    .padding(24)
                     .style(style::backdrop),
             )
             .on_press(Message::CloseModal),

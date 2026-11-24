@@ -185,6 +185,8 @@ pub struct NewForm {
     pub refresh_base: bool,
     /// Base branch picked per repo id (origin's branch); missing = the repo's default.
     pub bases: std::collections::BTreeMap<String, String>,
+    /// The repo list's search box (shown from `new_session_repos::SEARCH_MIN_REPOS` repos).
+    pub repo_filter: String,
     pub error: Option<String>,
     pub busy: bool,
 }
@@ -738,6 +740,8 @@ pub enum Message {
     NewRepoChecked(String, bool),
     /// The repo of an original-repo session.
     NewOriginalRepo(String),
+    /// The repo list's search box.
+    NewRepoFilter(String),
     NewProvider(String),
     /// Account slug; `""` = the CLI's default login.
     NewAccount(String),
@@ -2380,7 +2384,7 @@ impl App {
                     .last_repo
                     .clone()
                     .filter(|r| self.repos.iter().any(|x| &x.id == r))
-                    .or_else(|| self.repos.first().map(|r| r.id.clone()));
+                    .or_else(|| self.repos_by_recent().first().map(|r| r.id.clone()));
                 self.modal = Some(Modal::NewSession(NewForm {
                     account: self.default_account(&provider),
                     provider,
@@ -2391,6 +2395,7 @@ impl App {
                     original_repo,
                     refresh_base: true,
                     bases: Default::default(),
+                    repo_filter: String::new(),
                     error: None,
                     busy: false,
                 }));
@@ -2415,6 +2420,7 @@ impl App {
                 })
             }
             Message::NewOriginalRepo(id) => self.with_new(|f| f.original_repo = Some(id)),
+            Message::NewRepoFilter(v) => self.with_new(|f| f.repo_filter = v),
             Message::NewRefreshBase(v) => self.with_new(|f| f.refresh_base = v),
             Message::NewBase(repo, b) => self.with_new(|f| {
                 f.bases.insert(repo, b);
