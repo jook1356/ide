@@ -216,6 +216,14 @@ pub trait AgentProvider: Send + Sync {
     fn prompt_input(&self) -> PromptInput {
         PromptInput::Lines
     }
+    /// The arguments that hand a new conversation its first prompt on the command line
+    /// (appended last; `prompt` is already cleaned, see [`prompt::clean_prompt`]). The CLI
+    /// then submits it itself once it is ready, after its start dialogs: nothing has to be
+    /// typed in at the right moment. `None`: the prompt is typed in when the CLI is at its
+    /// input (`session.send_prompt`). Default: `None`.
+    fn first_prompt_args(&self, _prompt: &str) -> Option<Vec<String>> {
+        None
+    }
 
     // ---- Accounts ----
 
@@ -477,6 +485,10 @@ pub struct SessionInput<'a> {
     pub conversation: Option<&'a str>,
     /// The agent bridge (`None`: not connected, e.g. a server without a daemon socket).
     pub bridge: Option<Bridge>,
+    /// The first prompt of a new session (a child's task): passed on the command line when
+    /// the provider takes one ([`AgentProvider::first_prompt_args`], see
+    /// [`Assembled::prompt_in_args`]).
+    pub first_prompt: Option<&'a str>,
 }
 
 impl<'a> SessionInput<'a> {
@@ -527,12 +539,19 @@ impl<'a> SessionInput<'a> {
             configuration,
             conversation: session.conversation.as_deref(),
             bridge: None,
+            first_prompt: None,
         }
     }
 
     /// The same input with the agent bridge.
     pub fn with_bridge(mut self, bridge: Option<Bridge>) -> Self {
         self.bridge = bridge;
+        self
+    }
+
+    /// The same input with a first prompt.
+    pub fn with_first_prompt(mut self, prompt: Option<&'a str>) -> Self {
+        self.first_prompt = prompt;
         self
     }
 }
@@ -546,7 +565,16 @@ pub struct Assembled {
     pub notes: Vec<String>,
     /// The conversation this launch starts or resumes (store it on the session), if known.
     pub conversation: Option<String>,
+    /// [`SessionInput::first_prompt`] is on the command line: do not type it in as well.
+    /// `false`: the provider takes none, the launch resumes a conversation, the prompt is
+    /// longer than [`MAX_ARG_PROMPT`] or the CLI runs through `cmd.exe` (a batch file, whose
+    /// command line cannot carry newlines and `& | < >` safely).
+    pub prompt_in_args: bool,
 }
+
+/// The longest first prompt passed on the command line (characters); a longer one is typed
+/// in (Windows limits a command line to 32767 characters, flags and paths included).
+pub const MAX_ARG_PROMPT: usize = 12_000;
 
 /// Build the launch spec of a session: account home -> begin -> conversation (new or resumed,
 /// providers with `Caps::resume`) -> (workspace sessions)
@@ -580,9 +608,11 @@ pub fn assemble(
         None => None,
     };
     provider.begin(&mut plan, account.as_ref());
+    let mut resumed = false;
     if provider.capabilities().resume {
         plan.conversation = match input.conversation {
             Some(id) if provider.resume_conversation(&mut plan, id, account.as_ref()) => {
+                resumed = true;
                 Some(id.to_owned())
             }
             _ => provider.new_conversation(&mut plan),
@@ -655,12 +685,27 @@ pub fn assemble(
     plan.set_env("COLORTERM", "truecolor");
     let notes = plan.notes.clone();
     let conversation = plan.conversation.clone();
-    let spec = provider.finish(plan, env)?;
+    let mut spec = provider.finish(plan, env)?;
+    // Last, after `finish` resolved the program: through `cmd.exe` the prompt stays out.
+    let prompt_args = input
+        .first_prompt
+        .filter(|_| !resumed && !runs_through_cmd(&spec))
+        .map(prompt::clean_prompt)
+        .filter(|p| !p.is_empty() && p.chars().count() <= MAX_ARG_PROMPT)
+        .and_then(|p| provider.first_prompt_args(&p));
+    let prompt_in_args = prompt_args.is_some();
+    spec.args.extend(prompt_args.into_iter().flatten());
     Ok(Assembled {
         spec,
         notes,
         conversation,
+        prompt_in_args,
     })
+}
+
+/// The spec runs a batch file through `cmd.exe` ([`ide_core::wrap_batch_file`]).
+fn runs_through_cmd(spec: &LaunchSpec) -> bool {
+    cfg!(windows) && spec.args.len() >= 3 && spec.args[..3] == ["/d", "/s", "/c"]
 }
 
 /// The spec of an account's login command (in `cwd`), or [`ide_core::Error::ProviderNoLogin`].

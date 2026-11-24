@@ -122,6 +122,7 @@ fn input<'a>(
         configuration: cfg,
         conversation: None,
         bridge: None,
+        first_prompt: None,
     }
 }
 
@@ -314,6 +315,47 @@ fn claude_resume() {
     let out = assemble(&Codex, &inp, &f.env).unwrap();
     assert_eq!(out.conversation, None);
     assert!(out.spec.env_remove.is_empty());
+}
+
+/// A child's first prompt goes last on the command line, after `--` (the start dialogs can no
+/// longer take it, as typed text could: seen 2026-11-24); only for a new conversation.
+#[test]
+fn first_prompt_on_the_command_line() {
+    let f = fixture("agents-first-prompt");
+    let acct = account(&f, "claude");
+    let cfg = Configuration::empty("default", "default");
+    let task = "  --help me\r\nfix \x1b[31mit\x07  ";
+    let inp = input(&f, Some(&acct), &cfg).with_first_prompt(Some(task));
+    for p in [&Claude as &dyn AgentProvider, &Codex] {
+        let out = assemble(p, &inp, &f.env).unwrap();
+        assert!(out.prompt_in_args, "{}", p.id());
+        let n = out.spec.args.len();
+        assert_eq!(out.spec.args[n - 2..], ["--", "--help me\nfix [31mit"], "{}: cleaned, last", p.id());
+    }
+    // None given, empty, or too long: nothing on the command line.
+    let none = input(&f, Some(&acct), &cfg);
+    let blank = input(&f, Some(&acct), &cfg).with_first_prompt(Some(" \r\n"));
+    let long = "x".repeat(crate::MAX_ARG_PROMPT + 1);
+    let too_long = input(&f, Some(&acct), &cfg).with_first_prompt(Some(&long));
+    for i in [&none, &blank, &too_long] {
+        let out = assemble(&Claude, i, &f.env).unwrap();
+        assert!(!out.prompt_in_args);
+        assert!(!out.spec.args.contains(&"--".to_owned()));
+    }
+    // Resuming a conversation: never again.
+    let fresh = assemble(&Claude, &none, &f.env).unwrap();
+    let id = fresh.conversation.unwrap();
+    let project = acct.dir.join("projects").join("C--some-cwd");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{id}.jsonl")), "{}\n").unwrap();
+    let mut resume = input(&f, Some(&acct), &cfg).with_first_prompt(Some("again"));
+    resume.conversation = Some(&id);
+    let out = assemble(&Claude, &resume, &f.env).unwrap();
+    assert!(out.spec.args.contains(&"--resume".to_owned()));
+    assert!(!out.prompt_in_args && !out.spec.args.contains(&"again".to_owned()));
+    // Providers that take none (a shell): typed in later.
+    let out = assemble(&crate::Shell, &inp, &f.env).unwrap();
+    assert!(!out.prompt_in_args);
 }
 
 #[test]

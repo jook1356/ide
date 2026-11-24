@@ -50,7 +50,7 @@ its own worktrees branched from the parent's, and the parent merges them back.
 |---|---|---|
 | `ide_list_related_sessions` | any | parent, siblings, children: id, title, mode, activity, repos / branches |
 | `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?}`: create, start, send the first prompt |
-| `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; a target the user stopped stays an error |
+| `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
 | `ide_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
 | `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); other CLIs: not supported yet |
 | `ide_merge_child` | parent | `{child, squash?}` -> per repo result |
@@ -86,7 +86,23 @@ provider's prompt input), never through tests (no prompts to real CLIs).
 `SessionInfo.parent` / `.shared`; `MergeResult` = `Merged` / `UpToDate` / `Conflicts{files}` /
 `Failed{error}`. Messages queued by `ide_send_to_session` (and a child's first prompt) are typed
 in with `session.send_prompt`'s input rules when the target is not working, not waiting for the
-user and its TUI is at its input (retried every screen tick, 0.7 s).
+user and its TUI is at its input (retried every screen tick, 0.7 s, after the screen was read).
+A child's first prompt goes on its command line instead when its provider takes one there
+(`AgentProvider::first_prompt_args`: Claude Code and Codex, `-- "<prompt>"`, appended last;
+audit `session.first_prompt_arg`): the CLI submits it itself after its start dialogs, so no
+timing is involved (Orca does the same). It is typed in as below when the provider takes none,
+the CLI runs through `cmd.exe` (a batch file: newlines and `& | < >` are unsafe there), or the
+cleaned prompt is longer than 12 000 characters (`MAX_ARG_PROMPT`). Later starts (resume)
+never pass it again.
+"At its input", for providers with screen rules: an explicit `idle` rule wins and no
+auto-answer dialog shows (`ScreenManifest::at_input`), for 1.5 s, and none of its dialogs was
+auto-answered within 1.5 s. Bracketed paste alone is not enough: Claude Code turns it on while
+its start dialogs (folder trust, one "Adding a new directory" per repository) still show, and a
+dialog took the typed prompt (seen 2026-11-24: two of four children stayed idle). A message for
+a session that is not running stays queued (it is typed in after its next start) instead of
+being dropped; `ide_list_related_sessions` shows each session's `queued_messages`.
+`ide_send_to_session` to a stopped child of the sender starts it (resuming its conversation),
+like a session waiting to be resumed after a server restart.
 
 ## Write lease of a shared folder
 

@@ -10,6 +10,7 @@
 //! | Instructions | `<scratch>/instructions.md` via `--append-system-prompt-file` |
 //! | Outside dirs | `--add-dir` (legacy worktrees, the repositories' git dirs) |
 //! | Session name | `-n <title>` |
+//! | First prompt | `-- "<prompt>"` (last; a child session's task, new conversations only) |
 //! | Hooks | `<scratch>/settings.json` (`{"hooks": ...}`) via `--settings`; exec form (`command` = the hook program, `args`), no shell (d) |
 //! | Resume | fresh: `--session-id <uuid>`; next start: `--resume <uuid>` if `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` follows `/clear` and `/resume` |
 //! | Inherited env | markers of a Claude Code that started the server (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, ...) are removed: with them the CLI runs as a child session and keeps no transcript (v 2.1.330) |
@@ -253,6 +254,12 @@ impl AgentProvider for Claude {
         crate::PromptInput::Paste {
             submit_delay_ms: crate::PASTE_SUBMIT_DELAY_MS,
         }
+    }
+    fn first_prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        // `claude [options] -- "<prompt>"`: the positional prompt starts the first turn once
+        // the start dialogs (folder trust) are answered. `--` ends the options: `--add-dir`
+        // takes several values and would swallow the prompt (as Orca does, issue #48072).
+        Some(vec!["--".into(), prompt.to_owned()])
     }
 
     fn transcript(
