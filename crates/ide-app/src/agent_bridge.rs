@@ -21,6 +21,10 @@ impl App {
             // Answered when the user decides (`approvals_ui.rs`).
             return self.approval_request(request, &args);
         }
+        if tool == ide_proto::browser::TAB_SITE || ide_proto::browser::TOOLS.contains(&tool.as_str()) {
+            // Answered when done (`browser_agent.rs`).
+            return self.agent_browser(request, session, tool, args);
+        }
         if tool == AGENT_TOOL_WIDGET {
             // Answered when done (after fetching the widget's info).
             return self.agent_widget(request, session, &args);

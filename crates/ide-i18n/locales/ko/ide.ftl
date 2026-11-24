@@ -1248,3 +1248,9 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 조작하려고 해요(열기, 클릭, 입력, 스크립트 실행).
+approval-browser-read = “{ $who }” 세션의 에이전트가 ide 브라우저에서 사이트 { $whom } 페이지를 읽으려고 해요(글, 콘솔, 스크린샷).
+approval-cap-browser-act = 브라우저에서 사이트 조작
+approval-cap-browser-read = 브라우저에서 사이트 읽기

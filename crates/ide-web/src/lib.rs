@@ -29,6 +29,8 @@
 //! modal dialogs).
 
 mod caption;
+pub mod cdp;
+mod devtools;
 mod events;
 mod gpu;
 mod input;
@@ -40,6 +42,7 @@ mod view;
 mod widget;
 
 pub use caption::enable_snap_layout;
+pub use devtools::{Awake, ConsoleEntry, DevTools};
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use owner::{set_window_owner, window_owner};
 pub use scheme::{

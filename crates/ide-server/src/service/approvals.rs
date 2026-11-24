@@ -17,8 +17,13 @@ pub(crate) const CAP_STEER: &str = "session.steer";
 pub(crate) const CAP_INTERRUPT: &str = "session.interrupt";
 
 impl UserCtx {
+    /// A target's name: a session's title; a site (browser control) names itself.
     fn title_of(&self, session: &str) -> String {
-        self.resolve_session(session).map(|s| s.title).unwrap_or_default()
+        match self.resolve_session(session) {
+            Ok(s) => s.title,
+            Err(_) if session.contains(':') => session.to_owned(),
+            Err(_) => String::new(),
+        }
     }
 
     /// May `requester` do `capability` to `target`? A kept grant answers at once; otherwise

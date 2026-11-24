@@ -420,6 +420,13 @@ pub fn wire_event(e: HookEvent) -> AgentHookEvent {
 
 /// The bridge's tools.
 pub fn tools() -> Vec<AgentTool> {
+    let mut all = core_tools();
+    // Browser control (`docs/browser-control.md`).
+    all.extend(crate::service::browser::tools());
+    all
+}
+
+fn core_tools() -> Vec<AgentTool> {
     vec![
         AgentTool {
             name: TOOL_SESSION.into(),
@@ -551,6 +558,7 @@ fn ok(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: false,
+        image: None,
     }
 }
 
@@ -558,6 +566,7 @@ fn err(text: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
         text: text.into(),
         is_error: true,
+        image: None,
     }
 }
 
@@ -813,6 +822,16 @@ pub async fn run_mcp_stdio() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A tool result as MCP `tools/call` content: the text, then the image if there is one
+/// (`{"type": "image", "data", "mimeType"}`).
+pub fn mcp_content(r: AgentToolResult) -> serde_json::Value {
+    let mut content = vec![serde_json::json!({"type": "text", "text": r.text})];
+    if let Some(img) = r.image {
+        content.push(serde_json::json!({"type": "image", "data": img.data, "mimeType": img.mime_type}));
+    }
+    serde_json::json!({"content": content, "isError": r.is_error})
+}
+
 fn rpc_error(id: serde_json::Value, code: i64, message: &str) -> serde_json::Value {
     serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
@@ -862,10 +881,7 @@ async fn handle_mcp(link: &AgentLink, msg: serde_json::Value) -> Option<serde_js
                 Ok(r) => r,
                 Err(e) => err(e),
             };
-            Ok(serde_json::json!({
-                "content": [{"type": "text", "text": r.text}],
-                "isError": r.is_error,
-            }))
+            Ok(mcp_content(r))
         }
         _ => Err((-32601, format!("method not found: {method}"))),
     };

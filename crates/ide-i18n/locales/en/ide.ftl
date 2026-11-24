@@ -1469,3 +1469,9 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+
+## Browser control (browser_agent.rs, approvals_ui.rs)
+approval-browser-act = The agent of “{ $who }” wants to use the site { $whom } in the ide browser (open, click, type, run scripts).
+approval-browser-read = The agent of “{ $who }” wants to read the site { $whom } in the ide browser (its text, console or a screenshot).
+approval-cap-browser-act = use the site in the browser
+approval-cap-browser-read = read the site in the browser

@@ -33,6 +33,7 @@ use crate::{def, fsops, git, scripts, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 mod approvals;
+pub(crate) mod browser;
 mod widgets;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -410,8 +411,9 @@ impl UserCtx {
         let ok = |v: serde_json::Value| ide_proto::AgentToolResult {
             text: serde_json::to_string_pretty(&v).expect("json"),
             is_error: false,
+            image: None,
         };
-        let err = |t: String| ide_proto::AgentToolResult { text: t, is_error: true };
+        let err = |t: String| ide_proto::AgentToolResult { text: t, is_error: true, image: None };
         let s = match self.resolve_session(session) {
             Ok(s) => s,
             Err(e) => return Some(err(format!("session not available: {e}"))),
@@ -776,12 +778,16 @@ impl UserCtx {
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
     /// asks the connected apps).
     pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        if ide_proto::browser::TOOLS.contains(&tool) {
+            return self.browser_tool(session, tool, args).await;
+        }
         if tool == crate::bridge::TOOL_WIDGET {
             return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
                 Ok(v) => self.widget_tool(session, &v).await,
                 Err(e) => ide_proto::AgentToolResult {
                     text: format!("invalid arguments: {e}"),
                     is_error: true,
+                    image: None,
                 },
             };
         }
@@ -792,6 +798,7 @@ impl UserCtx {
                     return ide_proto::AgentToolResult {
                         text: format!("invalid arguments: {e}"),
                         is_error: true,
+                        image: None,
                     };
                 }
             };
@@ -799,6 +806,7 @@ impl UserCtx {
                 return ide_proto::AgentToolResult {
                     text: why,
                     is_error: true,
+                    image: None,
                 };
             }
             let (me, session, tool) = (self.clone(), session.to_owned(), tool.to_owned());
@@ -809,6 +817,7 @@ impl UserCtx {
                 .unwrap_or_else(|| ide_proto::AgentToolResult {
                     text: "the tool failed".into(),
                     is_error: true,
+                    image: None,
                 });
         }
         // Apps subscribe to the notifications; agent connections do not.
