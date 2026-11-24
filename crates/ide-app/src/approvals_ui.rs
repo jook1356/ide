@@ -54,6 +54,7 @@ fn question(f: &ApprovalForm) -> String {
     match f.capability.as_str() {
         "session.steer" => tr::approval_steer(who, whom),
         "session.interrupt" => tr::approval_interrupt(who, whom),
+        "terminal.input" => tr::approval_terminal_input(who, whom),
         other => tr::approval_other(who, other, whom),
     }
 }
@@ -63,6 +64,7 @@ fn capability_text(c: &str) -> String {
     match c {
         "session.steer" => tr::approval_cap_steer(),
         "session.interrupt" => tr::approval_cap_interrupt(),
+        "terminal.input" => tr::approval_cap_terminal_input(),
         other => other.to_owned(),
     }
 }

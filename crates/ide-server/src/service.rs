@@ -33,6 +33,7 @@ use crate::{def, fsops, git, scripts, search};
 pub const SERVER_CONFIG_FILE: &str = "server.json";
 
 mod approvals;
+mod terminals;
 mod widgets;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -776,6 +777,9 @@ impl UserCtx {
     /// Agent bridge: carry out a tool call of `session`'s agent (the daemon answers itself or
     /// asks the connected apps).
     pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
+        if let Some(r) = self.terminal_tool(session, tool, args).await {
+            return r;
+        }
         if tool == crate::bridge::TOOL_WIDGET {
             return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
                 Ok(v) => self.widget_tool(session, &v).await,
@@ -3426,7 +3430,7 @@ impl UserCtx {
                     format!("{shell_name} {}", n + 1)
                 }
             });
-        let host = TermHost::new(&id, DEFAULT_COLS, DEFAULT_ROWS, self.events.clone());
+        let host = TermHost::with_scrollback(&id, DEFAULT_COLS, DEFAULT_ROWS, self.events.clone(), terminals::SCROLLBACK);
         self.uterm_spawn(&host, &program, &args, &cwd)?;
         let entry = UTermEntry {
             id: id.clone(),
@@ -3442,6 +3446,8 @@ impl UserCtx {
         let info = Self::uterm_info(&entry);
         u.list.push(entry);
         drop(u);
+        // A terminal id given again (after a restart) is a new terminal: no grants carry over.
+        self.approvals_forget_target(&id);
         self.audit("uterm.open", &format!("{id} {}", info.command));
         self.notify(Notify::UTermsChanged {
             session: session.to_owned(),
@@ -3624,6 +3630,7 @@ impl UserCtx {
                 let (session, host) = self.uterm_find(&id)?;
                 host.kill();
                 self.uterms.lock().unwrap().list.retain(|t| t.id != id);
+                self.approvals_forget_target(&id);
                 self.audit("uterm.remove", &id);
                 self.notify(Notify::UTermsChanged { session });
                 Ok(Response::Unit)

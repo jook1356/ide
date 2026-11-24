@@ -54,6 +54,11 @@ pub const TOOL_RELEASE_WRITE: &str = "ide_release_write_access";
 pub const TOOL_READ_SESSION: &str = "ide_read_session";
 pub const TOOL_SENT_MESSAGES: &str = "ide_sent_messages";
 
+/// Terminal tools (`docs/terminals.md`), answered by the daemon (`service/terminals.rs`).
+pub const TOOL_TERMINAL_LIST: &str = "ide_terminal_list";
+pub const TOOL_TERMINAL_READ: &str = "ide_terminal_read";
+pub const TOOL_TERMINAL_INPUT: &str = "ide_terminal_input";
+
 /// A tool of the session family.
 pub fn is_family_tool(tool: &str) -> bool {
     [
@@ -492,6 +497,37 @@ pub fn tools() -> Vec<AgentTool> {
                           {id})."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["list","cancel"]},"id":{"type":"integer","description":"The message id, for cancel."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_TERMINAL_LIST.into(),
+            description: "List the user's terminals of this session (the ones in ide's terminal \
+                          panel, not your own): id, title, command, folder, state, and the TCP \
+                          ports their processes listen on. `session`: a related session's \
+                          terminals instead (read only)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"session":{"type":"string","description":"A related session's id (default: this session)."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_TERMINAL_READ.into(),
+            description: "Read a terminal of this session or of a related session: its visible \
+                          screen as text and up to `lines` earlier lines that scrolled above it \
+                          (default 50, at most 2000; 0 = the screen only)."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"terminal":{"type":"string","description":"The terminal id (ide_terminal_list)."},"lines":{"type":"integer","description":"Scrollback lines above the screen (default 50)."}},"required":["terminal"],"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_TERMINAL_INPUT.into(),
+            description: "Type into one of this session's terminals: `text` as typed (a line \
+                          break presses Enter), then `keys` by name (enter, tab, esc, \
+                          backspace, up, down, left, right, home, end, pageup, pagedown, \
+                          f1-f12, ctrl+c, alt+f, shift+tab, a single character, ...). The user \
+                          is asked to allow it first. Ctrl+C stops a running command: it is \
+                          input too. Read the result with ide_terminal_read."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"terminal":{"type":"string","description":"The terminal id (ide_terminal_list)."},"text":{"type":"string"},"keys":{"type":"array","items":{"type":"string"},"description":"Key names pressed after the text, e.g. [\"enter\"] or [\"ctrl+c\"]."}},"required":["terminal"],"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {

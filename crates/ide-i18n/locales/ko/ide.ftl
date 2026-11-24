@@ -1248,3 +1248,7 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = 항상
 approvals-until-restart = ide 서버가 다시 시작될 때까지
 approvals-revoke = 취소
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = “{ $who }” 세션의 에이전트가 “{ $whom }” 터미널에 입력하려고 해요.
+approval-cap-terminal-input = 터미널에 입력

@@ -1469,3 +1469,7 @@ approvals-row = { $who } → { $whom }: { $what }
 approvals-always = Always
 approvals-until-restart = Until the ide server restarts
 approvals-revoke = Revoke
+
+## Terminals (agent terminal tools: approvals_ui.rs)
+approval-terminal-input = The agent of “{ $who }” wants to type into the terminal “{ $whom }”.
+approval-cap-terminal-input = type into a terminal
