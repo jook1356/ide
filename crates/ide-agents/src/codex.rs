@@ -116,7 +116,7 @@ impl AgentProvider for Codex {
         HookCaps {
             status: Support::Native,
             guard_edits: Support::Native,
-            guard_shell: Support::Unsupported,
+            guard_shell: Support::Native,
         }
     }
 
@@ -158,7 +158,7 @@ impl AgentProvider for Codex {
                 "hooks": [{
                     "type": "command",
                     "command": hook_command(program, event),
-                    "timeout": 10,
+                    "timeout": crate::hooks::hook_timeout_secs(event),
                 }]
             });
             if let Some(m) = matcher {
@@ -229,7 +229,8 @@ impl AgentProvider for Codex {
                             .collect();
                         ToolUse::Edit { tool, paths }
                     }
-                    "Bash" | "exec_command" | "shell" => ToolUse::Shell {
+                    "Bash" | "exec_command" | "shell" | "PowerShell" => ToolUse::Shell {
+                        cwd: Some(s("cwd")).filter(|c| !c.is_empty()).map(str::to_owned),
                         command: ti
                             .get("command")
                             .map(|c| match c {
@@ -338,8 +339,9 @@ const HOOK_EVENTS: [(&str, Option<&str>); 5] = [
     ("UserPromptSubmit", None),
     ("Stop", None),
     ("PermissionRequest", None),
-    // File edits only (every hook run is a process start; shells are not guarded).
-    ("PreToolUse", Some("apply_patch|Edit|Write")),
+    // File edits and shell commands (writes outside the session need the user's approval,
+    // `docs/write-guard.md`; every hook run is a process start).
+    ("PreToolUse", Some("apply_patch|Edit|Write|Bash|exec_command|shell|PowerShell")),
 ];
 
 /// What marks ide's entries in `hooks.json` (their command runs the hook program for Codex).

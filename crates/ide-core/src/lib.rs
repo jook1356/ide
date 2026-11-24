@@ -54,6 +54,7 @@ pub mod slug;
 pub mod widget;
 pub mod workspace;
 pub mod worktree;
+pub mod write_guard;
 
 pub use account::{Account, AccountStore};
 pub use configuration::{

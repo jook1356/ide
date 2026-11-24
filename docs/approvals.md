@@ -30,6 +30,7 @@ asking for its own tools (shell, edits) as before.
 | Read, own session or its family | `ide_session`, `ide_list_related_sessions`, `ide_read_session`, `ide_sent_messages` | none |
 | Act within the family, as before | `ide_send_to_session` (queued), create / merge / sync children, write access | none |
 | Act on another session's running turn, or outside ide | `ide_send_to_session` `steer` / `interrupt`; later terminal input, browser control | **asked** |
+| Write outside the session (another checkout, another branch, another folder) | file edits and shell commands caught by the CLI's tool hook (`docs/write-guard.md`) | **asked**, per folder (`folder.write`) |
 
 Adding a feature means picking its tier and, for asked ones, a capability name and the target
 key.

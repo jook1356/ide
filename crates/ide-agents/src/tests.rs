@@ -938,10 +938,11 @@ fn claude_hooks() {
         }))
     );
     assert_eq!(
-        p("PreToolUse", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}})),
+        p("PreToolUse", serde_json::json!({"tool_name": "Bash", "cwd": "C:/w", "tool_input": {"command": "ls"}})),
         Some(HookEvent::PreTool(ToolUse::Shell {
             tool: "Bash".into(),
-            command: "ls".into()
+            command: "ls".into(),
+            cwd: Some("C:/w".into()),
         }))
     );
     assert_eq!(
@@ -1021,7 +1022,7 @@ fn codex_integration() {
     assert_eq!(stop.len(), 2, "{v}");
     assert_eq!(stop[0]["hooks"][0]["command"], "notify-me");
     let pre = &v["hooks"]["PreToolUse"][0];
-    assert_eq!(pre["matcher"], "apply_patch|Edit|Write");
+    assert_eq!(pre["matcher"], "apply_patch|Edit|Write|Bash|exec_command|shell|PowerShell");
     let cmd = pre["hooks"][0]["command"].as_str().unwrap();
     assert!(cmd.ends_with(" hook --provider codex PreToolUse"), "{cmd}");
     assert!(cmd.starts_with('"'), "a path with blanks is quoted: {cmd}");

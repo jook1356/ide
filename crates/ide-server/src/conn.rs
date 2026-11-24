@@ -402,8 +402,19 @@ async fn serve_agent(
             Request::Ping => send(id, Ok(Response::Pong)),
             Request::AgentTools => send(id, Ok(Response::AgentTools(crate::bridge::tools()))),
             Request::AgentHook { event } => {
-                let deny = ctx.agent_hook(&agent.session, event);
-                send(id, Ok(Response::AgentHookDecision(deny)));
+                use ide_proto::AgentHookEvent as E;
+                if matches!(event, E::PreEdit { .. } | E::PreShell { .. }) {
+                    // May wait for the user (write guard): off the connection's loop.
+                    let (ctx, mux, session) = (ctx.clone(), mux.clone(), agent.session.clone());
+                    tokio::spawn(async move {
+                        let deny = ctx.agent_tool_hook(&session, event).await;
+                        let result = Ok(Response::AgentHookDecision(deny));
+                        let _ = mux.send_rpc(&RpcMessage::Response { id, result }.encode());
+                    });
+                } else {
+                    let deny = ctx.agent_hook(&agent.session, event);
+                    send(id, Ok(Response::AgentHookDecision(deny)));
+                }
             }
             Request::AgentCall { tool, args } => {
                 let (ctx, mux, session) = (ctx.clone(), mux.clone(), agent.session.clone());

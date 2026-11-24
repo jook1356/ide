@@ -103,6 +103,16 @@ impl Grants {
             .any(|g| g.capability == capability && g.requester == requester && g.target == target)
     }
 
+    /// Is writing `folder` allowed to `requester` by a grant of `capability` on that folder or
+    /// one above it (folder grants, `docs/write-guard.md`)?
+    pub fn allows_folder(&self, capability: &str, requester: &str, folder: &std::path::Path) -> bool {
+        self.list.iter().any(|g| {
+            g.capability == capability
+                && g.requester == requester
+                && crate::write_guard::covers(std::path::Path::new(&g.target), folder)
+        })
+    }
+
     /// Keep an answer (`Once` keeps nothing). An existing grant of the same key is replaced.
     pub fn record(
         &mut self,

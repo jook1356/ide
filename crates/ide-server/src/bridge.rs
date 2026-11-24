@@ -409,8 +409,8 @@ pub fn wire_event(e: HookEvent) -> AgentHookEvent {
         HookEvent::Stopped => AgentHookEvent::Stopped,
         HookEvent::NeedsInput { permission } => AgentHookEvent::NeedsInput { permission },
         HookEvent::PreTool(ToolUse::Edit { tool, paths }) => AgentHookEvent::PreEdit { tool, paths },
-        HookEvent::PreTool(ToolUse::Shell { tool, command }) => {
-            AgentHookEvent::PreShell { tool, command }
+        HookEvent::PreTool(ToolUse::Shell { tool, command, cwd }) => {
+            AgentHookEvent::PreShell { tool, command, cwd }
         }
         HookEvent::PreTool(ToolUse::Other { tool }) => AgentHookEvent::PreTool { tool },
         HookEvent::BackgroundStarted { id } => AgentHookEvent::BackgroundStarted { id },
@@ -716,6 +716,9 @@ pub fn screen_activity(s: ide_agents::screen::ScreenState) -> AgentActivity {
 
 /// How long a hook waits for the daemon (a hook blocks the agent's tool call).
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a tool hook waits once connected: a write outside the session waits for the
+/// user's answer (`docs/write-guard.md`; the daemon asks for up to 5 minutes).
+const TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(320);
 
 /// `ide-server hook --provider <id> <event>`: run by the agent CLI for one hook (stdin: the
 /// CLI's hook input). The provider turns it into an event, the daemon answers, the provider
@@ -754,13 +757,16 @@ pub async fn run_hook(args: &[String]) -> i32 {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let decision = match (var(SESSION_ENV), var(TOKEN_ENV), var(SOCKET_ENV)) {
         (Some(s), Some(t), Some(k)) => {
-            let ask = async {
-                let link = AgentLink::connect(&k, &s, &t).await;
-                link.hook(wire_event(ev)).await
+            let wait = match &ev {
+                HookEvent::PreTool(ToolUse::Edit { .. } | ToolUse::Shell { .. }) => TOOL_HOOK_TIMEOUT,
+                _ => HOOK_TIMEOUT,
             };
-            match tokio::time::timeout(HOOK_TIMEOUT, ask).await {
-                Ok(Ok(Some(reason))) => HookDecision::Deny { reason },
-                _ => HookDecision::NoOpinion,
+            match tokio::time::timeout(HOOK_TIMEOUT, AgentLink::connect(&k, &s, &t)).await {
+                Ok(link) => match tokio::time::timeout(wait, link.hook(wire_event(ev))).await {
+                    Ok(Ok(Some(reason))) => HookDecision::Deny { reason },
+                    _ => HookDecision::NoOpinion,
+                },
+                Err(_) => HookDecision::NoOpinion,
             }
         }
         _ => HookDecision::NoOpinion,

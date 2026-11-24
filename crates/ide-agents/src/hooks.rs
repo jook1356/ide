@@ -44,8 +44,12 @@ pub enum HookEvent {
 pub enum ToolUse {
     /// A file edit (write, edit, patch) of these paths (absolute when the CLI says so).
     Edit { tool: String, paths: Vec<String> },
-    /// A shell command.
-    Shell { tool: String, command: String },
+    /// A shell command, run in `cwd` when the CLI says.
+    Shell {
+        tool: String,
+        command: String,
+        cwd: Option<String>,
+    },
     /// Anything else.
     Other { tool: String },
 }
@@ -96,6 +100,13 @@ pub struct HookTargets {
     /// The bridge's MCP server: the CLI may run its tools without its own permission prompt,
     /// ide asks for what needs asking (`docs/approvals.md`). `None` = nothing pre-allowed.
     pub trusted_mcp: Option<String>,
+}
+
+/// How long a hook may run, in seconds: `PreToolUse` waits for the user's answer to a write
+/// outside the session (`docs/write-guard.md`; the daemon asks for up to 5 minutes), the others
+/// only report.
+pub fn hook_timeout_secs(event: &str) -> u64 {
+    if event == "PreToolUse" { 330 } else { 10 }
 }
 
 impl HookTargets {

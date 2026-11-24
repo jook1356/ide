@@ -54,6 +54,8 @@ fn question(f: &ApprovalForm) -> String {
     match f.capability.as_str() {
         "session.steer" => tr::approval_steer(who, whom),
         "session.interrupt" => tr::approval_interrupt(who, whom),
+        // The target is the folder itself (`docs/write-guard.md`).
+        "folder.write" => tr::approval_folder_write(who, whom),
         other => tr::approval_other(who, other, whom),
     }
 }
@@ -63,6 +65,7 @@ fn capability_text(c: &str) -> String {
     match c {
         "session.steer" => tr::approval_cap_steer(),
         "session.interrupt" => tr::approval_cap_interrupt(),
+        "folder.write" => tr::approval_cap_folder_write(),
         other => other.to_owned(),
     }
 }
