@@ -1685,7 +1685,7 @@ impl App {
     }
 
     /// The default account for a new session of `provider`: its first account.
-    fn default_account(&self, provider: &str) -> Option<String> {
+    pub(crate) fn default_account(&self, provider: &str) -> Option<String> {
         self.provider(provider)
             .filter(|p| p.caps.accounts)
             .and_then(|_| self.accounts.iter().find(|a| a.provider == provider))

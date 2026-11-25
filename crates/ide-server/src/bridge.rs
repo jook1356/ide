@@ -472,7 +472,10 @@ fn core_tools() -> Vec<AgentTool> {
         },
         AgentTool {
             name: TOOL_CREATE_CHILD.into(),
-            description: "Create and start a child session of this session (same agent). \
+            description: "Create and start a child session of this session. It runs this \
+                          session's agent unless `agent` (a provider id such as `claude` or \
+                          `codex`), `account` (an account name of that agent, `default` = the \
+                          CLI's own login) or `profile` (a profile name) say otherwise. \
                           `shared: true` works in this session's folder and worktrees (for \
                           reviews, research, questions); otherwise the child gets its own \
                           worktrees of `repos` (default: all of this session's), each branched \
@@ -480,7 +483,7 @@ fn core_tools() -> Vec<AgentTool> {
                           with ide_merge_child. `prompt` is typed into the child when its agent \
                           is ready. Children go at most two levels below the first session."
                 .into(),
-            input_schema: r#"{"type":"object","properties":{"title":{"type":"string"},"shared":{"type":"boolean"},"repos":{"type":"array","items":{"type":"string"},"description":"Repository names of this session."},"prompt":{"type":"string","description":"The child's first task."}},"additionalProperties":false}"#
+            input_schema: r#"{"type":"object","properties":{"title":{"type":"string"},"shared":{"type":"boolean"},"repos":{"type":"array","items":{"type":"string"},"description":"Repository names of this session."},"prompt":{"type":"string","description":"The child's first task."},"agent":{"type":"string","description":"Provider id; default: this session's."},"account":{"type":"string","description":"Account of that agent; default: this session's (same agent) or its first account."},"profile":{"type":"string","description":"Profile (configuration) name; default: this session's."}},"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {

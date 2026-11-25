@@ -55,7 +55,7 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
 /// As wide as the content, but never more than the room a row leaves after its fixed-size
 /// siblings (iced's `Length::Fluid(Constraint::Max)`; `iced::length` is not re-exported, and
 /// stacking `Fit` onto a max-bounded `Fill` yields exactly that length).
-fn fit_up_to_room() -> Length {
+pub(crate) fn fit_up_to_room() -> Length {
     Length::Fit.stack(Length::Fill.max(f32::INFINITY))
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: Strin
     tip(b.boxed(), label)
 }
 
-fn label<'a>(s: String) -> El<'a> {
+pub(crate) fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
 }
 
@@ -2601,7 +2601,7 @@ impl App {
     // ------------------------------------------------------------------ modals
 
     /// Configurations as pick-list entries.
-    fn config_choices(&self) -> Vec<Choice> {
+    pub(crate) fn config_choices(&self) -> Vec<Choice> {
         self.configs
             .iter()
             .map(|c| Choice {

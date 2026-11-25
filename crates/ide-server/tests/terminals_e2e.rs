@@ -152,7 +152,7 @@ async fn terminal_tools() {
     .unwrap();
     let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
     let (p, _) = c.create_session(shell_session(vec![id1.clone()], "P")).await.unwrap();
-    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", false, 80, 24).await.unwrap();
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", None, false, 80, 24).await.unwrap();
     let (u, _) = c.create_session(shell_session(vec![id1.clone()], "U")).await.unwrap();
     // cmd on Windows (fast to start), the login shell elsewhere.
     let shell = cfg!(windows).then(|| "cmd".to_owned());
