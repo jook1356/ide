@@ -116,6 +116,7 @@ fn input<'a>(
             root: f.cwd.clone(),
             repos: Vec::new(),
             scratch: f.t.0.join("data").join("sessions").join("s1").join("agent"),
+            extra_dirs: Vec::new(),
             guidance: None,
             shared_root: false,
         },
@@ -1280,6 +1281,35 @@ fn claude_background_tasks() {
     );
     assert_eq!(stop(serde_json::json!({"transcript_path": t.0.join("gone.jsonl")})), Some(HookEvent::Stopped));
     assert_eq!(stop(serde_json::json!({"transcript_path": ""})), Some(HookEvent::Stopped));
+}
+
+/// A handoff export starts at the last compaction (its summary first), keeps texts whole,
+/// and reads as Markdown.
+#[test]
+fn claude_handoff_transcript() {
+    let long = "y".repeat(5000);
+    let lines = [
+        r#"{"type":"user","message":{"role":"user","content":"before the first compaction"},"timestamp":"t0"}"#.to_owned(),
+        r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}"#.to_owned(),
+        r#"{"type":"user","message":{"role":"user","content":"old summary"}}"#.to_owned(),
+        r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}"#.to_owned(),
+        r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued. Summary: x"},"timestamp":"t5"}"#.to_owned(),
+        format!(r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"{long}"}},{{"type":"tool_use","name":"Read","input":{{"file":"a"}}}}]}},"timestamp":"t6"}}"#),
+    ]
+    .join("\n");
+    let (entries, compacted) = crate::claude::handoff_entries(&lines);
+    assert!(compacted);
+    let roles: Vec<&str> = entries.iter().map(|e| e.role.as_str()).collect();
+    assert_eq!(roles, ["user", "assistant", "tool"]);
+    assert!(entries[0].text.starts_with("This session is being continued"));
+    assert_eq!(entries[1].text, long, "texts are kept whole");
+    let md = crate::HandoffTranscript { entries, compacted }.markdown("claude", "c1");
+    assert!(md.contains("last compaction") && md.contains("## user · t5") && md.contains("> call Read"));
+    assert!(!md.contains("before the first compaction") && !md.contains("old summary"));
+
+    let (all, compacted) = crate::claude::handoff_entries(r#"{"type":"user","message":{"role":"user","content":"hi"}}"#);
+    assert!(!compacted);
+    assert_eq!(all.len(), 1);
 }
 
 #[test]

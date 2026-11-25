@@ -555,6 +555,8 @@ pub enum Modal {
     AddProfile,
     /// 하위 세션 만들기 (`family_ui.rs`).
     NewChild(crate::family_ui::ChildForm),
+    /// 세션 인수인계 (`handoff_ui.rs`).
+    Handoff(crate::handoff_ui::HandoffForm),
     /// The session list's edit mode: delete the checked sessions (`session_edit.rs`).
     BulkDelete(crate::session_edit::BulkDeleteForm),
     /// The profiles / repos / widgets list's edit mode: delete the checked items (`list_edit.rs`).
@@ -959,6 +961,8 @@ pub enum Message {
     SessionAct(crate::session_menu::SessionAct),
     /// Session families (`family_ui.rs`).
     Family(crate::family_ui::FamilyMsg),
+    /// Session handoff (`handoff_ui.rs`).
+    Handoff(crate::handoff_ui::HandoffMsg),
     /// The session list's edit mode (`session_edit.rs`).
     SessionEdit(crate::session_edit::EditMsg),
     /// The profiles / repos / widgets list's edit mode (`list_edit.rs`).
@@ -2170,6 +2174,7 @@ impl App {
                 rescan,
             } => self.on_fs_notify(&session, &repo, Some((paths, rescan))),
             Notify::GitChanged { session, repo } => self.on_fs_notify(&session, &repo, None),
+            Notify::Handoff { session, result } => self.handoff_ended(session, result),
             // Routed to the `SearchStream`s by the client; late ones are dropped.
             Notify::SearchHits { .. } | Notify::SearchDone { .. } => Task::none(),
         }
@@ -2721,6 +2726,7 @@ impl App {
                     Some(Modal::Close(f)) => f.busy,
                     Some(Modal::SessionRepos(f)) => f.busy,
                     Some(Modal::NewChild(f)) => f.busy,
+                    Some(Modal::Handoff(f)) => f.busy,
                     Some(Modal::ListDelete(f)) => f.busy,
                     Some(Modal::Changes(f)) => f.busy,
                     Some(Modal::Footer(f)) => f.busy(),
@@ -3944,6 +3950,7 @@ impl App {
             }
             Message::SessionAct(a) => self.on_session_act(a),
             Message::Family(m) => self.on_family(m),
+            Message::Handoff(m) => self.on_handoff(m),
             Message::SessionEdit(m) => self.on_session_edit(m),
             Message::ListEdit(m) => self.on_list_edit(m),
             Message::Update(m) => self.on_update(m),

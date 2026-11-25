@@ -33,6 +33,7 @@ mod i18n;
 mod icons;
 mod agent_bridge;
 mod family_ui;
+mod handoff_ui;
 mod self_update;
 mod old_server;
 mod approvals_ui;

@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 22;
+pub const PROTO_VERSION: u32 = 23;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -354,6 +354,53 @@ pub struct SessionInfo {
     /// Kept across server restarts (`docs/branch-badge.md`).
     #[serde(default)]
     pub branch: Option<BranchBadge>,
+    /// A handoff to a new conversation is running (`docs/session-handoff.md`).
+    #[serde(default)]
+    pub handoff: Option<HandoffStatus>,
+}
+
+/// How a session handoff gets the context to the new conversation (`session.handoff`,
+/// `docs/session-handoff.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffMethod {
+    /// `Previous` when the old agent can write it, else `Summarize`; a failed `Previous`
+    /// falls back to `Summarize` when the transcript can be read.
+    #[default]
+    Auto,
+    /// The old conversation writes the handoff document.
+    Previous,
+    /// The new conversation writes the handoff document from the old transcript.
+    Summarize,
+    /// The new conversation reads the old transcript, no document.
+    Transcript,
+}
+
+/// Where a running handoff is (`SessionInfo::handoff`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffPhase {
+    /// Waiting for the old agent to be at its input (started / resumed, or ending its turn).
+    Waiting,
+    /// The old agent writes the handoff document.
+    Writing,
+    /// The new conversation is being started.
+    Starting,
+}
+
+/// A running handoff (`SessionInfo::handoff`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffStatus {
+    /// The method in use (`Auto` resolved).
+    pub method: HandoffMethod,
+    pub phase: HandoffPhase,
+}
+
+/// How a handoff ended (`Notify::Handoff`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffResult {
+    /// The new conversation started; `method` made the context (after a fallback: `Summarize`).
+    Done { method: HandoffMethod },
+    /// Nothing changed (the old conversation stays).
+    Failed { error: ProtoError },
 }
 
 /// The state of a session's repos for the session list's branch badge, aggregated over the
@@ -744,6 +791,19 @@ pub enum Request {
     },
     /// Merge the parent's branches into child `id`'s worktrees (`Merges`).
     SessionSyncParent {
+        id: String,
+    },
+    /// Hand session `id` off to a new conversation (`Session`, at once; the result comes as
+    /// `Notify::Handoff`). `agent`: the new conversation's provider, account and configuration
+    /// (`None` = the session's). `docs/session-handoff.md`.
+    SessionHandoff {
+        id: String,
+        method: HandoffMethod,
+        #[serde(default)]
+        agent: Option<ChildAgent>,
+    },
+    /// Drop session `id`'s running handoff (`Session`); the old conversation stays.
+    SessionHandoffCancel {
         id: String,
     },
     /// An account's integration (`Integration`): its state, install or uninstall (only the
@@ -1364,6 +1424,8 @@ impl Request {
             Request::SessionCreateChild { .. } => "session.create_child",
             Request::SessionMergeChild { .. } => "session.merge_child",
             Request::SessionSyncParent { .. } => "session.sync_parent",
+            Request::SessionHandoff { .. } => "session.handoff",
+            Request::SessionHandoffCancel { .. } => "session.handoff_cancel",
             Request::AccountIntegration { .. } => "account.integration",
             Request::AgentTools => "agent.tools",
             Request::AgentCall { .. } => "agent.call",
@@ -1640,6 +1702,11 @@ pub enum Notify {
     },
     /// The session list changed (create, delete, rename); re-fetch with `SessionList`.
     SessionsChanged,
+    /// A session's handoff (`session.handoff`) ended.
+    Handoff {
+        session: String,
+        result: HandoffResult,
+    },
     /// A session's branch badge was checked again and changed (`SessionInfo::branch`).
     Branch {
         session: String,

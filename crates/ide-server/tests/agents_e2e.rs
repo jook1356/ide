@@ -199,7 +199,8 @@ async fn claude_and_codex_specs_from_a_configuration() {
             .unwrap();
         let ctx = server.authorize(server.user()).unwrap();
         let session = ctx.resolve_session(&s.id).unwrap();
-        let spec = ctx.launch_spec(&session).unwrap();
+        let mut spec = ctx.launch_spec(&session).unwrap();
+        handoff_dir_passed(&mut spec.args, &data, &s.id);
         let scratch = data.join("sessions").join(&s.id).join("agent");
         let acct_dir = data.join("accounts").join(provider).join("team");
         let env = |k: &str| {
@@ -293,7 +294,8 @@ async fn claude_and_codex_specs_from_a_configuration() {
             .await
             .unwrap();
         let root = PathBuf::from(&s.root);
-        let spec = ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap();
+        let mut spec = ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap();
+        handoff_dir_passed(&mut spec.args, &data, &s.id);
         assert!(ide_core::same_path(&spec.cwd, &root));
         let (skills_dir, guide) = if provider == "claude" {
             (".claude", "CLAUDE.md")
@@ -326,4 +328,15 @@ async fn claude_and_codex_specs_from_a_configuration() {
     );
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The session's handoff folder (`docs/session-handoff.md`) is passed with `--add-dir`;
+/// removed from `args` so the rest can be compared.
+fn handoff_dir_passed(args: &mut Vec<String>, data: &Path, session: &str) {
+    let dir = data.join("sessions").join(session).join("handoff");
+    let at = args
+        .windows(2)
+        .position(|w| w[0] == "--add-dir" && ide_core::same_path(Path::new(&w[1]), &dir))
+        .unwrap_or_else(|| panic!("no --add-dir {}: {args:?}", dir.display()));
+    args.drain(at..at + 2);
 }

@@ -128,5 +128,10 @@ owner, i.e. the parent, by default; `SessionInfo.writer`, ✎ in the list).
 - Codex: its hooks are not registered yet (`docs/agent-bridge.md`), so its edits are not refused;
   it gets the same guidance.
 
+## Handoff
+
+A parent (or any agent session) can hand its conversation off to a new one without
+changing the family: `docs/session-handoff.md`.
+
 ## Later
 - Reading Codex conversations (`CODEX_HOME/sessions/.../rollout-*.jsonl`, once its conversation id is recorded).

@@ -210,6 +210,10 @@ pub struct Session {
     /// start resumes it when the provider can (`AgentProvider::resume_conversation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// Conversations this session had before a handoff replaced them, oldest first, at most
+    /// [`MAX_PREVIOUS_CONVERSATIONS`] (`docs/session-handoff.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_conversations: Vec<PreviousConversation>,
     /// The process was running when the server last went away (set at start, cleared when the
     /// user stops it or it exits by itself): after a server start a client resumes it when the
     /// user opens the session (the server does not restart it by itself).
@@ -233,6 +237,24 @@ pub struct Session {
     /// Legacy single-repo `branch` (read only, for migration).
     #[serde(default, rename = "branch", skip_serializing)]
     pub legacy_branch: Option<String>,
+}
+
+/// Most [`Session::previous_conversations`] kept.
+pub const MAX_PREVIOUS_CONVERSATIONS: usize = 20;
+
+/// A conversation a handoff replaced ([`Session::previous_conversations`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousConversation {
+    /// Provider id it ran on.
+    pub provider: String,
+    /// Account slug it ran on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The CLI's conversation id (`None`: none was recorded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// When it was replaced, Unix seconds.
+    pub replaced_at: u64,
 }
 
 /// How far a session's title is automatic (`docs/session-titles.md`).
@@ -300,6 +322,7 @@ impl Session {
             parent: None,
             shared: false,
             conversation: None,
+            previous_conversations: Vec::new(),
             autostart: false,
             auto_title: AutoTitle::Off,
             legacy_profile: None,

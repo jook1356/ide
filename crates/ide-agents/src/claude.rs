@@ -170,6 +170,34 @@ fn result_text(c: &serde_json::Value) -> String {
 /// assistant's texts, tool calls and results (shortened); subagent (`isSidechain`) and meta
 /// records, thinking and other record types are left out. The last `limit` entries.
 pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::TranscriptEntry> {
+    let mut out = parse_entries(jsonl, TEXT_MAX, TOOL_MAX);
+    let skip = out.len().saturating_sub(limit);
+    out.split_off(skip)
+}
+
+/// Longest tool call / result in a handoff export (texts are kept whole).
+const HANDOFF_TOOL_MAX: usize = 1000;
+
+/// The transcript for a session handoff (`docs/session-handoff.md`): from the last compaction
+/// on (`{"type":"system","subtype":"compact_boundary"}`, followed by the summary as a user
+/// record with `isCompactSummary`; the records before it stay in the file but the model no
+/// longer had them), texts whole, tool calls and results shortened. `bool`: a compaction was
+/// found.
+pub(crate) fn handoff_entries(jsonl: &str) -> (Vec<crate::TranscriptEntry>, bool) {
+    let lines: Vec<&str> = jsonl.lines().collect();
+    let boundary = lines.iter().rposition(|l| {
+        l.contains("compact_boundary")
+            && serde_json::from_str::<serde_json::Value>(l)
+                .is_ok_and(|v| v.get("subtype").and_then(|t| t.as_str()) == Some("compact_boundary"))
+    });
+    let from = boundary.map_or(0, |i| i + 1);
+    let tail = lines[from..].join("\n");
+    (parse_entries(&tail, usize::MAX, HANDOFF_TOOL_MAX), boundary.is_some())
+}
+
+/// Every entry of a transcript, texts shortened to `text_max`, tool calls / results to
+/// `tool_max`.
+fn parse_entries(jsonl: &str, text_max: usize, tool_max: usize) -> Vec<crate::TranscriptEntry> {
     let mut out = Vec::new();
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -194,24 +222,24 @@ pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::Transcri
         };
         let content = v.get("message").and_then(|m| m.get("content"));
         match content {
-            Some(serde_json::Value::String(s)) => push(kind, shorten(s, TEXT_MAX)),
+            Some(serde_json::Value::String(s)) => push(kind, shorten(s, text_max)),
             Some(serde_json::Value::Array(blocks)) => {
                 for b in blocks {
                     match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                         "text" => push(
                             kind,
-                            shorten(b.get("text").and_then(|t| t.as_str()).unwrap_or(""), TEXT_MAX),
+                            shorten(b.get("text").and_then(|t| t.as_str()).unwrap_or(""), text_max),
                         ),
                         "tool_use" => {
                             let name = b.get("name").and_then(|t| t.as_str()).unwrap_or("?");
                             let input = b.get("input").map(|i| i.to_string()).unwrap_or_default();
-                            push("tool", format!("call {name} {}", shorten(&input, TOOL_MAX)));
+                            push("tool", format!("call {name} {}", shorten(&input, tool_max)));
                         }
                         "tool_result" => {
                             let text = result_text(b.get("content").unwrap_or(&serde_json::Value::Null));
                             let err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
                             let head = if err { "error" } else { "result" };
-                            push("tool", format!("{head}: {}", shorten(&text, TOOL_MAX)));
+                            push("tool", format!("{head}: {}", shorten(&text, tool_max)));
                         }
                         _ => {}
                     }
@@ -220,8 +248,7 @@ pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::Transcri
             _ => {}
         }
     }
-    let skip = out.len().saturating_sub(limit);
-    out.split_off(skip)
+    out
 }
 
 /// The background tasks of the main conversation that still run, by the transcript (v 2.1.331):
@@ -379,6 +406,27 @@ impl AgentProvider for Claude {
             let file = transcript_file(&home, id).ok_or("Claude Code kept no transcript of it yet")?;
             let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             Ok(parse_transcript(&text, limit))
+        })())
+    }
+
+    fn reads_transcripts(&self) -> bool {
+        true
+    }
+
+    fn handoff_transcript(
+        &self,
+        acct: Option<&AccountDir>,
+        id: &str,
+    ) -> Option<std::result::Result<crate::HandoffTranscript, String>> {
+        Some((|| {
+            if !is_session_id(id) {
+                return Err(format!("`{id}` is not a Claude Code conversation id"));
+            }
+            let home = config_home(acct).ok_or("no Claude Code config folder")?;
+            let file = transcript_file(&home, id).ok_or("Claude Code kept no transcript of it yet")?;
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let (entries, compacted) = handoff_entries(&text);
+            Ok(crate::HandoffTranscript { entries, compacted })
         })())
     }
 

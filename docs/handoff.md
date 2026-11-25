@@ -26,6 +26,7 @@
 | `docs/agent-providers.md` | 에이전트 CLI(claude/codex/shell/선언형), 계정·구성, 프롬프트 전달 |
 | `docs/agent-bridge.md` | 에이전트 ↔ ide 연결: `ide` MCP 서버, 훅(`ide-server hook`), 화면 판독, 활동 상태 |
 | `docs/session-family.md` | 부모/자식 세션(분리·공유), 머지·따라잡기, 가족 도구, 공유 폴더 쓰기 권한 |
+| `docs/session-handoff.md` | 세션 인수인계: 같은 세션에서 대화만 새로(자식·메시지 유지), 방식 4가지, 컴팩트 처리, 에이전트 변경 |
 | `docs/agent-features-roadmap.md` | 다음 기능 계획: 터미널 조회·입력, 브라우저 조작, 대화 읽기·프롬프트 전달, 미리보기, 모드 |
 | `docs/repos-and-workspaces.md` | 레포 등록, 기본 레포, 세션 워크스페이스(워크트리), 기준 브랜치 규칙 |
 | `docs/side-panel.md` | 변경 사항 / 히스토리 / 탐색기 탭, 탭 안쪽 동작 |

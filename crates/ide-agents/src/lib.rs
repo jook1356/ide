@@ -165,6 +165,47 @@ pub struct TranscriptEntry {
     pub at: String,
 }
 
+/// A conversation exported for a session handoff ([`AgentProvider::handoff_transcript`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffTranscript {
+    pub entries: Vec<TranscriptEntry>,
+    /// It starts at the CLI's last compaction (its summary first).
+    pub compacted: bool,
+}
+
+impl HandoffTranscript {
+    /// As Markdown for the new conversation to read.
+    pub fn markdown(&self, provider: &str, conversation: &str) -> String {
+        let scope = if self.compacted {
+            "It was compacted: this starts at its last compaction, whose summary (the first user \
+             entry) covers the earlier part."
+        } else {
+            "The whole conversation."
+        };
+        let mut out = format!(
+            "# Previous conversation\n\nProvider `{provider}`, conversation `{conversation}`. \
+             {scope} Tool calls and results are shortened; subagents' own work is left out.\n"
+        );
+        let mut in_tools = false;
+        for e in &self.entries {
+            if e.role == "tool" {
+                if !in_tools {
+                    out.push('\n');
+                }
+                out.push_str("> ");
+                out.push_str(&e.text.trim().replace('\n', "\n> "));
+                out.push('\n');
+                in_tools = true;
+            } else {
+                let at = if e.at.is_empty() { String::new() } else { format!(" · {}", e.at) };
+                out.push_str(&format!("\n## {}{at}\n\n{}\n", e.role, e.text.trim()));
+                in_tools = false;
+            }
+        }
+        out
+    }
+}
+
 /// Logged-in state of an account, as reported by the CLI itself (best effort).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -306,6 +347,23 @@ pub trait AgentProvider: Send + Sync {
         None
     }
 
+    /// Whether [`AgentProvider::handoff_transcript`] can read this CLI's conversations (asked
+    /// before a handoff picks its method). Default: no.
+    fn reads_transcripts(&self) -> bool {
+        false
+    }
+
+    /// The stored conversation `id` for a session handoff (`docs/session-handoff.md`): from
+    /// its last compaction on, texts whole. `None`: this CLI's transcripts cannot be read.
+    /// Default: `None`.
+    fn handoff_transcript(
+        &self,
+        _acct: Option<&AccountDir>,
+        _id: &str,
+    ) -> Option<std::result::Result<HandoffTranscript, String>> {
+        None
+    }
+
     // ---- Turn control (`ide_send_to_session` modes) ----
 
     /// Bytes that stop the agent's current turn (typed into its terminal). `None`: no way to
@@ -438,6 +496,9 @@ pub struct SessionContext {
     pub repos: Vec<RepoInfo>,
     /// Scratch dir for generated files (`sessions/<id>/agent`); emptied by [`assemble`].
     pub scratch: PathBuf,
+    /// More directories outside `root` the agent reaches (the session's handoff folder,
+    /// `docs/session-handoff.md`).
+    pub extra_dirs: Vec<PathBuf>,
     /// Session guidance (workspace sessions; Desk's `HERMES.md` text).
     pub guidance: Option<String>,
     /// The cwd belongs to another session (a shared child works in its parent's folder): no
@@ -460,6 +521,9 @@ impl SessionContext {
             if let Some(g) = &r.git_dir {
                 push(g);
             }
+        }
+        for d in &self.extra_dirs {
+            push(d);
         }
         out
     }
@@ -558,6 +622,7 @@ impl<'a> SessionInput<'a> {
                 root: session.root.clone(),
                 repos,
                 scratch: paths.session_agent_dir(session.id.as_str()),
+                extra_dirs: vec![ide_core::handoff::dir(&paths.session_dir(session.id.as_str()))],
                 guidance,
                 shared_root: session.shared,
             },

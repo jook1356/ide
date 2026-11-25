@@ -41,6 +41,7 @@ mod widget_host;
 mod widgets;
 mod write_guard;
 mod previews;
+mod handoff;
 mod profile;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -327,6 +328,8 @@ pub struct UserCtx {
     /// Since when each running agent session's screen shows its CLI at its input
     /// ([`ide_agents::screen::ScreenManifest::at_input`]); queued prompts wait for it.
     at_input: Mutex<HashMap<String, std::time::Instant>>,
+    /// Session handoffs in progress, by session id (`docs/session-handoff.md`).
+    handoffs: Mutex<HashMap<String, handoff::Handoff>>,
     /// This context itself (set once by [`Server::authorize`]), for tasks that outlive a call.
     this: std::sync::OnceLock<std::sync::Weak<UserCtx>>,
     /// Sessions whose pending worktrees a background job is creating
@@ -424,6 +427,7 @@ impl UserCtx {
             auto_answers: Mutex::new(auto_answers),
             answered: Mutex::new(HashMap::new()),
             at_input: Mutex::new(HashMap::new()),
+            handoffs: Mutex::new(HashMap::new()),
             this:std::sync::OnceLock::new(),
             preparing: Mutex::new(HashSet::new()),
             branch_badges,
@@ -645,6 +649,19 @@ impl UserCtx {
                     Err(e) => return Some(err(e)),
                 };
                 let tid = target.id.as_str();
+                // Its conversation is being replaced: the new one gets the message.
+                if self.in_handoff(tid) {
+                    let full = format!(
+                        "[ide] Message from session \"{}\" ({}):\n{message}",
+                        s.title, s.id
+                    );
+                    let id = self.bridge.enqueue(tid, Some(s.id.as_str()), full);
+                    return Some(ok(serde_json::json!({
+                        "delivered": false,
+                        "message_id": id,
+                        "note": "queued: its conversation is being handed off to a new one, which gets the message when it is ready (see ide_sent_messages)",
+                    })));
+                }
                 // A session that was running when the server went away and has not been
                 // opened since (`SessionInfo::resume_on_open`) is woken by the message: its
                 // conversation resumes and the message is typed in once it is ready. So is a
@@ -911,6 +928,10 @@ impl UserCtx {
     /// waiting for the user, its TUI at its input); otherwise it stays queued.
     pub(crate) fn deliver_pending(&self, session: &str) {
         use ide_proto::AgentActivity;
+        // Held for the new conversation (`docs/session-handoff.md`).
+        if self.in_handoff(session) {
+            return;
+        }
         if matches!(
             self.bridge.activity(session),
             AgentActivity::Working | AgentActivity::NeedsInput
@@ -1246,6 +1267,7 @@ impl UserCtx {
                 self.deliver_pending(&id);
             }
         }
+        self.handoff_tick();
     }
 
     /// One session's part of [`Self::screen_tick`].
@@ -1549,6 +1571,7 @@ impl UserCtx {
                 && s.kind == SessionKind::Agent
                 && !host.as_ref().is_some_and(|h| h.is_running()),
             branch: self.branch_badges.get(s.id.as_str()),
+            handoff: self.handoff_status(s.id.as_str()),
         }
     }
 
@@ -2545,6 +2568,14 @@ impl UserCtx {
                 Ok(Response::Merges(self.merge_child(&id, squash)?))
             }
             Request::SessionSyncParent { id } => Ok(Response::Merges(self.sync_parent(&id)?)),
+            Request::SessionHandoff { id, method, agent } => {
+                let s = self.session_handoff(&id, method, agent)?;
+                Ok(Response::Session(self.info(&s)))
+            }
+            Request::SessionHandoffCancel { id } => {
+                let s = self.session_handoff_cancel(&id)?;
+                Ok(Response::Session(self.info(&s)))
+            }
             Request::WidgetList => Ok(Response::Widgets(self.widget_list())),
             Request::WidgetFile { session, widget, path } => self.widget_file(&session, &widget, &path),
             Request::WidgetRegister { session, widget, tools } => self.widget_register(&session, &widget, &tools),

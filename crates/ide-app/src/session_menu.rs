@@ -158,6 +158,26 @@ impl App {
             false,
         ));
         items.push(rule());
+        // Handoff to a new conversation (docs/session-handoff.md); 인수인계 취소 while one runs.
+        if s.kind == ide_client::SessionKind::Agent {
+            let handoff = |m: crate::handoff_ui::HandoffMsg| {
+                online.then(|| Message::SessionMenuThen(Box::new(Message::Handoff(m))))
+            };
+            items.push(if s.handoff.is_some() {
+                entry(
+                    tr::handoff_cancel_menu(),
+                    handoff(crate::handoff_ui::HandoffMsg::Cancel(sid.to_owned())),
+                    false,
+                )
+            } else {
+                entry(
+                    tr::handoff_menu(),
+                    handoff(crate::handoff_ui::HandoffMsg::Open(sid.to_owned())),
+                    false,
+                )
+            });
+            items.push(rule());
+        }
         // Session family (docs/session-family.md).
         let family = |m: crate::family_ui::FamilyMsg| {
             online.then(|| Message::SessionMenuThen(Box::new(Message::Family(m))))

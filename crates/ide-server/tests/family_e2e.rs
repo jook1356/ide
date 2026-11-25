@@ -455,3 +455,87 @@ async fn child_with_another_agent() {
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Session handoff (`docs/session-handoff.md`) with shell sessions: the refusals, a child's
+/// message held while the conversation is replaced, cancelling, and a `Previous` handoff whose
+/// document the test writes in the old agent's place. The session keeps its id and children.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handoff() {
+    use ide_client::{HandoffMethod, HandoffPhase};
+    let dir = tmp_dir("family-handoff");
+    let r1 = dir.join("r1");
+    init_repo(&r1);
+    let data = dir.join("data");
+    let server = bridged(&data);
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
+    let (p, _) = c.create_session(shell_session(vec![id1.clone()], true)).await.unwrap();
+    let (a, _) = c.create_child_session(&p.id, false, Vec::new(), "A", None, false, 80, 24).await.unwrap();
+
+    // A shell records no conversation: nothing to summarize (`Auto` would ask the running
+    // agent itself).
+    for m in [HandoffMethod::Summarize, HandoffMethod::Transcript] {
+        assert_eq!(c.session_handoff(&p.id, m, None).await.unwrap_err().id, "handoff-no-conversation", "{m:?}");
+    }
+    let bad = ide_client::ChildAgent {
+        provider: "nope".into(),
+        account: None,
+        configuration: "default".into(),
+    };
+    assert_eq!(
+        c.session_handoff(&p.id, HandoffMethod::Previous, Some(bad)).await.unwrap_err().id,
+        "provider-not-found"
+    );
+    assert_eq!(c.session_handoff_cancel(&p.id).await.unwrap_err().id, "handoff-none");
+
+    // The running agent is asked to write the document.
+    let info = c.session_handoff(&p.id, HandoffMethod::Previous, None).await.unwrap();
+    assert_eq!(info.handoff.map(|h| h.method), Some(HandoffMethod::Previous));
+    assert_eq!(c.session_handoff(&p.id, HandoffMethod::Previous, None).await.unwrap_err().id, "handoff-busy");
+    c.session_handoff_cancel(&p.id).await.unwrap();
+    let now = c.sessions().await.unwrap().into_iter().find(|s| s.id == p.id).unwrap();
+    assert!(now.handoff.is_none());
+
+    // Again, through to the new conversation.
+    let t0 = ide_core::now_unix();
+    c.session_handoff(&p.id, HandoffMethod::Previous, None).await.unwrap();
+    let t1 = ide_core::now_unix();
+    // A child's message waits for the new conversation.
+    let (mux, mut rx) = agent(&server, &a.id).await;
+    let (bad_call, v) = tool(&mux, &mut rx, 10, "ide_send_to_session", serde_json::json!({"session": p.id, "message": "echo done"})).await;
+    assert!(!bad_call && v["delivered"] == false, "{v}");
+    assert!(v["note"].as_str().unwrap().contains("handed off"), "{v}");
+    let phase = || async {
+        c.sessions().await.unwrap().into_iter().find(|s| s.id == p.id).unwrap().handoff.map(|h| h.phase)
+    };
+    let mut waited = 0;
+    while phase().await != Some(HandoffPhase::Writing) {
+        assert!(waited < 100, "the request was not typed in");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    let hdir = data.join("sessions").join(&p.id).join("handoff");
+    for at in t0..=t1 {
+        std::fs::write(hdir.join(format!("{at}-handoff.md")), "# Handoff\n").unwrap();
+    }
+    let mut waited = 0;
+    while phase().await.is_some() {
+        assert!(waited < 300, "the handoff did not finish");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    let all = c.sessions().await.unwrap();
+    let now = all.iter().find(|s| s.id == p.id).unwrap();
+    assert_eq!(now.state, ide_client::SessionState::Running);
+    assert_eq!(all.iter().find(|s| s.id == a.id).unwrap().parent.as_deref(), Some(p.id.as_str()));
+    let store = ide_core::SessionStore::open(&Paths::new(&data)).unwrap();
+    let stored = store.get(&ide_core::SessionId::parse(&p.id).unwrap()).unwrap();
+    assert_eq!(stored.previous_conversations.len(), 1);
+    assert_eq!(stored.previous_conversations[0].provider, "shell");
+
+    drop((mux, rx));
+    c.delete_session(&a.id, true).await.unwrap();
+    c.delete_session(&p.id, true).await.unwrap();
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}

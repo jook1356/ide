@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    AccountInfo, AccountState, Attached, ChildAgent, BrowseListing, ChunkDecoder,
+    AccountInfo, AccountState, Attached, ChildAgent, HandoffMethod, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat, PathMatches,
     GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoMerge, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
@@ -1194,6 +1194,35 @@ impl Client {
         match self.call(Request::SessionSyncParent { id: id.into() }).await? {
             Response::Merges(m) => Ok(m),
             _ => Err(ProtoError::new("bad-message").arg("detail", "expected merges")),
+        }
+    }
+
+    /// `session.handoff`: replace the session's conversation with a new one (the result comes
+    /// as `Notify::Handoff`). `agent`: `None` = the session's.
+    pub async fn session_handoff(
+        &self,
+        id: &str,
+        method: HandoffMethod,
+        agent: Option<ChildAgent>,
+    ) -> Result<SessionInfo, ProtoError> {
+        match self
+            .call(Request::SessionHandoff {
+                id: id.into(),
+                method,
+                agent,
+            })
+            .await?
+        {
+            Response::Session(s) => Ok(s),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a session")),
+        }
+    }
+
+    /// `session.handoff_cancel`: drop the session's running handoff.
+    pub async fn session_handoff_cancel(&self, id: &str) -> Result<SessionInfo, ProtoError> {
+        match self.call(Request::SessionHandoffCancel { id: id.into() }).await? {
+            Response::Session(s) => Ok(s),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a session")),
         }
     }
 

@@ -397,15 +397,37 @@ impl App {
         c.width(520).boxed()
     }
 
-    /// The child's agent, account (providers with accounts) and configuration, as in the new
-    /// session dialog.
+    /// The child's agent, account and configuration.
     fn child_agent_fields<'a>(&'a self, f: &'a ChildForm) -> El<'a> {
+        self.agent_fields(
+            &f.provider,
+            f.account.as_deref(),
+            &f.configuration,
+            AgentFieldMsgs {
+                provider: |v| fm(FamilyMsg::Provider(v)),
+                account: |v| fm(FamilyMsg::Account(v)),
+                configuration: |v| fm(FamilyMsg::Configuration(v)),
+            },
+        )
+        .push(text(tr::child_agent_hint()).size(11).color(style::DIM).boxed())
+        .boxed()
+    }
+
+    /// Agent, account (providers with accounts) and configuration fields, as in the new session
+    /// dialog (the 하위 세션 만들기 and 세션 인수인계 dialogs). `provider` stays listed even when
+    /// it is no longer detected.
+    pub(crate) fn agent_fields<'a>(
+        &'a self,
+        provider: &str,
+        account: Option<&str>,
+        configuration: &str,
+        on: AgentFieldMsgs,
+    ) -> Column<El<'a>> {
         use crate::view::label;
         let providers = self
             .providers
             .iter()
-            // The parent's provider stays listed even when it is no longer detected.
-            .filter(|p| p.detection.usable || p.id == f.provider)
+            .filter(|p| p.detection.usable || p.id == provider)
             .fold(row![].spacing(6), |r, p| {
                 let (g, col) = crate::view::provider_glyph(self, &p.id);
                 r.push(
@@ -414,13 +436,13 @@ impl App {
                             .spacing(6),
                     )
                     .padding([5, 12])
-                    .style(style::choice(f.provider == p.id))
-                    .on_press(fm(FamilyMsg::Provider(p.id.clone())))
+                    .style(style::choice(provider == p.id))
+                    .on_press((on.provider)(p.id.clone()))
                     .boxed(),
                 )
             });
         let mut c = column![label(tr::agent_label()), providers].spacing(8);
-        if self.provider(&f.provider).is_some_and(|p| p.caps.accounts) {
+        if self.provider(provider).is_some_and(|p| p.caps.accounts) {
             let accounts: Vec<Choice> = std::iter::once(Choice {
                 key: String::new(),
                 label: tr::account_default(),
@@ -428,18 +450,18 @@ impl App {
             .chain(
                 self.accounts
                     .iter()
-                    .filter(|a| a.provider == f.provider)
+                    .filter(|a| a.provider == provider)
                     .map(|a| Choice {
                         key: a.slug.clone(),
                         label: a.name.clone(),
                     }),
             )
             .collect();
-            let key = f.account.clone().unwrap_or_default();
+            let key = account.unwrap_or_default();
             let sel = accounts.iter().find(|c| c.key == key).cloned();
             c = c.push(label(tr::account_label())).push(
                 pick_list(sel, accounts, |c: &Choice| c.label.clone())
-                    .on_select(|c: Choice| fm(FamilyMsg::Account(c.key)))
+                    .on_select(move |c: Choice| (on.account)(c.key))
                     .text_size(13)
                     .padding([5, 8])
                     .width(Fill)
@@ -447,19 +469,25 @@ impl App {
             );
         }
         let configs = self.config_choices();
-        let sel = configs.iter().find(|c| c.key == f.configuration).cloned();
-        c.push(label(tr::configuration_label()))
-            .push(
-                pick_list(sel, configs, |c: &Choice| c.label.clone())
-                    .on_select(|c: Choice| fm(FamilyMsg::Configuration(c.key)))
-                    .text_size(13)
-                    .padding([5, 8])
-                    .width(Fill)
-                    .boxed(),
-            )
-            .push(text(tr::child_agent_hint()).size(11).color(style::DIM).boxed())
-            .boxed()
+        let sel = configs.iter().find(|c| c.key == configuration).cloned();
+        c.push(label(tr::configuration_label())).push(
+            pick_list(sel, configs, |c: &Choice| c.label.clone())
+                .on_select(move |c: Choice| (on.configuration)(c.key))
+                .text_size(13)
+                .padding([5, 8])
+                .width(Fill)
+                .boxed(),
+        )
     }
+}
+
+/// What [`App::agent_fields`] sends: the picked provider id, account slug (empty = the CLI's
+/// default login) and configuration slug.
+#[derive(Clone, Copy)]
+pub(crate) struct AgentFieldMsgs {
+    pub provider: fn(String) -> Message,
+    pub account: fn(String) -> Message,
+    pub configuration: fn(String) -> Message,
 }
 
 /// One line per repo of a merge / sync (user-facing, translated).

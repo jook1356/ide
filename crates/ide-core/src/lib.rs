@@ -42,6 +42,7 @@ pub mod base;
 pub mod configuration;
 pub mod error;
 pub mod family;
+pub mod handoff;
 pub mod launch;
 pub mod migrate;
 pub mod ops;
@@ -84,7 +85,7 @@ pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, w
 pub use repo::{GitOutput, Repo, git_raw, same_path};
 pub use session::{
     AutoTitle,
-    PendingWorktree, Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore,
+    PendingWorktree, PreviousConversation, Session, SessionId, SessionKind, SessionMode, SessionStatus, SessionStore,
     SessionTarget, SessionWorktree,
 };
 pub use skill::{SKILL_FILE, SkillEntry};
