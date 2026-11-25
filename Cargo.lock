@@ -1954,162 +1954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ide-agents"
-version = "0.1.0"
-dependencies = [
- "ide-core",
- "regex",
- "serde",
- "serde_json",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "ide-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "futures",
- "iced",
- "ide-client",
- "ide-i18n",
- "ide-proto",
- "ide-term",
- "ide-views",
- "ide-web",
- "png",
- "serde",
- "serde_json",
- "similar",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ide-client"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "iced",
- "ide-proto",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ide-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "fancy-regex 0.14.0",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "ide-i18n"
-version = "0.1.0"
-dependencies = [
- "fluent-bundle",
- "fluent-langneg",
- "fluent-syntax",
- "serde",
- "serde_json",
- "sys-locale",
- "unic-langid",
-]
-
-[[package]]
-name = "ide-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "rmp-serde",
- "serde",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ide-server"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "chardetng",
- "encoding_rs",
- "fancy-regex 0.14.0",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ide-agents",
- "ide-client",
- "ide-core",
- "ide-proto",
- "ignore",
- "listeners",
- "notify",
- "nucleo-matcher",
- "portable-pty",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trash",
- "ureq",
-]
-
-[[package]]
-name = "ide-term"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "iced",
- "png",
- "portable-pty",
- "tracing",
- "unicode-width",
-]
-
-[[package]]
-name = "ide-views"
-version = "0.1.0"
-dependencies = [
- "iced",
- "ide-i18n",
- "png",
- "similar",
-]
-
-[[package]]
-name = "ide-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cef",
- "iced",
- "png",
- "serde_json",
- "tracing",
- "tracing-subscriber",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2639,6 +2483,162 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "meninx-agents"
+version = "0.1.0"
+dependencies = [
+ "meninx-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "meninx-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "futures",
+ "iced",
+ "meninx-client",
+ "meninx-i18n",
+ "meninx-proto",
+ "meninx-term",
+ "meninx-views",
+ "meninx-web",
+ "png",
+ "serde",
+ "serde_json",
+ "similar",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "meninx-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "iced",
+ "meninx-proto",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meninx-core"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "fancy-regex 0.14.0",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "meninx-i18n"
+version = "0.1.0"
+dependencies = [
+ "fluent-bundle",
+ "fluent-langneg",
+ "fluent-syntax",
+ "serde",
+ "serde_json",
+ "sys-locale",
+ "unic-langid",
+]
+
+[[package]]
+name = "meninx-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rmp-serde",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meninx-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chardetng",
+ "encoding_rs",
+ "fancy-regex 0.14.0",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "listeners",
+ "meninx-agents",
+ "meninx-client",
+ "meninx-core",
+ "meninx-proto",
+ "notify",
+ "nucleo-matcher",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trash",
+ "ureq",
+]
+
+[[package]]
+name = "meninx-term"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "iced",
+ "png",
+ "portable-pty",
+ "tracing",
+ "unicode-width",
+]
+
+[[package]]
+name = "meninx-views"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "meninx-i18n",
+ "png",
+ "similar",
+]
+
+[[package]]
+name = "meninx-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cef",
+ "iced",
+ "png",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

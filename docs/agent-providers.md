@@ -7,26 +7,26 @@ redesigned), phase 4 verification done for Claude Code 2.1.329 and Codex 0.160.1
 
 ## Goal
 Any agent CLI (Claude Code, Codex, later Gemini CLI, opencode, ...) plugs into one common contract.
-The IDE only deals with provider-agnostic data (accounts, configurations: skills, MCP servers,
+Meninx only deals with provider-agnostic data (accounts, configurations: skills, MCP servers,
 instructions, hooks); each provider translates that into its own CLI flags, env vars and files.
 
 ## Concepts
 | Concept | What it is | Stored |
 |---|---|---|
-| **Provider** | An agent CLI implementation (`claude`, `codex`, `shell`, declarative ones). Code (`impl AgentProvider`) or a TOML file. | server: `ide_agents::Providers` (built-ins + `<data>/providers/*.toml`) |
+| **Provider** | An agent CLI implementation (`claude`, `codex`, `shell`, declarative ones). Code (`impl AgentProvider`) or a TOML file. | server: `meninx_agents::Providers` (built-ins + `<data>/providers/*.toml`) |
 | **Account** | One login for one provider (credentials only). E.g. "Claude - work", "Codex - personal". | server: `accounts.json`; dir `accounts/<provider>/<slug>/` (the CLI's own config home for that login) |
-| **Configuration** (UI: 프로필 / profile) | Provider-agnostic bundle: skills it owns (folders `<data>/configurations/<slug>/skills/<name>/` with a `SKILL.md`; `disabled_skills` lists the ones switched off; `ide-core/src/skill.rs`), MCP servers (stdio: name, command, args, env), instructions (text). Replaces the old "profile"; the UI calls it 프로필 again. Older files listed skill folders anywhere: they are copied in once on open. One file per item in its folder, a git repository with every change as a commit; agents edit it with `ide_profile_get` / `ide_profile_edit` (`docs/profile-editing.md`). | server: `configurations.json` (slug order) + `configurations/<slug>/` (`profile.json`, `instructions.md`, `mcp/<name>.json`, `skills/`) |
+| **Configuration** (UI: 프로필 / profile) | Provider-agnostic bundle: skills it owns (folders `<data>/configurations/<slug>/skills/<name>/` with a `SKILL.md`; `disabled_skills` lists the ones switched off; `meninx-core/src/skill.rs`), MCP servers (stdio: name, command, args, env), instructions (text). Replaces the old "profile"; the UI calls it 프로필 again. Older files listed skill folders anywhere: they are copied in once on open. One file per item in its folder, a git repository with every change as a commit; agents edit it with `meninx_profile_get` / `meninx_profile_edit` (`docs/profile-editing.md`). | server: `configurations.json` (slug order) + `configurations/<slug>/` (`profile.json`, `instructions.md`, `mcp/<name>.json`, `skills/`) |
 | **Session** | provider + account (optional) + configuration + repo/worktree; or a *login* session (provider + account, no repo) | server: `sessions.json` (`kind`, `provider`, `account`, `configuration`) |
 
-Every agent session also gets the **agent bridge** (`docs/agent-bridge.md`): the `ide-bridge` MCP server,
+Every agent session also gets the **agent bridge** (`docs/agent-bridge.md`): the `meninx-bridge` MCP server,
 its env vars and base instructions, added by the server through `SessionInput::bridge`.
 
 Generated per-session files live in `<data>/sessions/<id>/agent/` (regenerated on every start,
 removed with the session). Nothing is written into the worktree.
 
-## Crate `ide-agents` (server side, UI-free)
+## Crate `meninx-agents` (server side, UI-free)
 ```
-crates/ide-agents/src/
+crates/meninx-agents/src/
   lib.rs          trait AgentProvider, Caps/Support, AccountStatus, HookTargets,
                   SessionInput, assemble(), login_spec()
   plan.rs         LaunchPlan (args, env, scratch dir, extra_instructions, notes)
@@ -86,13 +86,13 @@ for every provider); the apply steps return `Result` (they write files); `begin(
 (base args such as `--no-daemon`, `-n <title>`); `id()` returns `&str` (declarative ids are
 data). `assemble()` runs begin -> skills -> MCP -> instructions (configuration text + fallback
 text) -> hooks -> `TERM`/`COLORTERM` -> finish and returns the spec plus `notes` (parts not passed
-on; the server logs them and writes `session.note` audit records). Errors are `ide_core::Error`
+on; the server logs them and writes `session.note` audit records). Errors are `meninx_core::Error`
 (new ids: `account-not-found`, `account-in-use`, `configuration-not-found`,
 `configuration-in-use`, `last-configuration`, `provider-not-found`, `provider-no-login`,
 `invalid-mcp-name`).
 
-No `match` on provider ids outside `ide-agents`; the only other place that names `claude`/`codex`
-is the profile migration in `ide-core::migrate` (the legacy format had exactly those two dirs).
+No `match` on provider ids outside `meninx-agents`; the only other place that names `claude`/`codex`
+is the profile migration in `meninx-core::migrate` (the legacy format had exactly those two dirs).
 
 ## Injection rules
 1. **Never pollute the repo.** Inject through flags, env vars and the session scratch dir. If a CLI
@@ -102,7 +102,7 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
    top per session, so one configuration works with any account.
 3. **Unsupported capability -> documented fallback** (skills become instructions) or a launch note
    + the UI shows the support level; never silently dropped.
-4. **Provider-specific details stay inside the provider.** No `match provider` outside `ide-agents`;
+4. **Provider-specific details stay inside the provider.** No `match provider` outside `meninx-agents`;
    mode-dependent behaviour goes through `SessionContext` + the trait (`prepare_root`, `apply_dirs`,
    `account_home`, `after_exit`, `Caps::mode`), never through server branches.
 5. **Workspace sessions** may get generated files in the session folder (outside every repo);
@@ -115,10 +115,10 @@ is the profile migration in `ide-core::migrate` (the legacy format had exactly t
 | Account | (v) `CLAUDE_CONFIG_DIR=<account dir>` | (v) `CODEX_HOME=<account dir>` | none | `account_env = "VAR"` |
 | Login | (v, help only) `claude auth login` | (v, help only) `codex login` | — | `login_args` |
 | Status | (v) `claude auth status --json` -> `loggedIn` (exit 1 + `false` when logged out) | (v) `codex login status` (exit 1 + `Not logged in`) | — | unknown |
-| Skills | (v) generated plugin `<scratch>/plugin/{.claude-plugin/plugin.json, skills/<folder>/...}` (copied) via `--plugin-dir`; skill ids `ide-<config>:<folder>` | (v) fallback: listed in the developer instructions (name, description, SKILL.md path) | ignored | fallback if instructions are supported |
+| Skills | (v) generated plugin `<scratch>/plugin/{.claude-plugin/plugin.json, skills/<folder>/...}` (copied) via `--plugin-dir`; skill ids `meninx-<config>:<folder>` | (v) fallback: listed in the developer instructions (name, description, SKILL.md path) | ignored | fallback if instructions are supported |
 | MCP | (v) `<scratch>/mcp.json` `{"mcpServers":{name:{type:"stdio",command,args,env}}}` via `--mcp-config` | (v) `-c mcp_servers.<name>={command="..", args=[..], env={"K"="v"}}` | ignored | unsupported (noted) |
 | Instructions | (v) `<scratch>/instructions.md` via `--append-system-prompt-file` | (v) `-c developer_instructions="..."` (single-line TOML string) | ignored | `flag` / `env` / `file` |
-| Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `ide-server hook` (`docs/agent-bridge.md`); background agents (`SubagentStart/Stop`) -> `HookEvent::Background*` (optional for a provider: report a start only with its end) | (d) account integration: ide's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
+| Hooks (status, edit guard) | (d) `--settings <scratch>/settings.json`, exec-form entries running `meninx-server hook` (`docs/agent-bridge.md`); background agents (`SubagentStart/Stop`) -> `HookEvent::Background*` (optional for a provider: report a start only with its end) | (d) account integration: Meninx's entries in `CODEX_HOME/hooks.json` on the user's request, trusted once with `/hooks` (`docs/agent-bridge.md`) | — | — |
 | Session name | (v) `-n <title>`; not while the title is automatic (`docs/session-titles.md`) | — | — | — |
 | Automatic title (`docs/session-titles.md`) | `prompt_title` (skips `/`, `!`); own title: transcript `ai-title` / `custom-title` (v) | `prompt_title` (skips `/`, `!`); own title: `session_index.jsonl` `thread_name` (v 0.172.0) | default `prompt_title` | default `prompt_title` |
 | Resume | fresh `--session-id <uuid>`, next start `--resume <uuid>` when `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` (a) | fresh: placeholder `started:<ms>` (Codex picks its id), `SessionStart` hook `session_id` (d); next start `codex resume <uuid> ...` when `<CODEX_HOME>/sessions/**/rollout-*-<uuid>.jsonl` exists (placeholder: earliest rollout of the cwd since the start) (v 0.172.0 help) | — | — |
@@ -133,8 +133,8 @@ Notes:
   Writing into the worktree or the account is not allowed, so skills use the fallback.
 - Codex instructions: `developer_instructions` is added as its own developer message (v);
   `model_instructions_file` would *replace* the built-in instructions (d) and is not used. A
-  `developer_instructions` in the account's own `config.toml` is overridden for IDE sessions (a).
-- Claude plugin name must not start with `claude-`/`anthropic-` (d); we use `ide-<config slug>`.
+  `developer_instructions` in the account's own `config.toml` is overridden for Meninx sessions (a).
+- Claude plugin name must not start with `claude-`/`anthropic-` (d); we use `meninx-<config slug>`.
 - `--append-system-prompt-file` has no own line in `claude --help` (listed as
   `--append-system-prompt[-file]`), documented in the CLI reference (d); accepted at launch (v).
 - Windows: both CLIs are `.exe` here, so arguments go straight to `CreateProcess`. An npm `.cmd`
@@ -144,7 +144,7 @@ Notes:
 ### Session context, modes and the new trait methods
 Every assembly step gets a `SessionContext` (in `SessionInput::ctx` / `LaunchPlan`):
 ```rust
-pub enum SessionMode { Workspace, OriginalRepo }          // ide_core::SessionMode
+pub enum SessionMode { Workspace, OriginalRepo }          // meninx_core::SessionMode
 pub struct RepoInfo { name: String, path: PathBuf /* worktree or repo */, git_dir: Option<PathBuf> }
 pub struct SessionContext {
     mode: SessionMode,
@@ -232,7 +232,7 @@ running when the server went away (`Session::autostart`).
   tells the app, which sends `session.start` when the user opens such a session (selects it,
   or it is the shown session when the list loads; once per session until it runs,
   `App::resume_on_open`). A failed `session.start` of a marked session clears the mark.
-  `ide_send_to_session` to a marked session wakes it the same way (`docs/session-family.md`).
+  `meninx_send_to_session` to a marked session wakes it the same way (`docs/session-family.md`).
 - Claude: `resume_conversation` checks for the transcript first: `--resume` with an unknown id
   ends the CLI. Ids from hooks are used only if they are UUIDs.
 - Codex (v 0.172.0) takes no id up front and writes its rollout
@@ -243,9 +243,9 @@ running when the server went away (`Session::autostart`).
   since then (without the hook two Codex sessions in one folder may swap threads, and a `/new`
   is not followed) and checks a stored UUID for its rollout (`.jsonl` or `.jsonl.zst`); then
   `codex resume <uuid>` goes before every other argument (the subcommand takes all the options
-  ide passes: `--no-daemon`, `--sandbox`, `-c`, `--add-dir`). No rollout: a fresh start.
+  Meninx passes: `--no-daemon`, `--sandbox`, `-c`, `--add-dir`). No rollout: a fresh start.
 - (v 2.1.330) A server started from a Claude Code tool shell (an agent that builds and runs
-  ide) inherits that Claude Code's session markers (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+  Meninx) inherits that Claude Code's session markers (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
   `CLAUDE_CODE_CHILD_SESSION`, messaging socket, ...). A session's `claude` started with them
   runs as a child session and writes no transcript (`projects/<cwd>/` stayed empty, `/resume`
   listed nothing). Claude's `begin()` removes them (`LaunchPlan::remove_env` ->
@@ -262,7 +262,7 @@ and ids that clash with a built-in are skipped (logged). The in-app test script 
 (`fake`: `cmd.exe` whose "login" echoes a marker).
 
 ## Migration (profiles -> accounts + configurations)
-Runs when the server opens a user's data (`ide_core::migrate_profiles`), before the stores:
+Runs when the server opens a user's data (`meninx_core::migrate_profiles`), before the stores:
 - only if neither `accounts.json` nor `configurations.json` exists and `profiles.json` does: every
   profile `p` becomes account `claude/p` (dir `profiles/p/claude`, not copied), account `codex/p`
   (dir `profiles/p/codex`) and an empty configuration `p` (same slug, `created_at` kept);
@@ -309,10 +309,10 @@ capabilities `providers`, `accounts`, `configurations` replace `profiles`.
 
 ## Verification
 All runs without prompts and without logging in, with account dirs inside the workspace
-(`IDE_TEST_TMP`), never the user's `~/.claude`/`~/.codex`.
-1. `IDE_REAL_CLI=1 cargo test -p ide-agents real_cli -- --ignored --nocapture`:
+(`MENINX_TEST_TMP`), never the user's `~/.claude`/`~/.codex`.
+1. `MENINX_REAL_CLI=1 cargo test -p meninx-agents real_cli -- --ignored --nocapture`:
    - `claude plugin validate --json <scratch>/plugin` -> success, provides skill
-     `ide-frontend:lint-fix` (v 2.1.329);
+     `meninx-frontend:lint-fix` (v 2.1.329);
    - the generated `mcp.json` copied as a probe plugin's `.mcp.json` -> `claude plugin validate`
      success, provides MCP server `docs` (same schema as `--mcp-config`) (v);
    - `claude --help` lists `--plugin-dir`, `--mcp-config`, `--append-system-prompt[-file]`,
@@ -325,9 +325,9 @@ All runs without prompts and without logging in, with account dirs inside the wo
    - `codex features list` runs with the overrides (`hooks`, `skill_search` stable) (v);
      `codex login status` on the empty account -> logged out (v).
    - `--strict-config` is only accepted by the interactive `codex` (not by `debug`/`mcp`/
-     `features`) (v), so overrides were checked through `mcp list` / `prompt-input` instead; the IDE
+     `features`) (v), so overrides were checked through `mcp list` / `prompt-input` instead; Meninx
      does not pass `--strict-config` (an account's own config may hold keys of another version).
-2. `IDE_REAL_CLI=1 cargo test -p ide-server --test real_cli -- --ignored --nocapture`: Claude and
+2. `MENINX_REAL_CLI=1 cargo test -p meninx-server --test real_cli -- --ignored --nocapture`: Claude and
    Codex sessions created through the client with a configuration (skill, MCP server,
    instructions with `"` and `&`) and a fresh account, started in a ConPTY by the server, screen
    read for 12 s, stopped and deleted, nothing typed. Claude 2.1.329 showed its first-run theme
@@ -338,7 +338,7 @@ All runs without prompts and without logging in, with account dirs inside the wo
    the real `claude auth login` / `codex login` flows (only their `--help`).
 
 ## Phases
-1. done: `ide-agents` crate with the trait, `LaunchPlan`, registry, Claude + Codex + Shell +
+1. done: `meninx-agents` crate with the trait, `LaunchPlan`, registry, Claude + Codex + Shell +
    declarative providers, migration from profiles, unit tests per provider.
 2. done: protocol + server (accounts/configurations RPCs, session create with (provider, account,
    configuration), provider list with detection/capabilities, login sessions).

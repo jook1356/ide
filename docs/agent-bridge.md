@@ -1,9 +1,9 @@
 # Agent bridge
 
-Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
+Status: foundation (protocol 13). Sessions' agents reach Meninx through an MCP server (two
 tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
 hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
-workspace's write lease, task queue, terminals, browser) come next; widgets (Desk's mods) are in `docs/widgets.md`, previews in `docs/previews.md`, profile edits (`ide_profile_get` / `ide_profile_edit`) in `docs/profile-editing.md`.
+workspace's write lease, task queue, terminals, browser) come next; widgets (Desk's mods) are in `docs/widgets.md`, previews in `docs/previews.md`, profile edits (`meninx_profile_get` / `meninx_profile_edit`) in `docs/profile-editing.md`.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why
@@ -18,24 +18,24 @@ both run MCP servers and take instructions: the bridge is an MCP server every se
 
 ```
 agent CLI (claude / codex, in the session's PTY)
-  └─ runs `ide-server mcp`            stdio MCP server (bridge.rs::run_mcp_stdio)
+  └─ runs `meninx-server mcp`            stdio MCP server (bridge.rs::run_mcp_stdio)
         └─ local socket, Hello.agent  agent connection: one session, agent.* only
-              └─ daemon (UserCtx)     answers itself (ide_session)
-                    └─ Notify::AgentRequest -> app -> agent.reply   (ide_show_message)
+              └─ daemon (UserCtx)     answers itself (meninx_session)
+                    └─ Notify::AgentRequest -> app -> agent.reply   (meninx_show_message)
 ```
 
-- **Name** `ide-bridge`, not `ide`: Claude Code takes an MCP server named `ide` for its IDE
+- **Name** `meninx-bridge`, not `ide`: Claude Code takes an MCP server named `ide` for its IDE
   integration (VS Code extension tools such as `closeAllDiffTabs`) and does not offer its tools
   as usual (v: seen in a real session).
-- **Injection** (`ide-agents`, provider-agnostic): `SessionInput::bridge` (`Bridge { server,
+- **Injection** (`meninx-agents`, provider-agnostic): `SessionInput::bridge` (`Bridge { server,
   env, instructions }`) is set by the server for every agent session. `assemble()` adds the
-  bridge's MCP server after the configuration's servers (a configuration server named `ide-bridge` is
+  bridge's MCP server after the configuration's servers (a configuration server named `meninx-bridge` is
   left out with a note), appends the bridge instructions after the configuration's, and sets the
   env vars on the agent process. Providers map them as they map configuration MCP servers
-  (Claude `--mcp-config <scratch>/mcp.json`, Codex `-c mcp_servers.ide-bridge={...}`). Plain programs
+  (Claude `--mcp-config <scratch>/mcp.json`, Codex `-c mcp_servers.meninx-bridge={...}`). Plain programs
   (shells) get the env vars only.
 - **Env** (agent process and MCP server; MCP clients start servers with a reduced environment,
-  so the server entry repeats them): `IDE_SESSION_ID`, `IDE_AGENT_TOKEN`, `IDE_SERVER_SOCKET`.
+  so the server entry repeats them): `MENINX_SESSION_ID`, `MENINX_AGENT_TOKEN`, `MENINX_SERVER_SOCKET`.
 - **Token**: random per session and daemon run (`BridgeState`, memory only), the same on every
   launch of the session until the daemon restarts (the daemon owns the PTYs, so a restart ends
   the agents anyway); forgotten when the session is deleted. It is written into the session's
@@ -46,7 +46,7 @@ agent CLI (claude / codex, in the session's PTY)
   `ping`, `agent.tools`, `agent.call` (anything else: `bad-request`). Tool calls are audited
   (`agent.call <session> <tool>`).
 - **Daemon only**: the bridge needs the daemon's socket. `ServerConfig::bridge` is set in
-  `--daemon` mode (`exe` = the running `ide-server`, `socket` = its pipe / socket);
+  `--daemon` mode (`exe` = the running `meninx-server`, `socket` = its pipe / socket);
   `--stdio --no-daemon` and in-process servers pass no bridge.
 - **App-carried tools**: the daemon sends `Notify::AgentRequest {request, session, tool,
   args}` to the user's connections and waits up to 60 s for the first `agent.reply {request,
@@ -55,22 +55,22 @@ agent CLI (claude / codex, in the session's PTY)
 
 ## Hooks (protocol 13)
 
-The IDE learns what an agent is doing (and can refuse a tool call) from the CLI's hooks.
-Provider-agnostic types are in `ide-agents/src/hooks.rs`; everything CLI-specific stays in the
+Meninx learns what an agent is doing (and can refuse a tool call) from the CLI's hooks.
+Provider-agnostic types are in `meninx-agents/src/hooks.rs`; everything CLI-specific stays in the
 provider's file:
 
 | Step | Trait method | Claude Code (`claude.rs`) |
 |---|---|---|
-| register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<ide-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
+| register | `apply_hooks(plan, HookTargets { program })` | `<scratch>/settings.json` `{"hooks": ...}` via `--settings` (d); exec form `{"type":"command","command":<meninx-server>,"args":["hook","--provider","claude",<event>],"timeout":10}` (no shell: no quoting of the path (d)) |
 | events | `parse_hook(event, stdin) -> HookEvent` | `SessionStart`, `UserPromptSubmit` -> PromptSubmitted, `Stop` -> StoppedRunning {background: the main conversation's background tasks still running, read from the hook input's `transcript_path`} (no readable transcript: Stopped), `Notification` (`permission_prompt` / `elicitation_dialog`) -> NeedsInput, `PreToolUse` (every tool) -> PreTool (Edit {paths} for `Edit|Write|MultiEdit|NotebookEdit`), `SubagentStart` / `SubagentStop` (`agent_id`) -> BackgroundStarted / BackgroundEnded {id} |
 | answer | `hook_reply(event, decision) -> HookReply` | deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":...}}`, exit 0; no opinion: nothing, exit 0 (never "allow": that would skip Claude's permission prompts) (d) |
 | caps | `hook_caps()` | status, edit guard: native; shell guard: unsupported |
 
-- The hook program is `ide-server hook --provider <id> <event>`: the provider parses stdin,
+- The hook program is `meninx-server hook --provider <id> <event>`: the provider parses stdin,
   the event goes to the daemon over an agent connection (`agent.hook`, env of the agent
   process: same session id / token / socket as the MCP server), the provider prints the answer.
   It never breaks the agent: no env, no daemon, a timeout (5 s) or an unknown event = no
-  opinion. `ide-server` usage errors exit 1, never 2 (CLIs read 2 as "block").
+  opinion. `meninx-server` usage errors exit 1, never 2 (CLIs read 2 as "block").
 - Activity (`SessionInfo.activity`, `Notify::Activity`; also set by screen detection): Unknown until the process reports
   (reset on every start, Unknown while not running); SessionStart / Stop -> Idle; prompt / tool
   use -> Working (Desk's 답변 중); permission prompt / question -> NeedsInput (Desk's 응답 필요);
@@ -117,25 +117,25 @@ For CLIs whose hooks can only live in their config home (Codex). Only on the use
 (accounts page: 설치 / 갱신 / 제거), the one exception to "accounts are never written":
 
 - `AgentProvider::integration_status / integration_install / integration_uninstall`
-  (`ide-agents/src/integration.rs`); `Caps.integration` says a provider has one. Codex writes
-  ide's entries into `CODEX_HOME/hooks.json` (the account dir): one group per event, command
-  `<ide-server> hook --provider codex <event>` (path quoted only when it has blanks: the command
-  runs through a shell (a)), `timeout` 10; `PreToolUse` matcher `apply_patch|Edit|Write`. ide's
+  (`meninx-agents/src/integration.rs`); `Caps.integration` says a provider has one. Codex writes
+  Meninx's entries into `CODEX_HOME/hooks.json` (the account dir): one group per event, command
+  `<meninx-server> hook --provider codex <event>` (path quoted only when it has blanks: the command
+  runs through a shell (a)), `timeout` 10; `PreToolUse` matcher `apply_patch|Edit|Write`. Meninx's
   entries are found by their command (` hook --provider codex `); the user's own hooks and the
-  file's other keys are kept; installing again replaces ide's entries; uninstall removes only
+  file's other keys are kept; installing again replaces Meninx's entries; uninstall removes only
   them. Status: missing / installed / outdated (installed for another program path).
 - Windows: Codex writes only inside its Windows sandbox, set up once per Codex home. Status is
   `Missing` until it is (`.sandbox/setup_marker.json` with `[windows] sandbox = "elevated"`, or the
   user's own `sandbox_mode` / `windows.sandbox`); install then runs `codex sandbox setup --elevated
   --current-user --codex-home <account>` elevated (Windows asks with its UAC prompt; refused: error
   `sandbox-setup`). Without it every Codex session is read-only and refuses `--add-dir` (v 0.172.0).
-  Never run from tests (`IDE_TEST_TMP`).
+  Never run from tests (`MENINX_TEST_TMP`).
 - After an install Codex must trust the new hooks once: `approve_with = "/hooks"`, shown on
-  the accounts page ("Approve ide's hooks once in the Codex CLI with /hooks").
+  the accounts page ("Approve Meninx's hooks once in the Codex CLI with /hooks").
 - `account.integration {provider, slug, action: Status | Install | Uninstall}` ->
   `Integration {state, approve_with}`; install / uninstall need the daemon (the hook program)
-  and are audited. The hooks run for every Codex start with that account, also outside ide:
-  without an ide session's env the hook program exits at once with no opinion.
+  and are audited. The hooks run for every Codex start with that account, also outside Meninx:
+  without a Meninx session's env the hook program exits at once with no opinion.
 - (a) Not checked against the real Codex: that it reads the entries, the trust prompt, the
   shell used on Windows, the hook input fields.
 - (a) Not yet checked against the real Claude Code: that `--settings` hooks load next to the
@@ -147,13 +147,13 @@ For CLIs whose hooks can only live in their config home (Codex). Only on the use
 
 ## Screen detection
 
-What a CLI is doing, read from its terminal (`ide-agents/src/screen.rs`), like herdr's agent
+What a CLI is doing, read from its terminal (`meninx-agents/src/screen.rs`), like herdr's agent
 detection (github.com/herdrdev/herdr, Apache-2.0: the approach, the rule model and the UI texts
 the rules look for; code and rules are this project's). It needs no hooks, so it gives Codex
 its status, and it shows Claude Code's permission prompts at once (its `Notification` hook
 fires only after a few seconds).
 
-- Rules per provider: `crates/ide-agents/screens/<provider>.toml`, returned by
+- Rules per provider: `crates/meninx-agents/screens/<provider>.toml`, returned by
   `AgentProvider::screen_manifest()`. A rule has a state (`idle` / `working` / `blocked` /
   `unknown` = keep the previous state), a priority (the highest matching rule wins, the
   earlier one on a tie), a region and gates: `contains` (all needles, case-insensitive),
@@ -187,9 +187,9 @@ fires only after a few seconds).
 | `agent.hook` (13) | agent | `{event: AgentHookEvent}` -> `AgentHookDecision(Option<reason>)` |
 | `Notify::Activity` (13) | daemon -> apps | `{session, activity}`; also `SessionInfo.activity` |
 
-Tool names shared by server and app: `ide_proto::AGENT_TOOL_*`.
+Tool names shared by server and app: `meninx_proto::AGENT_TOOL_*`.
 
-## MCP side (`ide-server mcp`)
+## MCP side (`meninx-server mcp`)
 
 Newline-delimited JSON-RPC 2.0 on stdin / stdout (MCP stdio transport (d)): `initialize`
 (echoes the client's `protocolVersion`, `capabilities.tools`), `ping`, `tools/list`,
@@ -202,23 +202,23 @@ start go to stderr.
 
 | Tool | Answered by | What |
 |---|---|---|
-| `ide_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
-| `ide_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
-| `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_sent_messages`, `ide_read_session`, `ide_merge_child`, `ide_sync_from_parent` | daemon (the user's approval of `steer` / `interrupt` through the app: `docs/approvals.md`) | session families: `docs/session-family.md` |
-| `ide_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
-| `ide_preview` | daemon (checks and stores; `guide`, `list`), app (opens, reloads or closes the tab) | previews: `docs/previews.md` |
-| `ide_terminal_list`, `ide_terminal_read`, `ide_terminal_input` | daemon (input: the user's approval through the app) | the user's terminals of this session (related sessions': read only): `docs/terminals.md` |
-| `ide_browser_list`, `ide_browser_open`, `ide_browser_read`, `ide_browser_act`, `ide_browser_screenshot` | app (CEF pages through DevTools), after the daemon's per-site approval (`browser.act` / `browser.read`) | browser control: `docs/browser-control.md`; screenshots come back as MCP image content (`AgentToolResult.image`) |
+| `meninx_session` | daemon | this session as JSON: id, title, agent, mode, folder, repositories (name, worktree folder, branch, base) |
+| `meninx_show_message` | app | `{message}`: an unread notice of the session with a toast (`docs/notifications.md`) |
+| `meninx_list_related_sessions`, `meninx_create_child_session`, `meninx_send_to_session`, `meninx_sent_messages`, `meninx_read_session`, `meninx_merge_child`, `meninx_sync_from_parent` | daemon (the user's approval of `steer` / `interrupt` through the app: `docs/approvals.md`) | session families: `docs/session-family.md` |
+| `meninx_widget` | daemon (`guide`, `list`, `register`, `unregister`), app (`open`, `close`, the registration question) | widgets: `docs/widgets.md` |
+| `meninx_preview` | daemon (checks and stores; `guide`, `list`), app (opens, reloads or closes the tab) | previews: `docs/previews.md` |
+| `meninx_terminal_list`, `meninx_terminal_read`, `meninx_terminal_input` | daemon (input: the user's approval through the app) | the user's terminals of this session (related sessions': read only): `docs/terminals.md` |
+| `meninx_browser_list`, `meninx_browser_open`, `meninx_browser_read`, `meninx_browser_act`, `meninx_browser_screenshot` | app (CEF pages through DevTools), after the daemon's per-site approval (`browser.act` / `browser.read`) | browser control: `docs/browser-control.md`; screenshots come back as MCP image content (`AgentToolResult.image`) |
 
-Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): ide manages
-this session; use the `ide_*` tools instead of guessing.
+Base instructions (`bridge.rs::INSTRUCTIONS`, appended for every bridged session): Meninx manages
+this session; use the `meninx_*` tools instead of guessing.
 
 ## Verification
 
-- `ide-server/tests/bridge_e2e.rs`: launch specs (Claude / Codex / shell) carry the bridge;
-  agent connections (token checks, forbidden requests, `ide_session`, app round trip, no app);
-  the real `ide-server mcp` against a real daemon (initialize, tools/list, tools/call).
-- (a) Claude Code and Codex start the `ide` server and list its tools: not yet checked against
+- `meninx-server/tests/bridge_e2e.rs`: launch specs (Claude / Codex / shell) carry the bridge;
+  agent connections (token checks, forbidden requests, `meninx_session`, app round trip, no app);
+  the real `meninx-server mcp` against a real daemon (initialize, tools/list, tools/call).
+- (a) Claude Code and Codex start the `meninx-bridge` server and list its tools: not yet checked against
   the real CLIs (no prompts may be sent from tests; opening the TUI and listing MCP servers is
   allowed: `claude mcp list`-style checks are the next step).
 

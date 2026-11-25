@@ -1,29 +1,29 @@
 # Browser control
 
 Status: implemented (roadmap item 2, `docs/agent-features-roadmap.md`; protocol bump pending:
-`AgentToolResult.image` is new). Agents use the pages of ide's browser — the session's own web
+`AgentToolResult.image` is new). Agents use the pages of Meninx's browser — the session's own web
 page and its browser tabs (also 공용 ones and widget tabs) — through bridge tools, like Hermes
 Desk's `browser_inspect` / `browser_act`. Everything happens inside the app's CEF views through
 the Chrome DevTools protocol (CDP): no OS input (AGENTS.md).
 
-Code: `ide-web/src/devtools.rs` (CDP channel, console log, `Awake`), `ide-web/src/cdp.rs`
-(messages, mouse / key events, key names; pure), `ide-proto/src/browser.rs` (tool names,
-capabilities, `origin()`), daemon `ide-server/src/service/browser.rs` (tool list, argument
-checks, approvals, screenshot -> image), app `ide-app/src/browser_agent.rs` (carries the tools
-out). Tests: `ide-web` `cdp::tests`, `ide-proto` `browser::tests`, `ide-server`
-`service::browser::tests` and `tests/browser_e2e.rs`, `ide-app` `browser_agent::tests`, app
-script `IDE_APP_SCRIPT_ONLY=browser` (`script_browser.rs`, real CEF, screenshot
+Code: `meninx-web/src/devtools.rs` (CDP channel, console log, `Awake`), `meninx-web/src/cdp.rs`
+(messages, mouse / key events, key names; pure), `meninx-proto/src/browser.rs` (tool names,
+capabilities, `origin()`), daemon `meninx-server/src/service/browser.rs` (tool list, argument
+checks, approvals, screenshot -> image), app `meninx-app/src/browser_agent.rs` (carries the tools
+out). Tests: `meninx-web` `cdp::tests`, `meninx-proto` `browser::tests`, `meninx-server`
+`service::browser::tests` and `tests/browser_e2e.rs`, `meninx-app` `browser_agent::tests`, app
+script `MENINX_APP_SCRIPT_ONLY=browser` (`script_browser.rs`, real CEF, screenshot
 `browser_01_tab`).
 
 ## Tools
 
 | Tool | Approval | What |
 |---|---|---|
-| `ide_browser_list` | none | tabs this session can use: `page` (its folder's web page), `tab-<n>` (its browser tabs, 공용 tabs, widget tabs) with kind, address, title, shown, loading |
-| `ide_browser_open {url}` | `browser.act` for the address's site | a new browser tab of the session (shown in its detail area); answers `{tab, url, loading}` after the page loaded (at most 15 s) |
-| `ide_browser_read {tab, what, selector?, max_chars?, limit?}` | `browser.read` | `text` (`innerText`, default), `dom` (`outerHTML`) of the page or of the first element matching `selector` (cut at `max_chars`, default 20 000, at most 200 000); `console`: the last `limit` (default 100, at most 300) console messages |
-| `ide_browser_act {tab, action, ...}` | `browser.act` (`wait`: `browser.read`; `navigate`: for the destination's site) | `navigate {url}`, `click {selector \| x, y}`, `type {text, selector?}`, `key {key}`, `scroll {selector \| dx?, dy?, x?, y?}`, `wait {selector \| text \| ms, timeout_ms?}` (at most 45 s), `evaluate {expression}` |
-| `ide_browser_screenshot {tab}` | `browser.read` | a PNG of the viewport as MCP image content |
+| `meninx_browser_list` | none | tabs this session can use: `page` (its folder's web page), `tab-<n>` (its browser tabs, 공용 tabs, widget tabs) with kind, address, title, shown, loading |
+| `meninx_browser_open {url}` | `browser.act` for the address's site | a new browser tab of the session (shown in its detail area); answers `{tab, url, loading}` after the page loaded (at most 15 s) |
+| `meninx_browser_read {tab, what, selector?, max_chars?, limit?}` | `browser.read` | `text` (`innerText`, default), `dom` (`outerHTML`) of the page or of the first element matching `selector` (cut at `max_chars`, default 20 000, at most 200 000); `console`: the last `limit` (default 100, at most 300) console messages |
+| `meninx_browser_act {tab, action, ...}` | `browser.act` (`wait`: `browser.read`; `navigate`: for the destination's site) | `navigate {url}`, `click {selector \| x, y}`, `type {text, selector?}`, `key {key}`, `scroll {selector \| dx?, dy?, x?, y?}`, `wait {selector \| text \| ms, timeout_ms?}` (at most 45 s), `evaluate {expression}` |
+| `meninx_browser_screenshot {tab}` | `browser.read` | a PNG of the viewport as MCP image content |
 
 Addresses: `http(s)://`, `file:`, `data:`, `about:`; a bare host gets `http://` (localhost,
 IPs) or `https://`; other schemes (`javascript:`) are refused.
@@ -31,11 +31,11 @@ IPs) or `https://`; other schemes (`javascript:`) are refused.
 ## How a call runs
 
 1. The daemon checks and normalises the arguments (`plan()`): wrong ones never reach the app.
-2. Approval (`docs/approvals.md`), target = the site (`ide_proto::browser::origin`:
+2. Approval (`docs/approvals.md`), target = the site (`meninx_proto::browser::origin`:
    `scheme://host[:port]`, `file://`, `data:`, `about:`):
    - `open` / `navigate`: the destination's site, `browser.act`.
    - tab tools: the daemon asks the app which site the tab shows (`Notify::AgentRequest`
-     `ide.browser.site {tab}` -> `{origin, url, title}`), then asks for that site. A kept
+     `meninx.browser.site {tab}` -> `{origin, url, title}`), then asks for that site. A kept
      `browser.act` grant also allows reading.
    - The question shows the requesting session, the site and what (`click #go`, `run
      JavaScript: ...`, `screenshot` with the page's address).

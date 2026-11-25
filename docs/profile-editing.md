@@ -5,7 +5,7 @@ with, so later sessions using that profile get it: a new skill, a fix to a skill
 rule in the instructions, an MCP server. Every change of a profile, from an agent or from the
 profiles page, is kept as a version the user can go back to.
 
-## Storage (`ide-core/src/configuration.rs`, `profile_history.rs`)
+## Storage (`meninx-core/src/configuration.rs`, `profile_history.rs`)
 
 ```text
 configurations.json                 the slugs, in order: {"configurations":[{"slug":"default"}]}
@@ -22,10 +22,10 @@ configurations/<slug>/              one folder per profile, a git repository of 
   each into its folder (an entry without a `profile.json` in its folder is read the old way).
   `migrate_profiles` still writes the old shape; it is moved on the next open.
 - **History**: every change is one commit in the profile's folder (`git add -A`, author
-  `ide <ide@localhost>`, `--no-verify --no-gpg-sign`: an internal store, not the user's
+  `Meninx <meninx@localhost>`, `--no-verify --no-gpg-sign`: an internal store, not the user's
   repository). The summary line is the agent's reason or a fixed English text; trailers keep
-  who made it: `Ide-Source: ui | agent | restore | import`, `Ide-Session: <id>`,
-  `Ide-Session-Title: <title>`. A folder without `.git` gets `git init` and a first change
+  who made it: `Meninx-Source: ui | agent | restore | import`, `Meninx-Session: <id>`,
+  `Meninx-Session-Title: <title>`. A folder without `.git` gets `git init` and a first change
   (`import`) on open. Git never runs in a folder without its own `.git` (it would act on an
   enclosing repository). History is best effort: without git, profiles still work (a warning
   is logged).
@@ -35,15 +35,15 @@ configurations/<slug>/              one folder per profile, a git repository of 
 - MCP `env` values are committed with the rest. The repositories are local only (no remote);
   they hold what `configurations.json` held before. A separate secret store is a to-do.
 
-## Agent tools (`ide-server/src/service/profile.rs`)
+## Agent tools (`meninx-server/src/service/profile.rs`)
 
 Both act on the session's own profile (`Session::configuration`).
 
-- `ide_profile_get {path?}`: without `path` the profile's name, the instructions text and its
+- `meninx_profile_get {path?}`: without `path` the profile's name, the instructions text and its
   revision, the skills (name, title, description, enabled), the MCP server names and every
   editable file with its revision (`rev`) and size. With `path` that file's text and `rev`.
   `profile.json` is not offered (name and switches are the user's).
-- `ide_profile_edit {reason, ops: [...]}`: applied at once, no approval. `reason` (one line) is
+- `meninx_profile_edit {reason, ops: [...]}`: applied at once, no approval. `reason` (one line) is
   shown to the user and kept as the change's summary. Operations (`profile_files.rs`):
 
   | `op` | fields | applies when |
@@ -59,12 +59,12 @@ Both act on the session's own profile (`Session::configuration`).
 
 ### The profile is the only place for an agent's setup
 
-ide launches the agent CLI with the profile's MCP servers, skills and instructions; the CLI's
+Meninx launches the agent CLI with the profile's MCP servers, skills and instructions; the CLI's
 own config (`claude mcp add`, `~/.claude.json`, a project `.mcp.json`, `~/.codex/config.toml`)
-is outside ide: ide neither shows nor manages it, it reaches only that CLI, and it also reaches
-the CLI when it runs outside ide. So the bridge instructions (`bridge.rs::INSTRUCTIONS`) and
+is outside Meninx: Meninx neither shows nor manages it, it reaches only that CLI, and it also reaches
+the CLI when it runs outside Meninx. So the bridge instructions (`bridge.rs::INSTRUCTIONS`) and
 both tool descriptions tell the agent to add, change or remove an MCP server, a skill or a
-standing instruction only through `ide_profile_edit`, never with the CLI's commands or files,
+standing instruction only through `meninx_profile_edit`, never with the CLI's commands or files,
 and to say so and ask when the profile cannot hold what is asked. The instructions used to
 offer the profile only for "something future sessions should know", and an agent asked to add
 an MCP server ran `claude mcp add --scope user` instead (2026-11-25).
@@ -116,7 +116,7 @@ interleave.
 | `configuration.history { slug, limit }` | `ConfigurationHistory(Vec<ConfigurationChange { id, time, source, summary, session, session_title, files }>)`, newest first (limit 1..=500) |
 | `configuration.restore { slug, id }` | `Configuration` (the restored profile) |
 
-## UI (`ide-app/src/profile_history_ui.rs`)
+## UI (`meninx-app/src/profile_history_ui.rs`)
 
 The profiles page has a 변경 이력 / Change history section: the last 30 changes (who: 세션 “title”,
 프로필 화면, 이전 버전으로 되돌림, 기록 시작; when; an agent's reason; the changed files). Every row

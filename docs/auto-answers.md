@@ -1,18 +1,18 @@
 # Auto answers
 
-Status: implemented (protocol 19). Some agent CLIs ask questions ide already knows the answer
+Status: implemented (protocol 19). Some agent CLIs ask questions Meninx already knows the answer
 to, e.g. Claude Code's folder trust questions on the first start in a new session folder: the
-session then waits, and a first prompt queued by the parent (`ide_create_child_session`) is
-never typed in. ide answers such dialogs itself, per agent, as the user chooses.
+session then waits, and a first prompt queued by the parent (`meninx_create_child_session`) is
+never typed in. Meninx answers such dialogs itself, per agent, as the user chooses.
 
-Code: rules `crates/ide-agents/screens/<provider>.toml` (`[[answers]]`, engine
-`ide-agents/src/screen.rs` `ScreenManifest::answer`), choices `ide-core/src/auto_answer.rs`,
-server `ide-server/src/service/auto_answers.rs` (called by the screen watch), app
-`ide-app/src/auto_answers_ui.rs` (Settings -> 에이전트 자동 응답).
+Code: rules `crates/meninx-agents/screens/<provider>.toml` (`[[answers]]`, engine
+`meninx-agents/src/screen.rs` `ScreenManifest::answer`), choices `meninx-core/src/auto_answer.rs`,
+server `meninx-server/src/service/auto_answers.rs` (called by the screen watch), app
+`meninx-app/src/auto_answers_ui.rs` (Settings -> 에이전트 자동 응답).
 
 ## Why on the screen
 
-ide never writes into account folders (`docs/agent-bridge.md`), so Claude Code's trust store
+Meninx never writes into account folders (`docs/agent-bridge.md`), so Claude Code's trust store
 (`.claude.json` in the config home) is not pre-filled, and Claude Code has no flag to trust a
 folder. The screen watch (every 0.7 s when the screen changed) already reads each running agent
 session; an answer rule matches a dialog the same way a state rule does and types keys.

@@ -1,0 +1,43 @@
+[package]
+name = "meninx-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "meninx-server"
+path = "src/main.rs"
+
+[dependencies]
+# Explore's 삭제: to the recycle bin / trash (Hermes Desk), not gone for good.
+trash = "5"
+meninx-core.workspace = true
+meninx-agents.workspace = true
+meninx-proto.workspace = true
+alacritty_terminal.workspace = true
+portable-pty.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+base64 = "0.22.1"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "sync", "time"] }
+serde.workspace = true
+# Phase 2: files, search, watch, go-to-definition.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+nucleo-matcher = "0.3"
+fancy-regex = "0.14"
+encoding_rs = "0.8"
+chardetng = "0.1"
+# pr.*: GitHub REST/GraphQL over HTTPS with git's credential token (rustls, no gzip).
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+listeners = "0.6"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+meninx-client.workspace = true

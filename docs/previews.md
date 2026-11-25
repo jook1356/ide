@@ -2,17 +2,17 @@
 
 Status: implemented (roadmap feature 4; protocol: the parent bumps the version when merging).
 Hermes Desk draws ` ```tsx preview ` blocks of its chat answers in a renderer sandbox
-(`previewGuide.ts`); an ide session is a terminal TUI with no answer blocks to read, so its
-agent shows things with a tool instead: `ide_preview` opens (or reloads) a tab in the session's
+(`previewGuide.ts`); a Meninx session is a terminal TUI with no answer blocks to read, so its
+agent shows things with a tool instead: `meninx_preview` opens (or reloads) a tab in the session's
 detail area. No approval: a preview only shows something in the user's own window.
 
-Code: `ide-core/src/preview.rs` (records, pages, files inside the session folder, Markdown),
-server `ide-server/src/service/previews.rs` (the `ide_preview` tool, `preview.file`), app
-`ide-app/src/previews_ui.rs` (tabs, the `ide-preview://` scheme). Tests: `ide-core`
-`preview::tests`, `ide-server/tests/previews_e2e.rs`, app script `IDE_APP_SCRIPT_ONLY=preview`
+Code: `meninx-core/src/preview.rs` (records, pages, files inside the session folder, Markdown),
+server `meninx-server/src/service/previews.rs` (the `meninx_preview` tool, `preview.file`), app
+`meninx-app/src/previews_ui.rs` (tabs, the `meninx-preview://` scheme). Tests: `meninx-core`
+`preview::tests`, `meninx-server/tests/previews_e2e.rs`, app script `MENINX_APP_SCRIPT_ONLY=preview`
 (`script_previews.rs`, real CEF).
 
-## Agent tool `ide_preview`
+## Agent tool `meninx_preview`
 
 `{action?, title, kind, content?, path?, url?, id?}`; `action` is `show` (default), `guide`,
 `list` or `close`.
@@ -20,7 +20,7 @@ server `ide-server/src/service/previews.rs` (the `ide_preview` tool, `preview.fi
 | Kind | With | Shows |
 |---|---|---|
 | `html` | `content` | the page (a whole document or a fragment) |
-| `markdown` | `content` | it rendered (pulldown-cmark: tables, task lists, strikethrough, footnotes) in ide's dark style |
+| `markdown` | `content` | it rendered (pulldown-cmark: tables, task lists, strikethrough, footnotes) in Meninx's dark style |
 | `file` | `path` (relative to the session folder, or absolute inside it) | `.html` / `.htm`, `.md` / `.markdown` (rendered), `.txt`, images (`png jpg gif webp svg ico bmp`) |
 | `url` | `url` (or `path` / `content`), `http(s)://` only | a normal browser tab |
 
@@ -37,14 +37,14 @@ server `ide-server/src/service/previews.rs` (the `ide_preview` tool, `preview.fi
 - Limits: 8 MiB of content or per file, titles up to 120 characters.
 - A session's previews go with the session (its data folder is removed).
 
-## Serving (`ide-preview://`)
+## Serving (`meninx-preview://`)
 
-- Registered in `main` next to `ide-widget` (`ide_web::register_custom_schemes`): standard,
+- Registered in `main` next to `meninx-widget` (`meninx_web::register_custom_schemes`): standard,
   secure, CORS- and fetch-enabled; each preview has its own origin
-  `ide-preview://<id>.<session>`.
-- The app answers (`ide_web::set_scheme_handler`) only requests of the tab showing that preview
+  `meninx-preview://<id>.<session>`.
+- The app answers (`meninx_web::set_scheme_handler`) only requests of the tab showing that preview
   (the request's view = that tab, host = that preview), `GET` / `HEAD` only (else 405); others
-  get 403. There is no ide API (unlike widgets' `/__ide/`): a preview page cannot call tools or
+  get 403. There is no Meninx API (unlike widgets' `/__meninx/`): a preview page cannot call tools or
   reach other previews' files.
 - Files come from the server (`preview.file {session, preview, path}` -> `WidgetFile {mime,
   data}`): `path` empty = the page (Markdown rendered); else a file relative to the shown file's
@@ -66,7 +66,7 @@ server `ide-server/src/service/previews.rs` (the `ide_preview` tool, `preview.fi
 |---|---|
 | `preview.file` | `{session, preview, path}` -> `WidgetFile {mime, data}` |
 
-Agent tool name: `ide_proto::AGENT_TOOL_PREVIEW`. Error id `preview {detail}`.
+Agent tool name: `meninx_proto::AGENT_TOOL_PREVIEW`. Error id `preview {detail}`.
 
 ## Not like Desk (yet)
 

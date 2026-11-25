@@ -1,16 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ide-core",
-    "crates/ide-agents",
-    "crates/ide-i18n",
-    "crates/ide-term",
-    "crates/ide-web",
-    "crates/ide-app",
-    "crates/ide-proto",
-    "crates/ide-server",
-    "crates/ide-client",
-    "crates/ide-views",
+    "crates/meninx-core",
+    "crates/meninx-agents",
+    "crates/meninx-i18n",
+    "crates/meninx-term",
+    "crates/meninx-web",
+    "crates/meninx-app",
+    "crates/meninx-proto",
+    "crates/meninx-server",
+    "crates/meninx-client",
+    "crates/meninx-views",
 ]
 
 [workspace.package]
@@ -34,22 +34,22 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
-# Client/server protocol (ide-proto, ide-server, ide-client).
+# Client/server protocol (meninx-proto, meninx-server, meninx-client).
 tokio = { version = "1", default-features = false }
 rmp-serde = "1"
 bytes = "1"
 futures = "0.3"
-# ide-views: word-level diff of changed line pairs.
+# meninx-views: word-level diff of changed line pairs.
 similar = "2"
 
-ide-core = { path = "crates/ide-core" }
-ide-agents = { path = "crates/ide-agents" }
-ide-i18n = { path = "crates/ide-i18n" }
-ide-term = { path = "crates/ide-term" }
-ide-web = { path = "crates/ide-web" }
-ide-proto = { path = "crates/ide-proto" }
-ide-client = { path = "crates/ide-client" }
-ide-views = { path = "crates/ide-views" }
+meninx-core = { path = "crates/meninx-core" }
+meninx-agents = { path = "crates/meninx-agents" }
+meninx-i18n = { path = "crates/meninx-i18n" }
+meninx-term = { path = "crates/meninx-term" }
+meninx-web = { path = "crates/meninx-web" }
+meninx-proto = { path = "crates/meninx-proto" }
+meninx-client = { path = "crates/meninx-client" }
+meninx-views = { path = "crates/meninx-views" }
 
 [profile.release]
 debug = 1

@@ -1,8 +1,8 @@
 # Session families (parent / child sessions)
 
-Status: implemented (protocol 14; send modes, sent messages, reading conversations: 18): model and rules (`ide-core/src/family.rs`), server
+Status: implemented (protocol 14; send modes, sent messages, reading conversations: 18): model and rules (`meninx-core/src/family.rs`), server
 (`session.create_child`, `session.merge_child`, `session.sync_parent`), bridge tools, app
-(tree, dialog, row menu). Tests: `ide-core` `family::tests`, `ide-server/tests/family_e2e.rs`.
+(tree, dialog, row menu). Tests: `meninx-core` `family::tests`, `meninx-server/tests/family_e2e.rs`.
 Goes beyond Hermes Desk, whose child sessions only share the parent's
 folder ("공유 작업 폴더 · 독립 대화"): here a child either shares the parent's workspace or gets
 its own worktrees branched from the parent's, and the parent merges them back.
@@ -12,12 +12,12 @@ its own worktrees branched from the parent's, and the parent merges them back.
 - A session may have a `parent` (another session). Depth: a root, its children, their
   children (two levels below a root). A child of a grandchild is refused (`family-too-deep`).
 - Only workspace sessions have children (`family-needs-workspace`): the parent's worktrees are
-  the **integration worktrees** (branch `ide/<parent>`, base: the repo's base as usual). The
+  the **integration worktrees** (branch `meninx/<parent>`, base: the repo's base as usual). The
   parent is an ordinary workspace session: repos picked at creation (configuration defaults),
   more attached later in 세션 설정.
 - **Separate child** (`shared = false`): its own session folder with one worktree per picked
   repo, **only repos the parent has** (`repo-not-in-parent`); each starts at the parent's
-  branch tip and its base is the parent's branch (`ide/<parent>`, a local branch: status,
+  branch tip and its base is the parent's branch (`meninx/<parent>`, a local branch: status,
   diffs and badges resolve it in the worktree, which shares the repository's refs). Repos
   attached later must also be the parent's; base again the parent's branch.
 - **Shared child** (`shared = true`): the parent's folder and worktrees, as they are (no disk
@@ -39,11 +39,11 @@ its own worktrees branched from the parent's, and the parent merges them back.
 ## Integration
 
 - **Merge a child** (parent): per repo of the child, in the parent's worktree,
-  `git merge --no-ff ide/<child>` (or `--squash` + commit). Result per repo: merged, already
+  `git merge --no-ff meninx/<child>` (or `--squash` + commit). Result per repo: merged, already
   up to date, conflicts (files; the merge is left in progress for the parent to resolve in its
   Changes panel), failed (e.g. local changes in the way).
 - **Sync from the parent** (child): per repo, in the child's worktree, `git merge
-  ide/<parent>`; same results.
+  meninx/<parent>`; same results.
 - Uncommitted work is never part of either: only commits on the branches.
 - Branch badge: a separate child's work is measured against its parents' branches and then the
   root's base, by git's ancestry only: 부모에 머지됨 once its parent's branch contains it, 머지됨
@@ -54,13 +54,13 @@ its own worktrees branched from the parent's, and the parent merges them back.
 
 | Tool | Who | What |
 |---|---|---|
-| `ide_list_related_sessions` | any | parent, siblings, children: id, title, mode, activity, repos / branches |
-| `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?, agent?, account?, profile?}`: create, start, send the first prompt. `agent`: a provider id or name (default: the caller's); `account`: an account slug or name of it, `default` = the CLI's own login (default: the caller's for the same provider, else that provider's first account); `profile`: a configuration slug or name (default: the caller's) |
-| `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
-| `ide_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
-| `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); Codex: `<CODEX_HOME>/sessions/**/rollout-*-<thread>.jsonl` (`response_item` records; Codex's own context and reasoning left out; a start placeholder is resolved as a resume does); other CLIs: not supported yet |
-| `ide_merge_child` | parent | `{child, squash?}` -> per repo result |
-| `ide_sync_from_parent` | separate child | per repo result |
+| `meninx_list_related_sessions` | any | parent, siblings, children: id, title, mode, activity, repos / branches |
+| `meninx_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?, agent?, account?, profile?}`: create, start, send the first prompt. `agent`: a provider id or name (default: the caller's); `account`: an account slug or name of it, `default` = the CLI's own login (default: the caller's for the same provider, else that provider's first account); `profile`: a configuration slug or name (default: the caller's) |
+| `meninx_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
+| `meninx_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
+| `meninx_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); Codex: `<CODEX_HOME>/sessions/**/rollout-*-<thread>.jsonl` (`response_item` records; Codex's own context and reasoning left out; a start placeholder is resolved as a resume does); other CLIs: not supported yet |
+| `meninx_merge_child` | parent | `{child, squash?}` -> per repo result |
+| `meninx_sync_from_parent` | separate child | per repo result |
 
 Related = parent, children and siblings. Messages go through the target's terminal (its
 provider's prompt input), never through tests (no prompts to real CLIs).
@@ -92,7 +92,7 @@ provider's prompt input), never through tests (no prompts to real CLIs).
 | `session.sync_parent` | `{id (child)}` -> `Merges` |
 
 `SessionInfo.parent` / `.shared`; `MergeResult` = `Merged` / `UpToDate` / `Conflicts{files}` /
-`Failed{error}`. Messages queued by `ide_send_to_session` (and a child's first prompt) are typed
+`Failed{error}`. Messages queued by `meninx_send_to_session` (and a child's first prompt) are typed
 in with `session.send_prompt`'s input rules when the target is not working, not waiting for the
 user and its TUI is at its input (retried every screen tick, 0.7 s, after the screen was read).
 A child's first prompt goes on its command line instead when its provider takes one there
@@ -108,8 +108,8 @@ auto-answered within 1.5 s. Bracketed paste alone is not enough: Claude Code tur
 its start dialogs (folder trust, one "Adding a new directory" per repository) still show, and a
 dialog took the typed prompt (seen 2026-11-24: two of four children stayed idle). A message for
 a session that is not running stays queued (it is typed in after its next start) instead of
-being dropped; `ide_list_related_sessions` shows each session's `queued_messages`.
-`ide_send_to_session` to a stopped child of the sender starts it (resuming its conversation),
+being dropped; `meninx_list_related_sessions` shows each session's `queued_messages`.
+`meninx_send_to_session` to a stopped child of the sender starts it (resuming its conversation),
 like a session waiting to be resumed after a server restart.
 
 ## Write lease of a shared folder
@@ -122,8 +122,8 @@ owner, i.e. the parent, by default; `SessionInfo.writer`, ✎ in the list).
   that names the holder and the ways out. Edits outside the folder and separate children are not
   guarded. Shell commands are not guarded (hooks cannot tell what a command writes); the
   guidance asks members not to write through the shell without the access.
-- `ide_request_write_access`: granted at once when the holder is not working (not Working /
-  NeedsInput, or not running), else refused; `ide_release_write_access`: back to the owner. A
+- `meninx_request_write_access`: granted at once when the holder is not working (not Working /
+  NeedsInput, or not running), else refused; `meninx_release_write_access`: back to the owner. A
   deleted holder hands it back too. In memory: a daemon restart gives it back to the owners.
 - Codex: its hooks are not registered yet (`docs/agent-bridge.md`), so its edits are not refused;
   it gets the same guidance.
