@@ -268,6 +268,8 @@ const IDE_JS: &str = r#"(() => {
   window.ide = Object.freeze({
     widget: Object.freeze({ id, session }),
     async call(tool, args) { return parse((await post('call', { tool, args: args ?? {} })).text); },
+    async context() { const r = await post('context', {}); return { selected: r.selected ?? null, session: r.session }; },
+    async openBrowser(url, opts) { await post('browser', { url, session: opts?.session ?? '' }); },
     host,
     exec: (opts) => host('exec', opts),
     fs: Object.freeze({
@@ -740,6 +742,26 @@ impl App {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
             let text = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("").to_owned();
             match endpoint {
+                // The session the user has selected now (a 공용 tab is shown in every session).
+                "context" => {
+                    resp.respond(json(serde_json::json!({
+                        "ok": true,
+                        "selected": self.selected,
+                        "session": session,
+                    })));
+                    return Task::none();
+                }
+                // Open a web page in ide's browser, in a session (default: the selected one).
+                "browser" => {
+                    let url = text("url");
+                    let r = self.widget_open_browser(&widget, &url, &text("session"));
+                    let (r, task) = match r {
+                        Ok(t) => (json(serde_json::json!({ "ok": true })), t),
+                        Err(e) => (api_error(e), Task::none()),
+                    };
+                    resp.respond(r);
+                    return task;
+                }
                 "call" => {
                     let tool = text("tool");
                     let args = body.get("args").cloned().unwrap_or_else(|| serde_json::json!({})).to_string();
@@ -815,6 +837,30 @@ impl App {
             |_| (),
         )
         .discard()
+    }
+
+    /// A widget page opens `url` in a browser tab of `session` (empty: the selected session).
+    /// Allowed like the agent tool `ide_browser_open` (declared, not blocked); no site approval:
+    /// the widget is the user's own.
+    fn widget_open_browser(&mut self, widget: &str, url: &str, session: &str) -> Result<Task<Message>, String> {
+        let w = self.widgets.get(widget).ok_or("the widget is not registered")?;
+        let name = ide_proto::browser::TOOL_OPEN;
+        let has = |l: &[String]| l.iter().any(|t| t == name || t == "*");
+        if !has(&w.tools) {
+            return Err(crate::i18n::tr::err_widget_not_allowed(name));
+        }
+        if has(&w.blocked) {
+            return Err(crate::i18n::tr::err_widget_blocked(name));
+        }
+        let lower = url.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err("only http(s) addresses".into());
+        }
+        let sid = if session.is_empty() { self.selected.clone() } else { Some(session.to_owned()) };
+        let sid = sid.filter(|s| self.live(s).is_some()).ok_or("no such open session")?;
+        crate::script::log(&format!("widget {widget}: browser {url} in {sid}"));
+        self.ui.page = crate::ui_state::Page::Work;
+        Ok(self.open_browser_tab(Some(sid), false, url.to_owned(), None))
     }
 
     /// The pane's header for a widget tab: its name, reload, developer tools.

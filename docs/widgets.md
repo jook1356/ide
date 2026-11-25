@@ -80,6 +80,12 @@ Relative paths are under the showing session's folder. A failing call answers an
 (the page's promise rejects). Calls that change something are audited (`widget.host <session>
 <widget> <method>`).
 
+App-side helpers (answered by the app, `/__ide/context` and `/__ide/browser`):
+`ide.context()` -> `{selected, session}` (the session selected now, for a 공용 tab that follows
+it, like Desk's global mods polling `desk.context()`); `ide.openBrowser(url, {session}?)` opens
+an http(s) page in a browser tab of that session (default: the selected one) without a site
+approval, if the widget declares `ide_browser_open` and the user did not block it.
+
 ### Block policy
 
 `<data>/widgets/policy.json` (`ide_core::widget::Policy`): `all` (blocked for every widget,
