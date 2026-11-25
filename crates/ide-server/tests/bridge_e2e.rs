@@ -283,6 +283,8 @@ async fn agent_connection_tools_and_app_round_trip() {
             "ide_release_write_access",
             "ide_widget",
             "ide_preview",
+            "ide_profile_get",
+            "ide_profile_edit",
             "ide_sync_from_parent",
             "ide_browser_list",
             "ide_browser_open",
@@ -342,6 +344,98 @@ async fn agent_connection_tools_and_app_round_trip() {
     assert!(closed, "the app's subscription ended");
     let r = call(&mux, &mut rx, 8, "ide_show_message", r#"{"message":"x"}"#).await;
     assert!(r.is_error && r.text.contains("no ide window"), "{}", r.text);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ide_profile_get` / `ide_profile_edit`: an agent changes its session's profile, checked
+/// against the files as they are then; the app is told; the history records it and restores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_tools_edit_with_checks() {
+    let dir = tmp_dir("bridge-profile");
+    let repo = dir.join("repo");
+    init_repo(&repo);
+    let data = dir.join("data");
+    let server = bridged_server(&data, &dir.join("bin"));
+    let app = Client::connect(memory(&server), opts()).await.unwrap();
+    let repo_id = app.register_repo(&repo.display().to_string()).await.unwrap().id;
+    let (s, _) = app
+        .create_session(new_session("shell", Some(repo_id), Vec::new()))
+        .await
+        .unwrap();
+    let ctx = server.authorize(server.user()).unwrap();
+    let spec = ctx.launch_spec(&ctx.resolve_session(&s.id).unwrap()).unwrap();
+    let token = env_of(&spec.env, TOKEN_ENV).unwrap();
+    let (mux, mut rx, r) = agent_conn(&server, &s.id, &token).await;
+    assert!(matches!(r, Ok(Response::Welcome(_))), "{r:?}");
+    let mut events = app.events().unwrap();
+
+    let r = call(&mux, &mut rx, 2, "ide_profile_get", "{}").await;
+    assert!(!r.is_error, "{}", r.text);
+    let v: serde_json::Value = serde_json::from_str(&r.text).unwrap();
+    assert_eq!(v["profile"]["slug"], "default");
+    let rev0 = v["instructions"]["rev"].as_str().unwrap().to_owned();
+
+    // Write the instructions and add a skill in one call.
+    let args = serde_json::json!({
+        "reason": "Save the build rule",
+        "ops": [
+            {"op": "write", "path": "instructions.md", "rev": rev0, "content": "Use pnpm.\nRun tests.\n"},
+            {"op": "write", "path": "skills/build/SKILL.md", "content": "---\nname: build\ndescription: Builds it\n---\nRun pnpm build.\n"},
+        ],
+    });
+    let r = call(&mux, &mut rx, 3, "ide_profile_edit", &args.to_string()).await;
+    assert!(!r.is_error, "{}", r.text);
+    let seen = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(e) = events.next().await {
+            if let ClientEvent::Notify(Notify::ConfigurationEdited { slug, session, summary, files, .. }) = e {
+                return (slug, session, summary, files);
+            }
+        }
+        panic!("events ended");
+    })
+    .await
+    .unwrap();
+    assert_eq!(seen.0, "default");
+    assert_eq!(seen.1, s.id);
+    assert_eq!(seen.2, "Save the build rule");
+    assert_eq!(seen.3, ["instructions.md", "skills/build/SKILL.md"]);
+    let c = app.configurations().await.unwrap().into_iter().find(|c| c.slug == "default").unwrap();
+    assert_eq!(c.instructions, "Use pnpm.\nRun tests.\n");
+    assert_eq!(c.skills.len(), 1);
+
+    // Another session's write based on the old revision: refused, current text returned.
+    let stale = serde_json::json!({
+        "reason": "x",
+        "ops": [{"op": "write", "path": "instructions.md", "rev": rev0, "content": "Use npm."}],
+    });
+    let r = call(&mux, &mut rx, 4, "ide_profile_edit", &stale.to_string()).await;
+    assert!(r.is_error && r.text.contains("changed since you read it") && r.text.contains("Run tests."), "{}", r.text);
+    // A patch of text that is gone: refused; a patch of other text: applied.
+    let gone = r#"{"reason":"x","ops":[{"op":"patch","path":"instructions.md","old":"Use npm.","new":"y"}]}"#;
+    let r = call(&mux, &mut rx, 5, "ide_profile_edit", gone).await;
+    assert!(r.is_error && r.text.contains("not found"), "{}", r.text);
+    let fine = r#"{"reason":"Pin pnpm","ops":[{"op":"patch","path":"instructions.md","old":"Use pnpm.","new":"Use pnpm 9."}]}"#;
+    let r = call(&mux, &mut rx, 6, "ide_profile_edit", fine).await;
+    assert!(!r.is_error, "{}", r.text);
+    let r = call(&mux, &mut rx, 7, "ide_profile_edit", r#"{"reason":"x","ops":[{"op":"write","path":"../x","content":""}]}"#).await;
+    assert!(r.is_error, "{}", r.text);
+    let r = call(&mux, &mut rx, 8, "ide_profile_edit", r#"{"ops":[]}"#).await;
+    assert!(r.is_error && r.text.contains("reason"), "{}", r.text);
+    let r = call(&mux, &mut rx, 9, "ide_profile_get", r#"{"path":"instructions.md"}"#).await;
+    assert!(r.text.contains("Use pnpm 9."), "{}", r.text);
+
+    // History: the agent's changes with session and reason; restore the first version.
+    let h = app.configuration_history("default", 50).await.unwrap();
+    assert_eq!(h[0].source, "agent");
+    assert_eq!(h[0].summary, "Pin pnpm");
+    assert_eq!(h[0].session.as_deref(), Some(s.id.as_str()));
+    assert_eq!(h[1].files, ["instructions.md", "skills/build/SKILL.md"]);
+    let first = h.last().unwrap().id.clone();
+    let c = app.restore_configuration("default", &first).await.unwrap();
+    assert_eq!(c.instructions, "");
+    assert!(c.skills.is_empty());
+    assert_eq!(app.configuration_history("default", 50).await.unwrap()[0].source, "restore");
+    drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
