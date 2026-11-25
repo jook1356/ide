@@ -284,7 +284,7 @@ fn store_profile(paths: &Paths, c: &Configuration) -> Result<()> {
             let name = e.file_name().to_string_lossy().into_owned();
             if e.path().is_file() && !keep.contains(&name) {
                 std::fs::remove_file(e.path())
-                    .map_err(|err| Error::io(IoAction::Removing, &e.path(), err))?;
+                    .map_err(|err| Error::io(IoAction::Removing, e.path(), err))?;
             }
         }
     }

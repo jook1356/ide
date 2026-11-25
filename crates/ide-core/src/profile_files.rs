@@ -621,7 +621,7 @@ mod tests {
         };
         // A new skill needs its SKILL.md: nothing written.
         assert!(matches!(
-            apply(&dir, &[new_skill.clone()]),
+            apply(&dir, std::slice::from_ref(&new_skill)),
             Err(EditError::Invalid { .. })
         ));
         assert!(!dir.join("skills/pdf").exists());

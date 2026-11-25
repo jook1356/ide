@@ -2029,7 +2029,7 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 .find(|c| c.slug == slug)
                 .and_then(|c| c.default_repos.clone());
             let stored = std::fs::read_to_string(
-                sc.data.join("configurations").join(&slug).join("profile.json"),
+                sc.data.join("configurations").join(slug).join("profile.json"),
             )
             .map(|t| ids.iter().all(|i| t.contains(i.as_str())))
                 .unwrap_or(false);
