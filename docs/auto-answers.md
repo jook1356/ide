@@ -24,7 +24,7 @@ session; an answer rule matches a dialog the same way a state rule does and type
 id = "trust_workspace"            # stable: the user's choice and the UI text use it
 default = true                    # on unless the user turns it off (default: true)
 region = "whole"                  # as for state rules
-path_after = "accessing workspace:"  # the folder: first non-blank line after the last such line
+path_after = "accessing workspace:"  # the folder: the first paragraph after the last such line (wrapped rows joined)
 contains = ["accessing workspace:", "no, exit", "yes, i trust this folder"]
 any = [{ contains = ["enter to confirm"] }, { contains = ["then enter"] }]
 choose = "yes, i trust this folder"  # the list entry to pick (moves, then Enter on a later read)
