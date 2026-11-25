@@ -63,11 +63,13 @@ pub enum Icon {
     Checks,
     // Widgets (widgets_ui.rs, widgets_page.rs).
     Puzzle,
+    // Agent previews (previews_ui.rs).
+    Eye,
     // Running work (notice_view.rs), turned by [`spinner`].
     Loader,
 }
 
-const SOURCES: [&str; 45] = [
+const SOURCES: [&str; 46] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -112,6 +114,7 @@ const SOURCES: [&str; 45] = [
     include_str!("../assets/icons/x.svg"),
     include_str!("../assets/icons/checks.svg"),
     include_str!("../assets/icons/puzzle.svg"),
+    include_str!("../assets/icons/eye.svg"),
     include_str!("../assets/icons/loader-2.svg"),
 ];
 

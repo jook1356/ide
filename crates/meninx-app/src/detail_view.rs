@@ -169,6 +169,10 @@ pub(crate) fn item_icon<'a>(app: &App, live: &Live, key: &ItemKey) -> El<'a> {
         ItemKey::Browser(id) if app.browser(live, *id).is_some_and(|b| b.widget.is_some()) => {
             crate::icons::icon(Icon::Puzzle, 14.0, style::DIM)
         }
+        // An agent's preview: the eye, not the browser's globe.
+        ItemKey::Browser(id) if app.browser(live, *id).is_some_and(|b| b.preview.is_some()) => {
+            crate::icons::icon(Icon::Eye, 14.0, style::DIM)
+        }
         ItemKey::Web | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
         ItemKey::Terminal(_) => text(">_").size(11).font(style::mono()).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
