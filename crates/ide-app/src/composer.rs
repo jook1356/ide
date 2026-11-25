@@ -36,7 +36,8 @@ use crate::view::tip;
 
 type El<'a> = Element<'a, Message>;
 
-/// Widget id of the input box (focused when it opens and after a send).
+/// Widget id of the input box (focused when it opens, after a send, and when its session is
+/// selected or started; the terminal then does not autofocus).
 pub const COMPOSER_ID: &str = "ide-composer";
 /// One line of 13 px text: room for a chip's pill around descenders (g, y, p).
 const LINE_H: f32 = 20.0;

@@ -1128,7 +1128,10 @@ impl App {
         let has_term = live.attached || live.state.is_alive() || s.term_end > 0;
         let body: El<'_> = if has_term {
             let id = s.id.clone();
+            let composer = self.composer_shown(live) && live.state.is_alive();
+            // With the input box shown, a new terminal widget does not grab the keys from it.
             let mut view = TerminalView::new(&live.term, &self.term_config)
+                .autofocus(!composer)
                 .id(TERM_ID)
                 .on_event(Message::TermView);
             if self.connected() {
@@ -1169,7 +1172,7 @@ impl App {
                 .on_exit(Message::DropHover(crate::composer::Dest::Terminal, false))
                 .boxed(),
             );
-            if self.composer_shown(live) && live.state.is_alive() {
+            if composer {
                 col = col.push(self.composer_view(live));
             }
             let exited = match live.state {
