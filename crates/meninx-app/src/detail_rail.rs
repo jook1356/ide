@@ -131,7 +131,9 @@ impl App {
                 }
             }
             RailMsg::Leave => {
-                if !self.rail_menu {
+                // A menu of the list (settings, + 새로 열기) is up: it hangs beside the list,
+                // so the pointer leaves the list to reach it.
+                if !self.rail_menu && !self.new_menu {
                     self.rail_open = false;
                 }
             }
@@ -298,7 +300,7 @@ impl App {
                     .boxed(),
             );
         }
-        list = list.push(self.new_item_button(live, wide));
+        list = list.push(self.new_item_button(live, wide, menu));
         column![
             container(top).padding([0, 2]),
             scrollable(list).height(Fill),

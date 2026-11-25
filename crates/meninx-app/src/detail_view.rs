@@ -611,7 +611,7 @@ impl App {
                     list = list.push(self.item_row(live, r.boxed(), &k));
                 }
             }
-            list = list.push(container(self.new_item_button(live, true)).padding([4, 0]).boxed());
+            list = list.push(container(self.new_item_button(live, true, true)).padding([4, 0]).boxed());
             if total <= 1 {
                 list = list.push(
                     container(text(tr::open_items_none()).size(12).color(style::DIM))

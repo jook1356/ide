@@ -475,8 +475,9 @@ impl App {
 
     /// Desk's "+ 새로 열기" (`NewTerminalMenu`): 이 세션 | 공용 on top, a terminal (in one of
     /// the session's repos or its folder; 공용: the home folder), then the web: 즐겨찾기 (open,
-    /// rename, delete) and an address field. `wide`: with its label.
-    pub(crate) fn new_item_button<'a>(&'a self, live: &'a Live, wide: bool) -> El<'a> {
+    /// rename, delete) and an address field. `wide`: with its label. `menu`: this copy shows
+    /// the menu (the unpinned rail draws its list twice while it is opened: only one may).
+    pub(crate) fn new_item_button<'a>(&'a self, live: &'a Live, wide: bool, menu: bool) -> El<'a> {
         use crate::browser::{BOOKMARK_EDIT_ID, BrowserMsg};
         let sid = live.info.id.as_str();
         let global = self.new_global;
@@ -493,7 +494,7 @@ impl App {
             .width(Fill)
             .style(style::ghost_choice(self.new_menu))
             .on_press(Message::UTerm(UTermMsg::NewMenu(!self.new_menu)));
-        let popup = self.new_menu.then(|| {
+        let popup = (self.new_menu && menu).then(|| {
             let row_btn = |content: El<'a>, msg: Message| -> El<'a> {
                 button(content)
                     .padding([5, 10])
