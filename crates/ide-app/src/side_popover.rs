@@ -1,10 +1,17 @@
-//! A popover that opens to the right of its button, its top level with the button's top.
-//! iced's `popover::Position::Right` centres the popup vertically on the button; this wraps
-//! such a popover and moves its overlay so the popup's top is level with the button's (the
-//! popup is laid out by the popover in a first pass, see `overlay`). The popover's own snapping
-//! is off and its clip is the window: both are the enclosing scrollable's (the rail list)
-//! otherwise, which pushes the popup back over the button or hides it outside the rail. This
-//! one keeps the popup inside the window vertically.
+//! Popovers aligned to an edge of their button. iced's `popover` centres the popup on the
+//! button (`Position::Right`: vertically, `Position::Bottom`: horizontally); this wraps such a
+//! popover and moves its overlay (the popup is laid out by the popover in a first pass, see
+//! `overlay`):
+//! - `side_popover`: right of the button, its top level with the button's top;
+//! - `end_popover`: below the button, its right edge level with the button's right edge.
+//!
+//! The popover's own snapping is off and its clip is the window: both are the enclosing
+//! scrollable's (the rail list) otherwise, which pushes the popup back over the button or hides
+//! it outside the rail. These keep the popup inside the window.
+//!
+//! Moving the overlay also moves the popover's idea of where the button is, so a press on the
+//! button itself counts as outside and sends `on_close`: give the button no `on_press` while
+//! the popup is open, or its release would open it again.
 
 use iced::advanced::Widget;
 use iced::advanced::layout::{self, Layout};
@@ -25,20 +32,49 @@ pub fn side_popover<'a, Message: Clone + 'a>(
         .gap(gap)
         .snap_within_viewport(false)
         .on_close(on_close);
-    TopAligned {
+    Aligned {
         inner: inner.boxed(),
+        align: Align::SideTop,
     }
     .boxed()
 }
 
-/// Shares the popover's tree (like `Widget::map`); only `overlay` differs.
-struct TopAligned<'a, Message> {
-    inner: Element<'a, Message>,
+/// `popover(trigger, popup)` opening below `trigger`, right-aligned with it.
+pub fn end_popover<'a, Message: Clone + 'a>(
+    trigger: impl Widget<Message, iced::Theme, iced::Renderer> + 'a,
+    popup: Option<impl Widget<Message, iced::Theme, iced::Renderer> + 'a>,
+    gap: f32,
+    on_close: Message,
+) -> Element<'a, Message> {
+    let inner = iced::widget::popover(trigger, popup)
+        .position(Position::Bottom)
+        .gap(gap)
+        .snap_within_viewport(false)
+        .on_close(on_close);
+    Aligned {
+        inner: inner.boxed(),
+        align: Align::BottomEnd(gap),
+    }
+    .boxed()
 }
 
-impl<Message> widget::Meta for TopAligned<'_, Message> {}
+#[derive(Clone, Copy)]
+enum Align {
+    /// Right of the button, top-aligned.
+    SideTop,
+    /// Below the button (with the popover's gap), right-aligned.
+    BottomEnd(f32),
+}
 
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for TopAligned<'_, Message> {
+/// Shares the popover's tree (like `Widget::map`); only `overlay` differs.
+struct Aligned<'a, Message> {
+    inner: Element<'a, Message>,
+    align: Align,
+}
+
+impl<Message> widget::Meta for Aligned<'_, Message> {}
+
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Aligned<'_, Message> {
     fn size(&self) -> Size<Length> {
         self.inner.size()
     }
@@ -125,13 +161,28 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for TopAligned<'_, Me
             self.inner
                 .overlay(tree, layout, renderer, viewport, translation, window),
         );
-        let popup_h = tree.children.get(1).map_or(0.0, |t| t.size.height);
+        let popup = tree.children.get(1).map_or(Size::ZERO, |t| t.size);
         let base = layout.bounds() + translation;
-        // Where `Position::Right` puts it (centred on the button) and where it should go: the
-        // button's top, moved up when the popup would leave the window's bottom.
-        let centred = base.y + (base.height - popup_h) / 2.0;
-        let top = base.y.min(window.height - popup_h).max(0.0);
-        let shifted = Vector::new(translation.x, translation.y + top - centred);
+        let shift = match self.align {
+            Align::SideTop => {
+                // Where `Position::Right` puts it (centred on the button) and where it should
+                // go: the button's top, moved up when the popup would leave the window's bottom.
+                let centred = base.y + (base.height - popup.height) / 2.0;
+                let top = base.y.min(window.height - popup.height).max(0.0);
+                Vector::new(0.0, top - centred)
+            }
+            Align::BottomEnd(gap) => {
+                // `Position::Bottom` centres it on the button: move it so its right edge is the
+                // button's, to the right when it would leave the window's left edge, and up
+                // when it would leave the bottom.
+                let centred = base.x + (base.width - popup.width) / 2.0;
+                let left = (base.x + base.width - popup.width).min(window.width - popup.width).max(0.0);
+                let below = base.y + base.height + gap;
+                let top = below.min(window.height - popup.height).max(0.0);
+                Vector::new(left - centred, top - below)
+            }
+        };
+        let shifted = translation + shift;
         // The popover draws its popup clipped to `viewport + translation`: make that the whole
         // window, not the enclosing scrollable's clip (which hid the popup outside the rail).
         let whole = Rectangle {

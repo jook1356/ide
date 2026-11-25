@@ -4,7 +4,7 @@
 
 use iced::widget::{
     Column, Row, button, center, checkbox, column, combo_box, container, mouse_area, opaque, pick_list,
-    popover,
+    popover, responsive,
     row, scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Widget as _, mouse};
@@ -58,6 +58,25 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
 /// stacking `Fit` onto a max-bounded `Fill` yields exactly that length).
 pub(crate) fn fit_up_to_room() -> Length {
     Length::Fit.stack(Length::Fill.max(f32::INFINITY))
+}
+
+/// The session header's side padding, and the least room it keeps for the folder path when it
+/// shows the branch and the folder.
+const HEADER_PAD_X: f32 = 10.0;
+const HEADER_MIN_ROOT: f32 = 40.0;
+
+/// About how wide `s` is at `size` (Hangul and other wide characters a full em, the rest a bit
+/// over half): enough to tell whether a header line fits.
+pub(crate) fn label_width(s: &str, size: f32) -> f32 {
+    s.chars()
+        .map(|c| if c.is_ascii() { 0.6 } else { 1.0 })
+        .sum::<f32>()
+        * size
+}
+
+/// About how wide a header button (`padding([2, 8])`, 12 px label) is.
+pub(crate) fn button_width(label: &str) -> f32 {
+    label_width(label, 12.0) + 16.0
 }
 
 pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: String) -> El<'a> {
@@ -321,7 +340,7 @@ impl App {
         let base = column![base, self.app_footer()].height(Fill);
         // Always a stack so opening/closing a modal keeps the widget tree (terminal).
         let overlay = self.modal_layer(false);
-        let mut root = stack![base, self.toast_layer(false), overlay].boxed();
+        let mut root = stack![base, self.toast_layer(false), self.notice_layer(), overlay].boxed();
         // Frameless window (`frame.rs`): the title bar stays usable above modals.
         if let Some(id) = self.window {
             let max = self.window_maximized;
@@ -1091,38 +1110,57 @@ impl App {
         let s = &live.info;
 
         let (glyph, gcolor) = provider_glyph(self, &s.provider);
-        let header = container(
-            row![
-                text(glyph).size(13).color(gcolor),
-                text(s.title.as_str()).size(13).font(style::bold()),
-                text(
-                    s.repos
-                        .first()
-                        .map(|r| r.branch.clone())
-                        .unwrap_or_default()
-                )
-                .size(12)
-                .color(style::DIM)
-                .font(style::mono()),
-                text(s.root.as_str())
-                    .size(11)
-                    .color(style::FAINT)
+        let branch = s.repos.first().map(|r| r.branch.clone()).unwrap_or_default();
+        let composer_shown = self.composer_shown_kind(live);
+        // Everything on one line: when the header is too narrow for the title, the branch and
+        // the buttons, the branch and the folder are left out and then the title is cut (…);
+        // the buttons' labels never wrap.
+        let full_w = HEADER_PAD_X * 2.0
+            + 13.0
+            + label_width(&s.title, 13.0)
+            + label_width(&branch, 12.0)
+            + if composer_shown { button_width(&tr::composer_toggle()) } else { 0.0 }
+            + self.detail_toggle_width(live)
+            + HEADER_MIN_ROOT
+            + 10.0 * 5.0;
+        let header = responsive(move |size| {
+            let wide = size.width >= full_w;
+            let mut r = row![
+                text(glyph.clone()).size(13).color(gcolor),
+                text(s.title.as_str())
+                    .size(13)
+                    .font(style::bold())
                     .wrapping(text::Wrapping::None)
-                    .ellipsis(text::Ellipsis::Start)
-                    .width(Fill),
-                if self.composer_shown_kind(live) {
-                    self.composer_toggle()
-                } else {
-                    space().width(0).boxed()
-                },
-                self.detail_toggle(live),
+                    .ellipsis(text::Ellipsis::End)
+                    .width(fit_up_to_room()),
             ]
             .spacing(10)
-            .align_y(Alignment::Center),
-        )
-        .padding([6, 10])
-        .width(Fill)
-        .style(style::bg(style::HEADER));
+            .align_y(Alignment::Center);
+            if wide {
+                r = r.push(text(branch.clone()).size(12).color(style::DIM).font(style::mono()).wrapping(text::Wrapping::None).boxed());
+                r = r.push(
+                    text(s.root.as_str())
+                        .size(11)
+                        .color(style::FAINT)
+                        .wrapping(text::Wrapping::None)
+                        .ellipsis(text::Ellipsis::Start)
+                        .width(Fill)
+                        .boxed(),
+                );
+            } else {
+                r = r.push(space().width(Fill).boxed());
+            }
+            if composer_shown {
+                r = r.push(self.composer_toggle());
+            }
+            r = r.push(self.detail_toggle(live));
+            container(r)
+                .padding([6.0, HEADER_PAD_X])
+                .width(Fill)
+                .style(style::bg(style::HEADER))
+                .boxed()
+        })
+        .height(Length::Shrink);
 
         // Show the terminal whenever there is (or was) output: stopped sessions keep their
         // scrollback on the server.
@@ -1246,6 +1284,17 @@ impl App {
 
     /// Desk's `DetailToggle` at the right end of the session header: shows / hides the detail
     /// area (its window while detached), with the count of open items.
+    /// About how wide `detail_toggle` is (label and count).
+    fn detail_toggle_width(&self, live: &Live) -> f32 {
+        let count = live.detail.items.len();
+        let badge = if count > 0 {
+            6.0 + label_width(&count.min(99).to_string(), 10.0) + 10.0
+        } else {
+            0.0
+        };
+        button_width(&tr::detail_toggle()) + badge
+    }
+
     fn detail_toggle<'a>(&'a self, live: &'a Live) -> El<'a> {
         let on = !self.ui.detail_collapsed;
         let label = match (self.ui.detail_detached, on) {
@@ -1255,7 +1304,7 @@ impl App {
             (true, false) => tr::detail_window_show(),
         };
         let count = live.detail.items.len();
-        let mut content = row![text(tr::detail_toggle()).size(12)]
+        let mut content = row![text(tr::detail_toggle()).size(12).wrapping(text::Wrapping::None)]
             .spacing(6)
             .align_y(Alignment::Center);
         if count > 0 {

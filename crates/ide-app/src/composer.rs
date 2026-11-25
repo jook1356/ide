@@ -926,7 +926,7 @@ impl App {
     /// The header's 입력창 toggle.
     pub(crate) fn composer_toggle(&self) -> El<'_> {
         let on = self.ui.composer_open;
-        let b = button(text(tr::composer_toggle()).size(12))
+        let b = button(text(tr::composer_toggle()).size(12).wrapping(text::Wrapping::None))
             .padding([2, 8])
             .style(style::choice(on))
             .on_press(Message::Composer(ComposerMsg::Toggle));

@@ -470,7 +470,8 @@ impl App {
         )
         .padding([4, 8])
         .style(style::choice(self.open_items))
-        .on_press(Message::ToggleOpenItems);
+        // While open, a press on the button closes the list through `end_popover`'s `on_close`.
+        .on_press_maybe((!self.open_items).then_some(Message::ToggleOpenItems));
         let popup = self.open_items.then(|| {
             let sid = live.info.id.clone();
             let mut list = Column::new().spacing(2);
@@ -659,11 +660,8 @@ impl App {
             .width(360)
             .style(style::modal_card)
         });
-        popover(trigger, popup)
-            .position(iced::widget::popover::Position::Bottom)
-            .gap(4)
-            .on_close(Message::CloseOpenItems)
-            .boxed()
+        // Below the button, right-aligned with it (centred, it spread over both sides).
+        crate::side_popover::end_popover(trigger, popup, 4.0, Message::CloseOpenItems)
     }
 
     // ------------------------------------------------------------------ side panel

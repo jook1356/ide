@@ -6,7 +6,7 @@ and opens the list, and a notice can also pop up as a toast.
 
 - Store: `crates/ide-app/src/notices.rs`. It has no widgets and is generic over the app's
   `Message`, so it can be unit-tested.
-- UI: `crates/ide-app/src/notice_view.rs`. This covers the bell, the list popover, the toasts and
+- UI: `crates/ide-app/src/notice_view.rs`. This covers the bell, the list panel, the toasts and
   the producers that mirror other state.
 
 ## Model
@@ -69,7 +69,9 @@ taskbar button (`window::request_user_attention`, `Informational`).
   While work is running, a turning loader (`icons::spinner`, Tabler `loader-2`, redrawn every
   `SPIN_FRAME`) sits in its lower right corner, beside any unread pill. The tooltip reads
   "Notifications", plus "· N tasks running" while work runs.
-- **List**: a popover right of the bell, 360 px wide and up to 520 px high (window height − 80).
+- **List**: a panel right of the bell (a layer over the window, `notice_layer`), its bottom level with
+  the bell's bottom and growing upwards: 360 px wide, up to 520 px high and at least 8 px below the
+  top of the window. A click outside closes it.
   - Header: "Notifications", a running badge, and buttons for mark all read (checks), clear finished
     (trash) and close.
   - Items, newest first: tone icon (a turning loader while running), bold title, time (`HH:MM`), mark read (✓, unread only), remove
