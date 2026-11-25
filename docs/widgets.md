@@ -74,7 +74,7 @@ list (allowed at registration) minus what the user blocked (below).
 | `exec` | `exec {program, args, cwd, stdin, env, timeout_ms}` or `{command}` (`cmd /d /s /c` / `sh -c`) -> `{code, stdout, stderr, timed_out, truncated, ms}`; no console window, default 120 s, at most 3600 s, 16 MiB kept per stream |
 | `fs` | `fs.read {path, encoding?: base64}` (at most 32 MiB), `fs.write {path, text \| base64, append?, mkdirs? = true}` (atomic replace), `fs.list`, `fs.stat`, `fs.delete {recursive?}`, `fs.mkdir` |
 | `terminal` | `term.open {command, cwd, title, shell, session}` (a user terminal, `uterm.open` with any folder), `term.list {session \| "*", ports?}` (with listening ports), `term.read {id, lines}`, `term.write {id, text, keys}` (no approval: the widget is the user's), `term.stop`, `term.rerun`, `term.remove` |
-| `sessions` | `sessions.list`, `sessions.get {id?}`: id, title, folder, parent, archived, repositories |
+| `sessions` | `sessions.list`, `sessions.get {id?}`: id, title, folder, parent, shared (works in the parent's folder), archived, repositories |
 
 Relative paths are under the showing session's folder. A failing call answers an error result
 (the page's promise rejects). Calls that change something are audited (`widget.host <session>

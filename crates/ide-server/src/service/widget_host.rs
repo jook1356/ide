@@ -278,6 +278,7 @@ fn session_json(s: &Session) -> Value {
         "title": s.title,
         "folder": s.root,
         "parent": s.parent.as_ref().map(|p| p.as_str().to_owned()),
+        "shared": s.shared,
         "archived": s.archived,
         "repositories": s.worktrees.iter().map(|w| json!({
             "name": w.name,

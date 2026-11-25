@@ -534,7 +534,7 @@ the navigation rail and in the 위젯 button of the status bar).
     command, folder, state, running, pid, ports:[{{port, process}}]}}]}}`,
     `ide.term.read(id, lines)` -> `{{text, state, running}}`, `ide.term.write(id, text, keys)`,
     `ide.term.stop(id)`, `ide.term.rerun(id)`, `ide.term.remove(id)`.
-  - `sessions`: `ide.sessions.list()` -> `[{{id, title, folder, parent, archived,
+  - `sessions`: `ide.sessions.list()` -> `[{{id, title, folder, parent, shared, archived,
     repositories:[{{name, repo, folder, branch, base}}]}}]`, `ide.sessions.get(id?)`.
   - `ide.host(method, args)` is the generic form (`'fs.read'`, `'term.open'`, ...).
   - The user can block any tool or feature per widget on the 위젯 page (calls then fail with
