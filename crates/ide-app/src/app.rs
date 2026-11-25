@@ -3828,6 +3828,11 @@ impl App {
                 Task::none()
             }
             Message::WindowFocus(id, on) => {
+                if Some(id) == self.detail_window && !on {
+                    // A moved / resized detail window is read here on Windows (it sends the
+                    // app no `Moved` messages).
+                    return crate::detail_window::save_placement(id);
+                }
                 if Some(id) == self.window {
                     self.focused = on;
                     // Looking at the selected session again: its notices are read.
@@ -4129,7 +4134,7 @@ impl App {
         self.save_ui();
         crate::script::finish(self);
         self.link = None;
-        iced::exit()
+        self.exit_after_saving_detail()
     }
 
     /// List `dir` in the repos page's folder picker (`None` = the start list).
@@ -4462,7 +4467,9 @@ impl App {
             Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
             _ => None,
         }));
-        if self.detail_window.is_some() {
+        // Not on Windows: there the placement is read from the OS (`detail_window.rs`), and a
+        // message for each step of a drag rebuilt every window's view while it moved.
+        if self.detail_window.is_some() && !cfg!(windows) {
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(id, p)),
                 _ => None,
@@ -4613,7 +4620,10 @@ impl App {
     pub fn close_for_reopen(&mut self) -> Task<Message> {
         self.save_ui();
         // The detail window closes with the app (it stays detached in `ui.json`).
-        let detail_window = self.detail_window.take().map(window::close);
+        let detail_window = self
+            .detail_window
+            .take()
+            .map(|id| crate::detail_window::save_placement(id).chain(window::close(id)));
         self.link = None;
         for live in &self.sessions {
             if let Some(w) = &live.web {

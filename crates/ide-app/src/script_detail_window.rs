@@ -402,10 +402,14 @@ pub(super) fn run(
         PStep::Place(x, y, w, h) => {
             if let Some(id) = app.detail_window {
                 log(&format!("place the detail window at {x},{y} size {w}x{h}"));
+                // Then ask where it is (Windows sends the app no `Moved` messages).
                 task = Task::batch([
                     window::move_to(id, iced::Point::new(x, y)),
                     window::resize(id, iced::Size::new(w, h)),
-                ]);
+                ])
+                .chain(window::position(id).map(move |p| {
+                    Message::DetailWindow(crate::detail_window::WinMsg::Placed(id, p))
+                }));
             }
             true
         }
