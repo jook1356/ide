@@ -72,7 +72,7 @@ also hides the side panel; files opened from it show in the detail window.
   the default ☆ (`ui.json` `default_shell`), the start folder (a repo / the session folder; 공용:
   home, recent folders, 폴더 선택… with the server folder picker), 실행 중인 서버 (ports listening in
   the scope's terminal process trees, asked every 3 s while the menu is open), a terminal per repo / the session folder / the home
-  folder, 즐겨찾기 with rename / delete, the address field), browser tabs (`browser.rs`: Desk's
+  folder, 즐겨찾기 with rename / delete, the address field), browser tabs (`browser.rs`: the page's favicon as the tab icon via `WebEvent::FaviconChanged`, the globe until then; Desk's
   `addressToUrl`, a page's new window opens a tab, ☆ in the header), 공용 items (no session; server
   terminals `g:t<n>` in the home folder) and 공통 tabs (pinned from the item menu, grouped by
   their session at the top; clicking one of another session switches to it). Not ported:

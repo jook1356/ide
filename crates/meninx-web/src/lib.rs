@@ -44,7 +44,7 @@ mod widget;
 
 pub use caption::enable_snap_layout;
 pub use devtools::{Awake, ConsoleEntry, DevTools};
-pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
+pub use events::{ConsoleLevel, Favicon, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use owner::{set_window_owner, window_owner};
 pub use placement::{Placement, place_window, window_placement};
 pub use scheme::{

@@ -25,7 +25,6 @@ type El<'a> = Element<'a, Message>;
 const I_COLLAPSE: &str = "»";
 pub(crate) const I_CLOSE: &str = "✕";
 const I_CHEVRON: &str = "▾";
-const I_GLOBE: &str = "◍";
 const I_DIFF: &str = "±";
 const I_RELOAD_DISK: &str = "↻";
 const I_OVERWRITE: &str = "⤓";
@@ -162,7 +161,12 @@ pub(crate) fn item_icon<'a>(app: &App, live: &Live, key: &ItemKey) -> El<'a> {
         ItemKey::Browser(id) if app.browser(live, *id).is_some_and(|b| b.preview.is_some()) => {
             crate::icons::icon(Icon::Eye, 14.0, style::DIM)
         }
-        ItemKey::Nothing | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
+        // A page: its favicon (the globe until it is loaded or when it has none).
+        ItemKey::Browser(id) => match app.browser(live, *id) {
+            Some(b) => b.icon(14.0),
+            None => text(crate::browser::GLOBE).size(14).color(style::DIM).boxed(),
+        },
+        ItemKey::Nothing => text(crate::browser::GLOBE).size(14).color(style::DIM).boxed(),
         ItemKey::Terminal(_) => text(">_").size(11).font(style::mono()).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
         ItemKey::Diff { path, .. } | ItemKey::Compare(path) => row![

@@ -3,7 +3,7 @@
 //! PR links and by agents; 공용 ones belong to no session. And the 즐겨찾기 (bookmarks,
 //! `ui.json`, shared by every session), toggled with ☆ in a page's header.
 
-use iced::widget::{button, container, row, text, text_input};
+use iced::widget::{button, container, image, row, text, text_input};
 use iced::{Alignment, Element, Fill, Size, Task, Widget as _};
 use meninx_web::{WebView, WebViewWidget};
 
@@ -15,6 +15,9 @@ use crate::ui_state::Bookmark;
 use crate::view::{icon_button, tip};
 
 type El<'a> = Element<'a, Message>;
+
+/// A browser tab's icon while it has no favicon.
+pub(crate) const GLOBE: &str = "◍";
 
 /// Google search for what is not an address (Desk's `SEARCH_URL`).
 const SEARCH_URL: &str = "https://www.google.com/search?q=";
@@ -35,6 +38,8 @@ pub struct Browser {
     pub widget: Option<crate::widgets_ui::WidgetTab>,
     /// The tab shows an agent's preview (`previews_ui.rs`).
     pub preview: Option<crate::previews_ui::PreviewTab>,
+    /// The page's icon, once loaded; dropped when the tab goes to another site.
+    pub favicon: Option<image::Handle>,
 }
 
 impl Browser {
@@ -50,6 +55,15 @@ impl Browser {
             error: None,
             widget: None,
             preview: None,
+            favicon: None,
+        }
+    }
+
+    /// The tab's icon at `size`: the page's favicon, else the globe.
+    pub fn icon<'a>(&self, size: f32) -> El<'a> {
+        match &self.favicon {
+            Some(h) => image(h.clone()).width(size).height(size).boxed(),
+            None => text(GLOBE).size(size).color(style::DIM).boxed(),
         }
     }
 
@@ -324,7 +338,19 @@ impl App {
                     v.set_hidden(shown != Some(b.id));
                 }
             }
-            WebEvent::UrlChanged(u) => b.url_input = u.clone(),
+            WebEvent::UrlChanged(u) => {
+                // Another site: its icon comes with its page (the globe until then).
+                let site = meninx_proto::browser::origin;
+                if site(u) != site(&b.url_input) {
+                    b.favicon = None;
+                }
+                b.url_input = u.clone();
+            }
+            WebEvent::FaviconChanged(f) => {
+                b.favicon = f
+                    .as_ref()
+                    .map(|f| image::Handle::from_rgba(f.width, f.height, f.rgba.clone()));
+            }
             // A widget's tab keeps its name.
             WebEvent::TitleChanged(t) if b.widget.is_none() => b.title = t.clone(),
             WebEvent::LoadingStateChanged {
@@ -472,6 +498,7 @@ impl App {
             icon_button("←", b.can_back.then_some(Message::WebBack), tr::web_back()),
             icon_button("→", b.can_forward.then_some(Message::WebForward), tr::web_forward()),
             icon_button("⟳", Some(Message::WebReload), tr::web_reload()),
+            container(b.icon(14.0)).center(18),
             text_input(tr::url_placeholder(), &b.url_input)
                 .id(URL_ID)
                 .on_input(Message::UrlInput)

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::*}
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use crate::events::{ConsoleLevel, RenderMode, ViewId, WebEvent, emit};
+use crate::events::{ConsoleLevel, Favicon, RenderMode, ViewId, WebEvent, emit};
 use crate::gpu::{self, PendingResize};
 use crate::runtime::{self, LIVE_BROWSERS};
 
@@ -143,6 +143,8 @@ pub(crate) struct ViewShared {
     pub title: Mutex<String>,
     pub loading: AtomicBool,
     pub pending_url: Mutex<Option<String>>,
+    /// Bumped when the page names new icons; downloads for older lists are dropped.
+    pub favicon_seq: AtomicU64,
     pub closed: AtomicBool,
     pub caret_probe: bool,
     /// Layout bounds of the widget at its last draw (iced layout coordinates, i.e. before any
@@ -283,6 +285,82 @@ impl Handler {
 
 fn s(v: Option<&CefString>) -> String {
     v.map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// The strings of a CEF string list the caller does not own.
+fn string_list(list: &mut CefStringList) -> Vec<String> {
+    let raw: *mut cef::sys::_cef_string_list_t = list.into();
+    if raw.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `raw` is the live list CEF passed to this callback; it is only read here, and each
+    // value is copied out of a zeroed `cef_string_t` that CEF fills (and that we never free: the
+    // list keeps ownership of the characters).
+    unsafe {
+        let count = cef::sys::cef_string_list_size(raw);
+        (0..count)
+            .filter_map(|i| {
+                let mut value: cef::sys::cef_string_t = std::mem::zeroed();
+                (cef::sys::cef_string_list_value(raw, i, &mut value) > 0)
+                    .then(|| CefString::from(std::ptr::from_ref(&value)).to_string())
+            })
+            .collect()
+    }
+}
+
+/// Largest icon side asked for (px): the detail area draws icons at 14 DIP, up to 200 %.
+const FAVICON_PX: u32 = 32;
+
+/// Download the page icon `urls[at]` (CEF tries the page's own cookies and cache); a failure
+/// moves to the next one, and no usable icon at all reports `None`.
+fn download_favicon(h: &Handler, seq: u64, urls: Vec<String>, at: usize) {
+    let Some(url) = urls.get(at).cloned() else {
+        emit(h.shared.id, WebEvent::FaviconChanged(None));
+        return;
+    };
+    let Some(host) = h.shared.host() else { return };
+    let mut callback = FaviconDownload::new(h.clone(), seq, urls, at);
+    host.download_image(Some(&url.as_str().into()), 1, FAVICON_PX, 0, Some(&mut callback));
+}
+
+/// A downloaded image as straight RGBA, if it has pixels.
+fn favicon_rgba(image: &Image) -> Option<Favicon> {
+    if image.is_empty() == 1 {
+        return None;
+    }
+    let (mut w, mut h) = (0, 0);
+    let bin = image.as_bitmap(1.0, ColorType::RGBA_8888, AlphaType::POSTMULTIPLIED, Some(&mut w), Some(&mut h))?;
+    let (width, height) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    let mut rgba = vec![0; bin.size()];
+    let len = bin.data(Some(&mut rgba), 0);
+    (width > 0 && height > 0 && len == (width * height * 4) as usize).then_some(Favicon { width, height, rgba })
+}
+
+wrap_download_image_callback! {
+    struct FaviconDownload {
+        h: Handler,
+        seq: u64,
+        urls: Vec<String>,
+        at: usize,
+    }
+
+    impl DownloadImageCallback {
+        fn on_download_image_finished(
+            &self,
+            _image_url: Option<&CefString>,
+            _http_status_code: ::std::os::raw::c_int,
+            image: Option<&mut Image>,
+        ) {
+            // The page has moved on (new icons or a new browser): this answer is stale.
+            if !self.h.current() || self.h.shared.favicon_seq.load(SeqCst) != self.seq {
+                return;
+            }
+            match image.and_then(|i| favicon_rgba(i)) {
+                Some(f) => emit(self.h.shared.id, WebEvent::FaviconChanged(Some(f))),
+                None => download_favicon(&self.h, self.seq, self.urls.clone(), self.at + 1),
+            }
+        }
+    }
 }
 
 /// JS injected after each main-frame load when the caret probe is on: reports the caret of the
@@ -432,6 +510,15 @@ wrap_display_handler! {
             let url = s(url);
             *self.h.shared.url.lock().unwrap() = url.clone();
             emit(self.h.shared.id, WebEvent::UrlChanged(url));
+        }
+
+        fn on_favicon_urlchange(&self, _browser: Option<&mut Browser>, icon_urls: Option<&mut CefStringList>) {
+            if !self.h.current() {
+                return;
+            }
+            let urls = icon_urls.map(string_list).unwrap_or_default();
+            let seq = self.h.shared.favicon_seq.fetch_add(1, SeqCst) + 1;
+            download_favicon(&self.h, seq, urls, 0);
         }
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
@@ -793,6 +880,7 @@ impl WebView {
             title: Mutex::new(String::new()),
             loading: AtomicBool::new(false),
             pending_url: Mutex::new(None),
+            favicon_seq: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             caret_probe: options.caret_probe,
             last_bounds: Mutex::new(None),

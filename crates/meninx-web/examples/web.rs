@@ -5,6 +5,7 @@
 //!   `MENINX_WEB_SCRIPT=basic|ime|perf|resize|sharpness|all` (+ `MENINX_WEB_EVIDENCE=<dir>` for
 //!   screenshots, `MENINX_WEB_FORCE_CPU=1` for the software-frame path,
 //!   `MENINX_WEB_LEGACY_PRESENT=1` to reproduce the pre-fix stretched/bilinear presentation).
+//! `MENINX_WEB_URL=<address>` opens another start page (its favicon is logged).
 
 use iced::keyboard::{self, Key, Location, Modifiers, key};
 use iced::widget::{button, column, container, opaque, row, scrollable, space, stack, text};
@@ -133,7 +134,9 @@ struct App {
 
 impl App {
     fn boot(rt: &meninx_web::WebRuntime) -> (Self, Task<Message>) {
-        let web = WebView::new(rt, &data_url(PAGE), Size::new(800.0, 560.0), 1.0)
+        // `MENINX_WEB_URL` starts at another page (e.g. one with a favicon).
+        let start = std::env::var("MENINX_WEB_URL").unwrap_or_else(|_| data_url(PAGE));
+        let web = WebView::new(rt, &start, Size::new(800.0, 560.0), 1.0)
             .expect("create web view");
         let script = std::env::var("MENINX_WEB_SCRIPT")
             .ok()
@@ -177,6 +180,15 @@ impl App {
                     }
                 }
                 WebEvent::RenderModeChanged(m) => println!("[app] render mode {m:?}"),
+                WebEvent::FaviconChanged(f) => match f {
+                    Some(f) => println!(
+                        "[app] favicon {}x{} first pixel {:?}",
+                        f.width,
+                        f.height,
+                        &f.rgba[..4.min(f.rgba.len())]
+                    ),
+                    None => println!("[app] favicon none"),
+                },
                 other => println!("[app] web event {other:?}"),
             },
             Message::Tick => {

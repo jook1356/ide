@@ -53,6 +53,9 @@ pub enum WebEvent {
         source: String,
         line: i32,
     },
+    /// The page's icon: decoded after the page names its icons (or the default
+    /// `/favicon.ico`), `None` when none of them could be loaded.
+    FaviconChanged(Option<Favicon>),
     /// The page asked for a new window (`target=_blank`, `window.open`). Popups are blocked;
     /// the app decides what to do with the URL (e.g. `navigate` or open a new tab).
     NewWindowRequested(String),
@@ -60,6 +63,14 @@ pub enum WebEvent {
     RenderModeChanged(RenderMode),
     /// The browser was closed (after [`crate::WebView::close`] or when the last handle dropped).
     Closed,
+}
+
+/// A page icon: straight (not premultiplied) RGBA, top-down, tightly packed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Favicon {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// A [`WebEvent`] tagged with the view it came from.
