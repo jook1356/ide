@@ -67,8 +67,8 @@ pub struct AutoAnswer {
     #[serde(default)]
     pub keys: Vec<String>,
     /// Pick the list entry containing this text (case-insensitive): the keys come from where
-    /// the cursor (`❯`) is: Down / Up to it, then Enter; only Enter when it is already there
-    /// (an Enter the CLI missed is sent again). Either this or `keys`.
+    /// the cursor (`❯`) is: Down / Up to it, and Enter only once the screen shows the cursor
+    /// there (a later read). Either this or `keys`.
     #[serde(default)]
     pub choose: Option<String>,
     #[serde(flatten)]
@@ -94,9 +94,12 @@ fn is_cursor(l: &str) -> bool {
     l.trim_start().starts_with('❯')
 }
 
-/// The keys that pick the entry containing `choose` (case-insensitive) of the list under the
-/// cursor: Down / Up from the cursor's line to the entry's, then Enter (`None`: no such entry
-/// with a cursor next to it, or other text between them). The entries are consecutive lines.
+/// The next keys toward the entry containing `choose` (case-insensitive) of the list under the
+/// cursor: Down / Up from the cursor's line to the entry's, or Enter when the cursor is on it
+/// (`None`: no such entry with a cursor next to it, or other text between them). Never both in
+/// one go: a move the CLI misses (keys typed right after the dialog is drawn, or while the
+/// machine is busy) must not leave an Enter on the first entry, often "No, exit" (seen
+/// 2026-11-25). The entries are consecutive lines.
 fn choose_keys(lines: &[String], choose: &str) -> Option<Vec<String>> {
     let want = choose.to_lowercase();
     let target = lines.iter().rposition(|l| l.to_lowercase().contains(&want))?;
@@ -107,10 +110,11 @@ fn choose_keys(lines: &[String], choose: &str) -> Option<Vec<String>> {
     if lines[lo..=hi].iter().any(|l| l.trim().is_empty()) {
         return None;
     }
+    if cursor == target {
+        return Some(vec!["\r".to_owned()]);
+    }
     let step = if target > cursor { "\u{1b}[B" } else { "\u{1b}[A" };
-    let mut keys = vec![step.to_owned(); hi - lo];
-    keys.push("\r".to_owned());
-    Some(keys)
+    Some(vec![step.to_owned(); hi - lo])
 }
 
 /// The first non-blank line after the last line containing `needle` (case-insensitive),
@@ -571,7 +575,7 @@ regex=['(']").is_err());
         let got = ans(&ws).expect("workspace trust");
         assert_eq!(got.answer.id, "trust_workspace");
         assert_eq!(got.path.as_deref(), Some("C:/Users/jook1/AppData/Roaming/ide/ide/data/workspaces/0mwudwwxbug"));
-        assert_eq!(got.keys, ["\x1b[B", "\r"], "Down to Yes, Enter");
+        assert_eq!(got.keys, ["\x1b[B"], "Down to Yes only: Enter once the screen shows it there");
         assert!(got.answer.default);
         let dir = screen(&[
             " Adding a new directory:",
@@ -675,10 +679,14 @@ regex=['(']").is_err());
     fn choosing_list_entries() {
         let rows = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let three = rows(&[" title", " ❯ 1. A", "   2. B", "   3. C", ""]);
-        assert_eq!(choose_keys(&three, "3. c").unwrap(), ["\x1b[B", "\x1b[B", "\r"]);
+        assert_eq!(choose_keys(&three, "3. c").unwrap(), ["\x1b[B", "\x1b[B"]);
         assert_eq!(choose_keys(&three, "1. a").unwrap(), ["\r"]);
         let up = rows(&["   1. A", "   2. B", " ❯ 3. C"]);
-        assert_eq!(choose_keys(&up, "1. a").unwrap(), ["\x1b[A", "\x1b[A", "\r"]);
+        assert_eq!(choose_keys(&up, "1. a").unwrap(), ["\x1b[A", "\x1b[A"]);
+        // Seen 2026-11-25: the Down was lost and the Enter confirmed "No, exit". The screen
+        // after a lost move still shows the cursor on No: again only a move, never Enter.
+        let trust = rows(&[" ❯ No, exit", "   Yes, I trust this folder"]);
+        assert_eq!(choose_keys(&trust, "yes, i trust").unwrap(), ["\x1b[B"]);
         assert!(choose_keys(&three, "nope").is_none());
         let apart = rows(&[" ❯ No", "", "   Yes"]);
         assert!(choose_keys(&apart, "yes").is_none(), "not one list");
