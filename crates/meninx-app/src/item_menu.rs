@@ -26,6 +26,8 @@ pub struct ItemMenu {
 
 #[derive(Debug, Clone)]
 pub enum ItemAct {
+    /// 입력창에 첨부: the file's path, the commit or the page's address.
+    Attach,
     CopyPath,
     CopyRelPath,
     RevealExplore,
@@ -226,6 +228,44 @@ impl App {
             iced::clipboard::write(s).discard()
         };
         match act {
+            ItemAct::Attach => {
+                if !self.can_attach(sid) {
+                    return Task::none();
+                }
+                match &m.key {
+                    ItemKey::Commit { repo, .. } => {
+                        let Some(c) = commit_info(&m.key, live).cloned() else {
+                            return Task::none();
+                        };
+                        // Several worktrees: say which one the commit is in.
+                        let worktree = (live.info.repos.len() > 1)
+                            .then(|| live.info.repos.iter().find(|r| r.repo == *repo))
+                            .flatten()
+                            .map(|r| r.path.clone());
+                        let label = crate::composer::ref_label(&format!("{} {}", c.short, c.subject));
+                        let text = crate::changes_actions::commit_ref(&c, worktree.as_deref());
+                        self.deliver_ref(sid, &label, &text)
+                    }
+                    ItemKey::Web | ItemKey::Browser(_) => {
+                        let url = url.trim().to_owned();
+                        if url.is_empty() {
+                            return Task::none();
+                        }
+                        self.deliver_ref(sid, &crate::composer::ref_label(&url), &url)
+                    }
+                    _ => {
+                        // The server's path separators (a remote server may differ from this computer).
+                        let Some(file) = path.as_deref().and_then(|q| {
+                            let (repo, rel) = split_q(q);
+                            self.explore_abs(sid, repo, rel)
+                        }) else {
+                            return Task::none();
+                        };
+                        let dest = self.attach_dest(sid);
+                        self.deliver(sid, &file, dest)
+                    }
+                }
+            }
             ItemAct::CopyPath => copy(self, abs, tr::item_copied_path()),
             ItemAct::CopyRelPath => copy(self, rel, tr::item_copied_rel()),
             ItemAct::CopySha => copy(self, sha, tr::item_copied_sha()),
@@ -307,6 +347,11 @@ impl App {
         };
         let close = |set: CloseSet| Some(Message::Detail(sid.to_owned(), DetailMsg::CloseSome(set)));
         let mut items: Vec<El<'_>> = Vec::new();
+        // 입력창에 첨부 (Explore's tree, the History commit menu): not for terminals.
+        if !matches!(m.key, ItemKey::Terminal(_)) {
+            items.push(entry(tr::attach_to_input(), self.can_attach(sid).then(|| Message::ItemAct(ItemAct::Attach))));
+            items.push(rule());
+        }
         // 공용 items are everyone's already; others can be pinned for every session.
         let global = match &m.key {
             ItemKey::Browser(id) => self.global_browsers.iter().any(|b| b.id == *id),
