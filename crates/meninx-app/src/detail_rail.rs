@@ -303,7 +303,14 @@ impl App {
         list = list.push(self.new_item_button(live, wide, menu));
         column![
             container(top).padding([0, 2]),
-            scrollable(list).height(Fill),
+            // Folded to icons the bar would crowd the rail: the wheel still scrolls it.
+            scrollable(list)
+                .direction(scrollable::Direction::Vertical(if wide {
+                    scrollable::Scrollbar::new()
+                } else {
+                    scrollable::Scrollbar::hidden()
+                }))
+                .height(Fill),
         ]
         .spacing(4)
         .padding(6)
