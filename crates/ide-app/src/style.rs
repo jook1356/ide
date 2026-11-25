@@ -275,6 +275,17 @@ pub fn choice(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
     }
 }
 
+/// Like [`choice`], but without a background until hovered or active ("+ 새로 열기").
+pub fn ghost_choice(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut s = choice(active)(theme, status);
+        if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
+            s.background = None;
+        }
+        s
+    }
+}
+
 /// Side panel tab (the active one is underlined by the caller).
 pub fn tab_flat(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {

@@ -491,7 +491,7 @@ impl App {
         let trigger = button(label)
             .padding([5, 8])
             .width(Fill)
-            .style(style::choice(self.new_menu))
+            .style(style::ghost_choice(self.new_menu))
             .on_press(Message::UTerm(UTermMsg::NewMenu(!self.new_menu)));
         let popup = self.new_menu.then(|| {
             let row_btn = |content: El<'a>, msg: Message| -> El<'a> {

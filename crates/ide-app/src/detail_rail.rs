@@ -234,7 +234,9 @@ impl App {
         }
 
         let mut list = Column::new();
-        for e in self.shared_sections(live, wide) {
+        let shared = self.shared_sections(live, wide);
+        let mut listed = !shared.is_empty();
+        for e in shared {
             list = list.push(e);
         }
         for g in groups() {
@@ -256,6 +258,7 @@ impl App {
             if rows.is_empty() {
                 continue;
             }
+            listed = true;
             list = list.push(group_heading(g.label, rows.len(), g.color, wide));
             for (k, dirty) in &rows {
                 list = list.push(self.item_row(
@@ -275,6 +278,7 @@ impl App {
             .filter(|k| !self.is_common(term_live.id(), k))
             .collect();
         if !terms.is_empty() {
+            listed = true;
             list = list.push(group_heading(
                 tr::group_terminal(),
                 terms.len(),
@@ -288,7 +292,7 @@ impl App {
             list = list.push(space().height(4).boxed());
         }
         list = list.push(self.new_item_button(live, wide));
-        if d.items.is_empty() && wide {
+        if !listed && wide {
             list = list.push(
                 container(text(tr::rail_empty()).size(12).color(style::DIM))
                     .padding(8)
