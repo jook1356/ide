@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 20;
+pub const PROTO_VERSION: u32 = 21;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -353,19 +353,47 @@ pub struct SessionInfo {
     pub branch: Option<BranchBadge>,
 }
 
-/// The state of a session's repos for the session list's branch badge (Hermes Desk's
-/// `BranchIndicator`, aggregated over the session's repos by the server; `None` = not known).
+/// The state of a session's repos for the session list's branch badge, aggregated over the
+/// session's repos by the server (`docs/branch-badge.md`; `None` = not known).
+///
+/// Whether work is merged is git's answer only (`git merge-base --is-ancestor`): a merge
+/// commit or a fast-forward lands work, a squash or cherry-pick does not. A pull request
+/// merged on GitHub is reported apart (`pr_merged`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(missing_docs)]
 pub struct BranchState {
+    /// Uncommitted changes.
     pub dirty: Option<bool>,
+    /// Commits to push (to the branch's upstream, or to publish for a root session).
     pub ahead: u32,
+    /// `ahead` counts commits of a branch that is not on the remote yet (게시 필요).
     pub unpublished: bool,
+    /// An open pull request.
     pub open_pr: Option<bool>,
+    /// The open pull request conflicts with its base.
     pub pr_conflict: bool,
-    pub merged: bool,
-    pub unmerged: u32,
-    pub unmerged_conflict: bool,
+    /// Commits (merges left out) that none of the session's targets (its parents' branches,
+    /// its base, locally and on `origin`) contains.
+    #[serde(default)]
+    pub unlanded: u32,
+    /// Where the session's own work is now, when every commit of it is contained in a target
+    /// (`None`: nothing landed yet, or no work of its own).
+    #[serde(default)]
+    pub landed: Option<Landed>,
+    /// The repo's pull request was merged on GitHub, but git does not see the branch's commits
+    /// in a target (a squash or rebase merge, or not fetched yet).
+    #[serde(default)]
+    pub pr_merged: bool,
+}
+
+/// The farthest target that contains a session's work ([`BranchState::landed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Landed {
+    /// The parent session's branch (or a grandparent's).
+    Parent,
+    /// The base branch, but only the local one so far.
+    LocalBase,
+    /// The base branch on `origin`.
+    Base,
 }
 
 /// The last branch check of a session (`SessionInfo::branch`, `Notify::Branch`).

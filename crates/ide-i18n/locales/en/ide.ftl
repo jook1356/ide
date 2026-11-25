@@ -152,14 +152,16 @@ badge-pr = PR open
 badge-pr-conflict = PR conflict
 badge-unmerged = Has commits
 badge-unmerged-tip = { $count ->
-    [one] 1 commit the base branch does not have yet · no PR
-   *[other] { $count } commits the base branch does not have yet · no PR
-}
-badge-unmerged-conflict-tip = { $count ->
-    [one] Conflicts with the base branch · cannot tell (1 commit) · no PR
-   *[other] Conflicts with the base branch · cannot tell ({ $count } commits) · no PR
+    [one] 1 commit not merged into the parent or base branch yet
+   *[other] { $count } commits not merged into the parent or base branch yet
 }
 badge-merged = Merged
+badge-merged-tip = Merged into the base branch (on the remote)
+badge-merged-local-tip = Merged into the local base branch · not on the remote yet
+badge-in-parent = Merged to parent
+badge-in-parent-tip = Merged into the parent session's branch · not in the base branch yet
+badge-pr-merged = PR merged
+badge-pr-merged-tip = The PR was merged on GitHub · git does not see this branch's commits in the base branch (a squash merge, or not fetched yet)
 group-terminal = Terminal
 browser-new-tab = New tab
 bookmark-add = Add to bookmarks

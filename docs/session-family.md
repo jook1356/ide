@@ -43,6 +43,10 @@ its own worktrees branched from the parent's, and the parent merges them back.
 - **Sync from the parent** (child): per repo, in the child's worktree, `git merge
   ide/<parent>`; same results.
 - Uncommitted work is never part of either: only commits on the branches.
+- Branch badge: a separate child's work is measured against its parents' branches and then the
+  root's base, by git's ancestry only: 부모에 머지됨 once its parent's branch contains it, 머지됨
+  once the base does, however it was merged (`docs/branch-badge.md`). A squash is not a merge
+  for git, so it leaves 커밋 보유. A shared child shows its parent's state (same branch).
 
 ## Agent bridge tools
 

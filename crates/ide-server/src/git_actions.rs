@@ -188,14 +188,14 @@ fn git_env(
 }
 
 /// Trimmed stdout, or `None` on any failure.
-fn try_git(root: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn try_git(root: &Path, args: &[&str]) -> Option<String> {
     raw(root, args)
         .ok()
         .filter(Out::ok)
         .map(|o| o.text().trim().to_owned())
 }
 
-fn succeeds(root: &Path, args: &[&str]) -> bool {
+pub(crate) fn succeeds(root: &Path, args: &[&str]) -> bool {
     raw(root, args).is_ok_and(|o| o.ok())
 }
 
