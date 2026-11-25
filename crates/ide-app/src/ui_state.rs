@@ -187,7 +187,8 @@ pub struct UiState {
     /// The detail window is owned by the app window: it stays in front of it and minimises
     /// with it (Desk's `region-pinned:detail`).
     pub detail_pinned: bool,
-    /// The detail window's last position and size (logical pixels).
+    /// The detail window's last position and size (logical pixels; on Windows its restored
+    /// rectangle in physical pixels, see [`WindowGeom::dpi`]).
     #[serde(deserialize_with = "lenient")]
     pub detail_window: Option<WindowGeom>,
     /// How 열린 항목 shows in the detail window (Desk's `detail-rail`).
@@ -251,13 +252,21 @@ pub enum RailSide {
     Right,
 }
 
-/// Position and size of a window, in logical pixels.
+/// Position and size of a window: logical pixels, or with `dpi` (Windows) the restored outer
+/// rectangle in physical pixels on a monitor of that DPI (`ide_web::Placement`), which does not
+/// depend on the scale the window had when it was saved.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct WindowGeom {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// The monitor's DPI when saved: the rectangle is in physical pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<u32>,
+    /// The window was maximised (`x` .. `height` are then its restored rectangle).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maximized: bool,
 }
 
 /// Key of the login-terminal group in [`UiState::folded_groups`] (not a valid slug).
@@ -376,6 +385,8 @@ mod tests {
                 y: -40.0,
                 width: 900.0,
                 height: 640.0,
+                dpi: Some(144),
+                maximized: true,
             }),
             server: ServerPref::Ssh {
                 host: "me@devbox".into(),

@@ -35,6 +35,7 @@ mod events;
 mod gpu;
 mod input;
 mod owner;
+mod placement;
 mod runtime;
 mod scheme;
 pub mod testing;
@@ -45,6 +46,7 @@ pub use caption::enable_snap_layout;
 pub use devtools::{Awake, ConsoleEntry, DevTools};
 pub use events::{ConsoleLevel, RenderMode, ViewId, WebEvent, WebViewEvent, events};
 pub use owner::{set_window_owner, window_owner};
+pub use placement::{Placement, place_window, window_placement};
 pub use scheme::{
     Responder, SchemeHandler, SchemeRequest, SchemeResponse, register_custom_schemes,
     set_scheme_handler,

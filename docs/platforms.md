@@ -16,6 +16,7 @@ page lists what each piece does there and what is still open.
 | CEF frames (fallback) | software `on_paint` | same | same |
 | Title bar (`frame.rs`) | frameless, drawn caption buttons, snap layout | native traffic lights over a transparent, full-size title bar; the app leaves 78 px for them and draws no caption buttons or grips | frameless, drawn caption buttons, grips |
 | Detail window pin | owned window (`set_window_owner`) | always on top | always on top |
+| Detail window place (`ui.json`) | restored rectangle in physical px + DPI + maximised (`ide_web::window_placement` / `place_window`), clamped onto a monitor | logical px from `Moved` / resize | same as macOS |
 | Web key codes (`native_key_code`) | scan code (`MapVirtualKeyW`) | `kVK_*` from the physical key | X11 keycode (evdev + 8) |
 | Shortcuts in web views | Ctrl | Ctrl or Cmd | Ctrl |
 | Windowing (iced features) | — | — | X11 + Wayland (`wayland-dlopen`) |
@@ -27,6 +28,11 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 
 ## Linux: to do
 
+- [ ] **Detail window place** (`ide-app/src/detail_window.rs` `remember_detail_geometry`): logical
+  position / size from `Moved` and resize events, not saved while maximised or at x / y below
+  -10000 (assumed: a minimised window may report a parking spot like Windows' -32000). Not
+  clamped onto a monitor when reopened. Check: move it to a second monitor of another scale,
+  restart, and see where it opens; minimise, quit, restart.
 - [ ] **CEF.** Should work with `multi_threaded_message_loop` and `libcef.so` next to the
   executable (`CEF_PATH` of the Linux build); never run. The dmabuf import needs the Vulkan device
   feature `VULKAN_EXTERNAL_MEMORY_DMA_BUF`; without it a view falls back to software frames.
@@ -103,6 +109,11 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 
 ### 2. Needs checking on a Mac (code exists, untested)
 
+- [ ] **Detail window place** (`ide-app/src/detail_window.rs` `remember_detail_geometry`): logical
+  position / size from `Moved` and resize events, not saved while maximised or at x / y below
+  -10000 (assumed: a minimised window may report a parking spot like Windows' -32000). Not
+  clamped onto a monitor when reopened. Check: move it to a second monitor of another scale,
+  restart, and see where it opens; minimise, quit, restart.
 - [ ] **Browser control (`ide-web/src/devtools.rs`, `docs/browser-control.md`).** Assumption:
   CEF's DevTools messages, `post_task(UI)` and `Input.dispatch*Event` behave as on Windows, and
   `Page.captureScreenshot` of a hidden OSR view works after `was_hidden(false)`. Check:
@@ -199,6 +210,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-25: detail window place off Windows: not saved while maximised or at a parking
+  spot (`detail_window.rs` `remember_detail_geometry`); unbuilt on macOS / Linux.
 - 2026-11-25: `restart_scrollback_e2e` Unix branch (`sh` loop printing the old lines); unrun on
   macOS / Linux.
 - 2026-11-24: Codex resumes after a server restart (`codex.rs` rollout lookup by creation /

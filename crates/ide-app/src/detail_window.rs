@@ -10,6 +10,11 @@
 //!   it comes back after a restart. Only "앱으로 합치기" puts the area back into the app window.
 //! - The pin keeps the window in front of the app window (owned window, like Electron's
 //!   `setParentWindow`): it comes up and minimises with the app.
+//! - Its place is kept in `ui.json`. On Windows that is the restored rectangle in physical
+//!   pixels with the monitor's DPI and the maximised flag (`ide_web::Placement`), read when the
+//!   window loses focus, hides or the app quits, and applied (clamped onto a monitor) while the
+//!   window is still hidden: logical positions do not survive monitors of different scale, and
+//!   a minimised window reports (-32000, -32000).
 //! - Frameless like Desk's region window (`frame.rs`): the app draws the title bar, with the pin
 //!   and 앱으로 합치기 beside the caption buttons.
 
@@ -44,6 +49,40 @@ pub enum WinMsg {
     Placed(window::Id, Option<Point>),
     /// The detail window's owner after a pin change: (app window, owner) handles.
     Owner(Option<isize>, Option<isize>),
+    /// The window's placement was read (Windows): remember it in `ui.json`.
+    Saved(Option<ide_web::Placement>),
+    /// Same, then quit the app (`exit_app`).
+    SavedThenExit(Option<ide_web::Placement>),
+}
+
+/// Read the detail window's placement (Windows; nothing elsewhere, where `Moved` / resize
+/// events keep it) and hand it to `then`.
+fn read_placement(id: window::Id, then: fn(Option<ide_web::Placement>) -> WinMsg) -> Task<Message> {
+    if !cfg!(windows) {
+        return Task::none();
+    }
+    window::run(id, |w| {
+        frame::hwnd_of(w).and_then(ide_web::window_placement)
+    })
+    .map(move |p| Message::DetailWindow(then(p)))
+}
+
+/// Remember the detail window's place (Windows), e.g. before it closes.
+pub(crate) fn save_placement(id: window::Id) -> Task<Message> {
+    read_placement(id, WinMsg::Saved)
+}
+
+/// A placement saved on Windows (physical pixels).
+fn saved_placement(g: Option<WindowGeom>) -> Option<ide_web::Placement> {
+    let g = g?;
+    Some(ide_web::Placement {
+        x: g.x.round() as i32,
+        y: g.y.round() as i32,
+        width: g.width.round() as i32,
+        height: g.height.round() as i32,
+        dpi: g.dpi?,
+        maximized: g.maximized,
+    })
 }
 
 impl App {
@@ -78,14 +117,20 @@ impl App {
                 crate::script::log("detail window: close");
                 self.detail_window = None;
                 self.detail_window_ready = false;
-                window::close(id)
+                save_placement(id).chain(window::close(id))
             }
             _ => Task::none(),
         }
     }
 
     fn open_detail_window(&mut self) -> Task<Message> {
-        let geom = self.ui.detail_window;
+        // Windows: opened hidden, placed from the saved physical rectangle once it exists, then
+        // shown (`show_detail_window`). A logical place saved by an older version is dropped
+        // there (it may be off every monitor).
+        let geom = self
+            .ui
+            .detail_window
+            .filter(|g| !cfg!(windows) && g.dpi.is_none());
         let size = geom
             .map(|g| Size::new(g.width.max(MIN_SIZE.width), g.height.max(MIN_SIZE.height)))
             .unwrap_or(DEFAULT_SIZE);
@@ -96,6 +141,7 @@ impl App {
         let (id, open) = window::open(frame::frameless(window::Settings {
             size,
             position,
+            visible: !cfg!(windows),
             min_size: Some(MIN_SIZE),
             // Its close button hides the area (it stays detached): handled by the app.
             exit_on_close_request: false,
@@ -150,11 +196,20 @@ impl App {
                     window::position(id).map(move |p| Message::DetailWindow(WinMsg::Placed(id, p))),
                     frame::enable_snap_layout(id),
                 ]);
-                if self.ui.detail_pinned {
+                let then = if self.ui.detail_pinned {
                     Task::batch([size, self.apply_pin()])
                 } else {
                     size
-                }
+                };
+                self.show_detail_window(id).chain(then)
+            }
+            WinMsg::Saved(p) => {
+                self.remember_placement(p);
+                Task::none()
+            }
+            WinMsg::SavedThenExit(p) => {
+                self.remember_placement(p);
+                iced::exit()
             }
             WinMsg::Placed(id, p) => {
                 if Some(id) == self.detail_window
@@ -171,6 +226,59 @@ impl App {
                 self.detail_owner = Some((app, owner));
                 Task::none()
             }
+        }
+    }
+
+    /// Windows: place the hidden window from `ui.json` (clamped onto a monitor), show it and
+    /// maximise it if it was. Elsewhere it is already shown where iced put it.
+    fn show_detail_window(&self, id: window::Id) -> Task<Message> {
+        if !cfg!(windows) {
+            return Task::none();
+        }
+        let saved = saved_placement(self.ui.detail_window);
+        let place = match saved {
+            Some(p) => window::run(id, move |w| {
+                let used = frame::hwnd_of(w).and_then(|h| ide_web::place_window(h, &p));
+                crate::script::log(&format!("detail window: placed {used:?} (saved {p:?})"));
+            })
+            .discard(),
+            None => Task::none(),
+        };
+        let maximize = if saved.is_some_and(|p| p.maximized) {
+            window::maximize(id, true)
+        } else {
+            Task::none()
+        };
+        place
+            .chain(window::set_mode(id, window::Mode::Windowed))
+            .chain(maximize)
+    }
+
+    /// Keep a placement read from the window (Windows) in `ui.json`.
+    fn remember_placement(&mut self, p: Option<ide_web::Placement>) {
+        let Some(p) = p else { return };
+        let g = WindowGeom {
+            x: p.x as f32,
+            y: p.y as f32,
+            width: p.width as f32,
+            height: p.height as f32,
+            dpi: Some(p.dpi),
+            maximized: p.maximized,
+        };
+        if self.ui.detail_window != Some(g) {
+            crate::script::log(&format!("detail window: saved place {p:?}"));
+            self.ui.detail_window = Some(g);
+            // Not `save_ui`: this can arrive after `close_for_reopen` reloaded the state, whose
+            // `selected` is still unset until the session list loads.
+            self.ui.save(&self.data_dir);
+        }
+    }
+
+    /// Quit the app, remembering the detail window's place first (Windows).
+    pub(crate) fn exit_after_saving_detail(&self) -> Task<Message> {
+        match self.detail_window {
+            Some(id) if cfg!(windows) => read_placement(id, WinMsg::SavedThenExit),
+            _ => iced::exit(),
         }
     }
 
@@ -231,15 +339,24 @@ impl App {
     }
 
     /// Remember the window's place for the next opening (saved with `ui.json`), once both its
-    /// position and size are known.
+    /// position and size are known; not while maximised or minimised. Windows reads the
+    /// placement from the OS instead (`remember_placement`).
     fn remember_detail_geometry(&mut self) {
-        if let Some(p) = self.detail_window_pos {
+        if cfg!(windows) || self.detail_window_maximized {
+            return;
+        }
+        if let Some(p) = self.detail_window_pos
+            && p.x > -10_000.0
+            && p.y > -10_000.0
+        {
             let s = self.detail_window_size;
             self.ui.detail_window = Some(WindowGeom {
                 x: p.x,
                 y: p.y,
                 width: s.width,
                 height: s.height,
+                dpi: None,
+                maximized: false,
             });
         }
     }

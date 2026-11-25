@@ -757,6 +757,27 @@ session-edit-delete-confirm = { $count ->
     [one] Delete 1
    *[other] Delete { $count }
 }
+list-edit-start = Edit list
+list-edit-none = Select items
+list-delete-profiles-title = { $count ->
+    [one] Delete 1 profile
+   *[other] Delete { $count } profiles
+}
+list-delete-profiles-body = The selected profiles are deleted. A profile that sessions still use is not deleted.
+list-delete-repos-title = { $count ->
+    [one] Unregister 1 repository
+   *[other] Unregister { $count } repositories
+}
+list-delete-repos-body = The selected repositories leave the list; their files stay. A repository that sessions still use is not unregistered.
+list-delete-repos-confirm = { $count ->
+    [one] Unregister 1
+   *[other] Unregister { $count }
+}
+list-delete-widgets-title = { $count ->
+    [one] Delete 1 widget
+   *[other] Delete { $count } widgets
+}
+list-delete-widgets-body = Their tabs close and their shared data is erased. Agents can register them again.
 archive-label = Archive
 archive-fold = Fold archive
 archive-unfold = Unfold archive
