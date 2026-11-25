@@ -518,6 +518,10 @@ the navigation rail and in the 위젯 button of the status bar).
     `ide.data.delete(key)`, `ide.data.keys()`: the widget's stored data in its scope (at most
     1 MiB).
   - `ide.widget` = `{{ id, session }}`: `session` is the session showing the tab.
+  - `await ide.context()` -> `{{ selected, session }}`: `selected` is the session the user has
+    selected now (a `global` widget's one tab is shown in every session: follow it by polling).
+  - `await ide.openBrowser(url, {{session}}?)`: opens an http(s) page in ide's browser, in
+    `session` (default: the selected one); needs `ide_browser_open` in `tools`.
 - Host API (the widget runs as the user, like a script of theirs; relative paths are under
   the showing session's folder; results are JSON, errors reject):
   - `exec`: `await ide.exec({{program, args, cwd, stdin, env, timeout_ms}})` or
