@@ -13,9 +13,13 @@ use ide_proto::{AutoAnswerInfo, ProtoError, Response};
 use super::UserCtx;
 use crate::pty::TermHost;
 
-/// The same dialog of a session is not answered again within this time (the screen may still
-/// show it while the CLI takes the keys).
+/// The same step of a dialog (session, answer, folder, keys) is not typed again within this
+/// time (the screen may still show it while the CLI takes the keys). A confirming step (with
+/// Enter) waits the longest: a late Enter must not land on the next dialog.
 const COOLDOWN: Duration = Duration::from_secs(5);
+/// The same for a step that only moves a list's cursor: a lost move is harmless to repeat
+/// (Enter follows only when the screen shows the cursor on the entry), so it is retried sooner.
+const MOVE_COOLDOWN: Duration = Duration::from_secs(2);
 /// Pause between the writes of one answer (a list moves, then Enter).
 const KEY_GAP: Duration = Duration::from_millis(150);
 
@@ -51,13 +55,21 @@ impl UserCtx {
     }
 
     /// The folders ide set up for `s`: its folder, its worktrees and their repositories (a
-    /// worktree's git dir lives in the repository).
+    /// worktree's git dir lives in the repository), also those of worktrees still being
+    /// created: the agent starts with their git dirs already (`--add-dir`), and their dialogs
+    /// otherwise blocked the session until the worktree was made (seen 2026-11-25: 14 s).
     fn own_folders(&self, s: &Session) -> Vec<PathBuf> {
         let repos = self.repos.lock().unwrap();
         let mut v = vec![s.root.clone()];
         for w in &s.worktrees {
             v.push(PathBuf::from(&w.path));
             if let Some(r) = repos.get(&w.repo) {
+                v.push(PathBuf::from(&r.path));
+            }
+        }
+        for p in &s.pending {
+            v.push(s.root.join(&p.name));
+            if let Some(r) = repos.get(&p.repo) {
                 v.push(PathBuf::from(&r.path));
             }
         }
@@ -72,6 +84,7 @@ impl UserCtx {
     /// [`COOLDOWN`]).
     pub(crate) fn auto_answer(&self, s: &Session, host: &TermHost, ans: &Answering<'_>) -> bool {
         let (a, path) = (ans.answer, ans.path.as_deref());
+        let confirms = ans.keys.iter().any(|k| k.contains('\r'));
         let on = self.auto_answers.lock().unwrap().enabled(&s.provider, &a.id, a.default);
         if !on {
             return false;
@@ -84,9 +97,17 @@ impl UserCtx {
         }
         {
             let mut last = self.answered.lock().unwrap();
-            // Per folder: each repository's git dir is its own dialog.
-            let key = format!("{} {} {}", s.id, a.id, path.unwrap_or(""));
-            if last.get(&key).is_some_and(|t| t.elapsed() < COOLDOWN) {
+            // Per folder: each repository's git dir is its own dialog. Per step: the Enter
+            // that follows a move is not held back by the move.
+            let key = format!(
+                "{} {} {} {}",
+                s.id,
+                a.id,
+                path.unwrap_or(""),
+                ans.keys.concat().escape_debug()
+            );
+            let wait = if confirms { COOLDOWN } else { MOVE_COOLDOWN };
+            if last.get(&key).is_some_and(|t| t.elapsed() < wait) {
                 return true;
             }
             last.retain(|_, t| t.elapsed() < COOLDOWN);
@@ -101,7 +122,8 @@ impl UserCtx {
                 return false;
             }
         }
-        self.audit("auto_answer", &format!("{} {} {}", s.id, a.id, path.unwrap_or("")));
+        let step = if confirms { "confirm" } else { "move" };
+        self.audit("auto_answer", &format!("{} {} {} {step}", s.id, a.id, path.unwrap_or("")));
         true
     }
 }
