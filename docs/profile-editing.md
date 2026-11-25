@@ -57,6 +57,24 @@ Both act on the session's own profile (`Session::configuration`).
   files up to 256 KiB. The end state must be valid: an MCP file parses and has a command, a
   skill folder that keeps files has a `SKILL.md`, `instructions.md` is never deleted.
 
+### The profile is the only place for an agent's setup
+
+ide launches the agent CLI with the profile's MCP servers, skills and instructions; the CLI's
+own config (`claude mcp add`, `~/.claude.json`, a project `.mcp.json`, `~/.codex/config.toml`)
+is outside ide: ide neither shows nor manages it, it reaches only that CLI, and it also reaches
+the CLI when it runs outside ide. So the bridge instructions (`bridge.rs::INSTRUCTIONS`) and
+both tool descriptions tell the agent to add, change or remove an MCP server, a skill or a
+standing instruction only through `ide_profile_edit`, never with the CLI's commands or files,
+and to say so and ask when the profile cannot hold what is asked. The instructions used to
+offer the profile only for "something future sessions should know", and an agent asked to add
+an MCP server ran `claude mcp add --scope user` instead (2026-11-25).
+
+A profile's MCP server is a local (stdio) program (`McpServer`: command, args, env). A remote
+(HTTP) server is reached through a local proxy, e.g.
+`{"command": "npx", "args": ["-y", "mcp-remote", "https://host/mcp/", "--header", "Authorization:${AUTH}"], "env": [["AUTH", "Bearer <token>"]]}`
+(the value goes in `env` so no space sits inside an argument). Native remote servers (url +
+headers in `mcp/<name>.json`, mapped to each CLI's own format) are a to-do.
+
 ### Concurrency
 
 Several sessions may use one profile and edit it at the same time. Edits are **optimistic**:

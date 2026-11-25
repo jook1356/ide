@@ -97,7 +97,15 @@ IDE: `ide_session` describes this session (folder, repositories, branches, base 
 `ide_send_to_session`. To show the user something richer than text (a board, a form, a \
 chart, a small tool), build a widget: call `ide_widget` with action `guide` first. To show \
 the user a page, a Markdown document, an image or a site, use `ide_preview` (action `guide` \
-explains it). This session was started with a profile (skills, MCP servers, instructions) that ide gives every session using it: when you learn something future sessions should know (a working procedure, a fix to a skill, a project rule), save it there with `ide_profile_get` / `ide_profile_edit`.";
+explains it). This session was started with a profile (skills, MCP servers, instructions) that \
+ide gives every session using it, and ide owns the agent's setup: add, change or remove an MCP \
+server, a skill or a standing instruction only in that profile, through `ide_profile_get` / \
+`ide_profile_edit` (read the files' format there first), never with an agent CLI's own \
+commands or config (`claude mcp add`, `~/.claude.json`, `.mcp.json`, `~/.codex/config.toml`, \
+...), even when that would work sooner. A profile's MCP servers are local programs (stdio): \
+reach a remote (HTTP) server through a local proxy program. If the profile cannot hold what is \
+asked, say so and ask the user. Also save there what future sessions should know (a working \
+procedure, a fix to a skill, a project rule).";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -612,14 +620,38 @@ fn core_tools() -> Vec<AgentTool> {
         },
         AgentTool {
             name: TOOL_PROFILE_GET.into(),
-            description: "Read this session's profile: the skills, MCP servers and instructions                           ide gives every session started with it. Without `path`: its name,                           its files with their revisions (`rev`), the instructions text and the                           skills. With `path`: that file's text and revision. Change it with                           ide_profile_edit."
+            description: "Read this session's profile: the skills, MCP servers and \
+                          instructions ide gives every session started with it (the place to add \
+                          an MCP server or a skill, not the agent CLI's own config). Without \
+                          `path`: its name, its files with their revisions (`rev`), the \
+                          instructions text and the skills. With `path`: that file's text and \
+                          revision. Change it with ide_profile_edit."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"A file of the profile, e.g. instructions.md, mcp/docs.json, skills/pdf-tools/SKILL.md."}},"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {
             name: TOOL_PROFILE_EDIT.into(),
-            description: "Change this session's profile so later sessions benefit: add or fix a                           skill, an instruction, an MCP server. Applied at once (no approval);                           the user is notified and can undo it in the profile's history.                           Sessions see it when they start next. Other sessions may edit the same                           profile, so every operation is checked against the file as it is now:                           `patch` replaces `old` (must occur exactly once) with `new` (preferred                           for small changes); `write` writes a whole file (`rev` from                           ide_profile_get to replace one, no `rev` to create one); `delete`                           removes a file or a whole skill (`skills/<name>`, with its SKILL.md's                           `rev`). All operations apply or none does; when one no longer fits you                           get the file's current text: apply your change to that and call again.                           Files: instructions.md; mcp/<name>.json ({\"command\": \"...\",                           \"args\": [...], \"env\": [[\"KEY\", \"value\"]]});                           skills/<name>/SKILL.md (front matter `name` and `description`, then                           instructions) and files it refers to. `reason`: one line for the user,                           what changed and why."
+            description: "Change this session's profile so later sessions benefit: \
+                          add or fix a skill, an instruction, an MCP server (the way to add an MCP \
+                          server in ide: not `claude mcp add` or the CLI's config files). Applied \
+                          at once (no approval); the user is notified and can undo it in the \
+                          profile's history. Sessions see it when they start next. Other sessions \
+                          may edit the same profile, so every operation is checked against the \
+                          file as it is now: `patch` replaces `old` (must occur exactly once) with \
+                          `new` (preferred for small changes); `write` writes a whole file (`rev` \
+                          from ide_profile_get to replace one, no `rev` to create one); `delete` \
+                          removes a file or a whole skill (`skills/<name>`, with its SKILL.md's \
+                          `rev`). All operations apply or none does; when one no longer fits you \
+                          get the file's current text: apply your change to that and call again. \
+                          Files: instructions.md; mcp/<name>.json ({\"command\": \"...\", \
+                          \"args\": [...], \"env\": [[\"KEY\", \"value\"]]}: a local stdio server \
+                          only; a remote HTTP server goes through a local proxy such as `npx -y \
+                          mcp-remote <url> --header \"Authorization:${AUTH}\"` with `AUTH` in \
+                          `env`); skills/<name>/SKILL.md (front matter `name` and `description`, \
+                          then instructions) and files it refers to. Secrets in `env` are stored \
+                          in the profile's files. `reason`: one line for the user, what changed \
+                          and why."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"reason":{"type":"string","description":"One line: what you changed and why (shown to the user and kept in the history)."},"ops":{"type":"array","minItems":1,"items":{"type":"object","properties":{"op":{"type":"string","enum":["patch","write","delete"]},"path":{"type":"string"},"old":{"type":"string","description":"patch: the exact text to replace (unique in the file)."},"new":{"type":"string","description":"patch: its replacement."},"content":{"type":"string","description":"write: the whole file."},"rev":{"type":"string","description":"write (replacing) / delete: the revision you read."}},"required":["op","path"],"additionalProperties":false}}},"required":["reason","ops"],"additionalProperties":false}"#
                 .into(),
