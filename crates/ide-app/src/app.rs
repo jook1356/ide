@@ -756,8 +756,8 @@ pub enum Message {
     /// Navigation rail click: show the page (clicking the active work page toggles the
     /// session list).
     Page(Page),
-    /// The pointer entered / left the rail's work button.
-    RailHover(bool),
+    /// The pointer entered (`true`) or left (`false`) a rail page button.
+    RailHover(Page, bool),
     /// The pointer entered (`true`) or left (`false`) a session row.
     SessionHover(String, bool),
     AcctProvider(String),
@@ -1150,8 +1150,8 @@ pub struct App {
     pub font_pickers: [iced::widget::combo_box::State<String>; 3],
     /// The UI font in effect (read at start; a change applies after a restart).
     pub boot_ui_font: String,
-    /// The pointer is over the rail's work button (shows the session-list toggle icon).
-    pub rail_hover: bool,
+    /// The rail page button under the pointer (on its own page it shows the list toggle icon).
+    pub rail_hover: Option<Page>,
     /// The session row under the pointer (shows its pin / delete buttons).
     pub session_hover: Option<String>,
     /// Self-update (`self_update.rs`): possible here, the last run's status, the run this app
@@ -1326,7 +1326,7 @@ impl App {
             settings,
             font_pickers,
             boot_ui_font,
-            rail_hover: false,
+            rail_hover: None,
             session_hover: None,
             new_answers: Default::default(),
             resumed: Default::default(),
@@ -2694,7 +2694,7 @@ impl App {
                 crate::script::log(&format!("page {page:?}"));
                 self.ui.page = page;
                 self.open_items = false;
-                self.rail_hover = false;
+                self.rail_hover = None;
                 self.settings.error = None;
                 self.save_ui();
                 if page == Page::Configurations {
@@ -2721,8 +2721,12 @@ impl App {
                     }
                 }
             }
-            Message::RailHover(v) => {
-                self.rail_hover = v;
+            Message::RailHover(page, entered) => {
+                if entered {
+                    self.rail_hover = Some(page);
+                } else if self.rail_hover == Some(page) {
+                    self.rail_hover = None;
+                }
                 Task::none()
             }
             Message::SessionHover(id, entered) => {
