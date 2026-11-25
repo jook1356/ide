@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{
-    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationInfo, ProviderInfo,
+    AccountInfo, AccountState, BaseRuleInfo, BaseRulePreview, ConfigurationChange, ConfigurationInfo, ProviderInfo,
     RepoInfo, SessionKind, SessionMode, SessionRepo,
 };
 use crate::error::ProtoError;
@@ -536,6 +536,17 @@ pub enum Request {
     /// Delete a configuration (`configuration-in-use`, `last-configuration`).
     ConfigurationDelete {
         slug: String,
+    },
+    /// The last `limit` changes of a configuration, newest first (`ConfigurationHistory`).
+    ConfigurationHistory {
+        slug: String,
+        limit: u32,
+    },
+    /// Make the configuration what it was after change `id` (recorded as a new change);
+    /// answers with the configuration.
+    ConfigurationRestore {
+        slug: String,
+        id: String,
     },
     /// Skills a configuration owns (`<data>/configurations/<slug>/skills/<name>/`). Each
     /// change answers with the configuration (`Configuration`).
@@ -1285,6 +1296,8 @@ impl Request {
             Request::ConfigurationCreate { .. } => "configuration.create",
             Request::ConfigurationUpdate(_) => "configuration.update",
             Request::ConfigurationDelete { .. } => "configuration.delete",
+            Request::ConfigurationHistory { .. } => "configuration.history",
+            Request::ConfigurationRestore { .. } => "configuration.restore",
             Request::SkillCreate { .. } => "skill.create",
             Request::SkillImport { .. } => "skill.import",
             Request::SkillRead { .. } => "skill.read",
@@ -1422,6 +1435,7 @@ pub enum Response {
     AccountState(AccountState),
     Configurations(Vec<ConfigurationInfo>),
     Configuration(ConfigurationInfo),
+    ConfigurationHistory(Vec<ConfigurationChange>),
     /// Where an attachment is stored on the server (`attach.put`): its file name and
     /// absolute path.
     AttachPath {
@@ -1612,6 +1626,19 @@ pub enum Notify {
     AccountsChanged,
     /// The configuration list (or a configuration) changed.
     ConfigurationsChanged,
+    /// A session's agent changed its configuration (`ide_profile_edit`); shown to the user.
+    /// `ConfigurationsChanged` follows.
+    ConfigurationEdited {
+        slug: String,
+        /// The configuration's name.
+        name: String,
+        session: String,
+        session_title: String,
+        /// The agent's reason.
+        summary: String,
+        /// Changed files.
+        files: Vec<String>,
+    },
     /// The repository registry changed.
     ReposChanged,
     /// Files changed under a watched session (debounced; root-relative paths, deduplicated).

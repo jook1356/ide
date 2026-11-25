@@ -62,6 +62,10 @@ pub const TOOL_TERMINAL_LIST: &str = "ide_terminal_list";
 pub const TOOL_TERMINAL_READ: &str = "ide_terminal_read";
 pub const TOOL_TERMINAL_INPUT: &str = "ide_terminal_input";
 
+/// Profile tools (`docs/profile-editing.md`), answered by the daemon (`service/profile.rs`).
+pub const TOOL_PROFILE_GET: &str = "ide_profile_get";
+pub const TOOL_PROFILE_EDIT: &str = "ide_profile_edit";
+
 /// A tool of the session family.
 pub fn is_family_tool(tool: &str) -> bool {
     [
@@ -93,7 +97,7 @@ IDE: `ide_session` describes this session (folder, repositories, branches, base 
 `ide_send_to_session`. To show the user something richer than text (a board, a form, a \
 chart, a small tool), build a widget: call `ide_widget` with action `guide` first. To show \
 the user a page, a Markdown document, an image or a site, use `ide_preview` (action `guide` \
-explains it).";
+explains it). This session was started with a profile (skills, MCP servers, instructions) that ide gives every session using it: when you learn something future sessions should know (a working procedure, a fix to a skill, a project rule), save it there with `ide_profile_get` / `ide_profile_edit`.";
 
 /// Where the bridge's MCP server connects to: the daemon's socket and the `ide-server`
 /// program (`ServerConfig::bridge`; only a daemon has one).
@@ -601,6 +605,20 @@ fn core_tools() -> Vec<AgentTool> {
                           `close` {id}."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["show","guide","list","close"],"description":"Default show."},"title":{"type":"string","description":"The tab's title (show)."},"kind":{"type":"string","enum":["html","markdown","file","url"]},"content":{"type":"string","description":"HTML or Markdown text (kind html / markdown)."},"path":{"type":"string","description":"A file inside the session folder, relative to it or absolute (kind file)."},"url":{"type":"string","description":"An http(s) address (kind url)."},"id":{"type":"string","description":"1-40 of a-z, 0-9 and -; the same id replaces the preview."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_PROFILE_GET.into(),
+            description: "Read this session's profile: the skills, MCP servers and instructions                           ide gives every session started with it. Without `path`: its name,                           its files with their revisions (`rev`), the instructions text and the                           skills. With `path`: that file's text and revision. Change it with                           ide_profile_edit."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"A file of the profile, e.g. instructions.md, mcp/docs.json, skills/pdf-tools/SKILL.md."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_PROFILE_EDIT.into(),
+            description: "Change this session's profile so later sessions benefit: add or fix a                           skill, an instruction, an MCP server. Applied at once (no approval);                           the user is notified and can undo it in the profile's history.                           Sessions see it when they start next. Other sessions may edit the same                           profile, so every operation is checked against the file as it is now:                           `patch` replaces `old` (must occur exactly once) with `new` (preferred                           for small changes); `write` writes a whole file (`rev` from                           ide_profile_get to replace one, no `rev` to create one); `delete`                           removes a file or a whole skill (`skills/<name>`, with its SKILL.md's                           `rev`). All operations apply or none does; when one no longer fits you                           get the file's current text: apply your change to that and call again.                           Files: instructions.md; mcp/<name>.json ({\"command\": \"...\",                           \"args\": [...], \"env\": [[\"KEY\", \"value\"]]});                           skills/<name>/SKILL.md (front matter `name` and `description`, then                           instructions) and files it refers to. `reason`: one line for the user,                           what changed and why."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"reason":{"type":"string","description":"One line: what you changed and why (shown to the user and kept in the history)."},"ops":{"type":"array","minItems":1,"items":{"type":"object","properties":{"op":{"type":"string","enum":["patch","write","delete"]},"path":{"type":"string"},"old":{"type":"string","description":"patch: the exact text to replace (unique in the file)."},"new":{"type":"string","description":"patch: its replacement."},"content":{"type":"string","description":"write: the whole file."},"rev":{"type":"string","description":"write (replacing) / delete: the revision you read."}},"required":["op","path"],"additionalProperties":false}}},"required":["reason","ops"],"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {
