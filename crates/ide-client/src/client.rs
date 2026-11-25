@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
+    AccountInfo, AccountState, Attached, ChildAgent, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat, PathMatches,
     GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoMerge, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
@@ -1108,7 +1108,7 @@ impl Client {
     }
 
     /// `session.create_child`: a child of `parent` (shared folder, or own worktrees of `repos`
-    /// branched from the parent's; empty = all of the parent's).
+    /// branched from the parent's; empty = all of the parent's). `agent`: `None` = the parent's.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_child_session(
         &self,
@@ -1116,6 +1116,7 @@ impl Client {
         shared: bool,
         repos: Vec<String>,
         title: &str,
+        agent: Option<ChildAgent>,
         start: bool,
         cols: u16,
         rows: u16,
@@ -1126,6 +1127,7 @@ impl Client {
                 shared,
                 repos,
                 title: title.into(),
+                agent,
                 start,
                 cols,
                 rows,

@@ -14,7 +14,7 @@ use ide_core::{
     SessionWorktree,
 };
 use ide_proto::{
-    AccountInfo, AccountState, ConfigurationInfo, McpServerInfo, ModeCaps, NewSession, Notify,
+    AccountInfo, AccountState, ChildAgent, ConfigurationInfo, McpServerInfo, ModeCaps, NewSession, Notify,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderCaps, ProviderDetection, ProviderInfo,
     RepoFailureInfo, RepoInfo, Request, SkillInfo,
     Response, SessionInfo, SessionRepo, SessionState, Support, TextSearch, UserInfo, UserTerm,
@@ -459,6 +459,69 @@ impl UserCtx {
         self.bridge.check(session, token)
     }
 
+    /// `ide_create_child_session`'s agent: `None` when no argument names one (the parent's).
+    /// `agent`: a provider id or name; `account`: an account slug or name of it (`default` = the
+    /// CLI's own login; missing = the parent's for the parent's provider, else its first
+    /// account); `profile`: a configuration slug or name (missing = the parent's).
+    fn child_agent_arg(
+        &self,
+        parent: &Session,
+        agent: &str,
+        account: &str,
+        profile: &str,
+    ) -> Result<Option<SessionTarget>, String> {
+        if agent.is_empty() && account.is_empty() && profile.is_empty() {
+            return Ok(None);
+        }
+        let provider = if agent.is_empty() {
+            parent.provider.clone()
+        } else {
+            self.providers
+                .list()
+                .iter()
+                .find(|p| p.id().eq_ignore_ascii_case(agent) || p.display_name().eq_ignore_ascii_case(agent))
+                .map(|p| p.id().to_owned())
+                .ok_or_else(|| {
+                    let ids: Vec<&str> = self.providers.list().iter().map(|p| p.id()).collect();
+                    format!("no agent `{agent}` (agents: {})", ids.join(", "))
+                })?
+        };
+        let account = {
+            let accounts = self.accounts.lock().unwrap();
+            let mut of_provider = accounts.of_provider(&provider);
+            if account.eq_ignore_ascii_case("default") {
+                None
+            } else if !account.is_empty() {
+                let a = of_provider
+                    .find(|a| a.slug.eq_ignore_ascii_case(account) || a.name.eq_ignore_ascii_case(account))
+                    .ok_or_else(|| format!("no account `{account}` of agent `{provider}`"))?;
+                Some(a.slug.clone())
+            } else if provider == parent.provider {
+                parent.account.clone()
+            } else if self.providers.get(&provider).is_some_and(|p| p.capabilities().accounts) {
+                of_provider.next().map(|a| a.slug.clone())
+            } else {
+                None
+            }
+        };
+        let configuration = if profile.is_empty() {
+            parent.configuration.clone()
+        } else {
+            let configs = self.configs.lock().unwrap();
+            configs
+                .list()
+                .iter()
+                .find(|c| c.slug.eq_ignore_ascii_case(profile) || c.name.eq_ignore_ascii_case(profile))
+                .map(|c| c.slug.clone())
+                .ok_or_else(|| format!("no profile `{profile}`"))?
+        };
+        Ok(Some(SessionTarget {
+            provider,
+            account,
+            configuration,
+        }))
+    }
+
     /// The family tools of the agent bridge (`docs/session-family.md`), answered here;
     /// `None` = not a family tool. Blocking (git, the session store).
     fn family_tool(&self, session: &str, tool: &str, args: &serde_json::Value) -> Option<ide_proto::AgentToolResult> {
@@ -528,9 +591,13 @@ impl UserCtx {
                         None => return Some(err(format!("this session has no repository `{want}`"))),
                     }
                 }
+                let agent = match self.child_agent_arg(&s, &text("agent"), &text("account"), &text("profile")) {
+                    Ok(a) => a,
+                    Err(e) => return Some(err(e)),
+                };
                 let prompt = text("prompt");
                 let first = Some(prompt.as_str()).filter(|p| !p.is_empty());
-                match self.create_child(session, shared, &ids, &text("title"), Some(first), (0, 0)) {
+                match self.create_child(session, shared, &ids, &text("title"), agent, Some(first), (0, 0)) {
                     Ok((Response::SessionCreated { session: c, failures, .. }, in_args)) => {
                         // On its command line the CLI submits it itself after its start
                         // dialogs; otherwise it is typed in once the CLI is at its input.
@@ -541,6 +608,9 @@ impl UserCtx {
                         ok(serde_json::json!({
                             "id": c.id,
                             "title": c.title,
+                            "agent": c.provider,
+                            "account": c.account,
+                            "profile": c.configuration,
                             "shared_folder": c.shared,
                             "folder": c.root,
                             "repositories": c.repos.iter().map(|r| serde_json::json!({
@@ -1806,37 +1876,48 @@ impl UserCtx {
         }
     }
 
-    /// `session.create_child` (`docs/session-family.md`): the parent's agent, shared or own
-    /// worktrees branched from the parent's.
+    /// `session.create_child` (`docs/session-family.md`): the parent's agent unless `agent`
+    /// names another, shared or own worktrees branched from the parent's.
+    #[allow(clippy::too_many_arguments)]
     pub fn session_create_child(
         &self,
         parent: &str,
         shared: bool,
         repos: &[String],
         title: &str,
+        agent: Option<ChildAgent>,
         start: bool,
         size: (u16, u16),
     ) -> Result<Response, ProtoError> {
-        self.create_child(parent, shared, repos, title, start.then_some(None), size)
+        let agent = agent.map(|a| SessionTarget {
+            provider: a.provider,
+            account: a.account,
+            configuration: a.configuration,
+        });
+        self.create_child(parent, shared, repos, title, agent, start.then_some(None), size)
             .map(|(r, _)| r)
     }
 
     /// [`Self::session_create_child`]; `start`: `Some(first prompt)` starts the child (the
     /// prompt, when there is one, on its command line if its provider takes it there). The
-    /// `bool`: the prompt went on the command line (else the caller queues it).
+    /// `bool`: the prompt went on the command line (else the caller queues it). `agent`: `None`
+    /// = the parent's.
+    #[allow(clippy::too_many_arguments)]
     fn create_child(
         &self,
         parent: &str,
         shared: bool,
         repos: &[String],
         title: &str,
+        agent: Option<SessionTarget>,
         start: Option<Option<&str>>,
         (cols, rows): (u16, u16),
     ) -> Result<(Response, bool), ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
         let ps = self.resolve_session(parent)?;
         Self::not_preparing(&ps)?;
-        let p = self.provider(&ps.provider)?;
+        let target = agent.unwrap_or_else(|| ps.target());
+        let p = self.check_target(&target)?;
         let repo_ids = repos
             .iter()
             .map(|r| self.parse_repo(r))
@@ -1844,7 +1925,7 @@ impl UserCtx {
         let snapshot = self.repos.lock().unwrap().clone();
         let all = self.sessions.lock().unwrap().list().to_vec();
         let req = ide_core::family::NewChild {
-            target: ps.target(),
+            target,
             title: title.to_owned(),
             shared,
             repos: repo_ids,
@@ -1867,9 +1948,10 @@ impl UserCtx {
         self.audit(
             "session.create_child",
             &format!(
-                "{} parent={} shared={shared} repos={}",
+                "{} parent={} agent={} shared={shared} repos={}",
                 session.id,
                 ps.id,
+                session.provider,
                 session
                     .worktrees
                     .iter()
@@ -2444,10 +2526,11 @@ impl UserCtx {
                 shared,
                 repos,
                 title,
+                agent,
                 start,
                 cols,
                 rows,
-            } => self.session_create_child(&parent, shared, &repos, &title, start, (cols, rows)),
+            } => self.session_create_child(&parent, shared, &repos, &title, agent, start, (cols, rows)),
             Request::SessionMergeChild { id, squash } => {
                 Ok(Response::Merges(self.merge_child(&id, squash)?))
             }
@@ -2927,27 +3010,39 @@ impl UserCtx {
         }
     }
 
-    fn session_create(&self, req: NewSession) -> Result<Response, ProtoError> {
+    /// The provider of `t`, once its account and configuration exist.
+    fn check_target(&self, t: &SessionTarget) -> Result<&dyn AgentProvider, ProtoError> {
         let core = |e: ide_core::Error| core_error(&e);
-        let p = self.provider(&req.provider)?;
-        if let Some(slug) = &req.account {
+        let p = self.provider(&t.provider)?;
+        if let Some(slug) = &t.account {
             if !p.capabilities().accounts {
                 return Err(core(ide_core::Error::AccountNotFound {
-                    provider: req.provider.clone(),
+                    provider: t.provider.clone(),
                     slug: slug.clone(),
                 }));
             }
             self.accounts
                 .lock()
                 .unwrap()
-                .require(&req.provider, slug)
+                .require(&t.provider, slug)
                 .map_err(core)?;
         }
         self.configs
             .lock()
             .unwrap()
-            .require(&req.configuration)
+            .require(&t.configuration)
             .map_err(core)?;
+        Ok(p)
+    }
+
+    fn session_create(&self, req: NewSession) -> Result<Response, ProtoError> {
+        let core = |e: ide_core::Error| core_error(&e);
+        let target = SessionTarget {
+            provider: req.provider.clone(),
+            account: req.account.clone(),
+            configuration: req.configuration.clone(),
+        };
+        let p = self.check_target(&target)?;
         // Only registered repositories (the registry is the scope of what sessions reach).
         let repo_ids = req
             .repos
@@ -2960,11 +3055,7 @@ impl UserCtx {
             .map(|r| self.parse_repo(r))
             .transpose()?;
         let core_req = ide_core::NewSession {
-            target: SessionTarget {
-                provider: req.provider.clone(),
-                account: req.account.clone(),
-                configuration: req.configuration.clone(),
-            },
+            target,
             title: req.title.clone(),
             provider_name: p.display_name().to_owned(),
             repos: repo_ids,

@@ -595,6 +595,7 @@ session-own-worktrees = 자기 워크트리(브랜치)에서 작업해요
 session-unguarded = 이 세션은 세션 밖 쓰기가 막히지 않아요. 계정에 ide 통합이 없거나 예전 버전이에요. 계정 설정에서 통합을 설치(갱신)하고 CLI에서 훅을 한 번 승인하세요.
 child-shared-hint = 부모의 폴더와 워크트리에서 같이 작업해요.
 child-repos-label = 레포 (부모의 레포)
+child-agent-hint = 처음엔 부모 세션의 에이전트, 계정, 프로필이 골라져 있어요.
 child-create = 만들기
 child-merge = 부모에 합치기
 child-sync = 부모 변경 가져오기

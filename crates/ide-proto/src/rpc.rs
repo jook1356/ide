@@ -427,6 +427,17 @@ pub enum MergeResult {
     Failed { error: String },
 }
 
+/// The agent of a new child session (`Request::SessionCreateChild`), when not the parent's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildAgent {
+    /// Provider id (see `provider.list`).
+    pub provider: String,
+    /// Account slug of that provider (`None` = the CLI's default login / no account).
+    pub account: Option<String>,
+    /// Configuration slug.
+    pub configuration: String,
+}
+
 /// `session.create` arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSession {
@@ -703,12 +714,14 @@ pub enum Request {
     },
     /// A child of `parent` (`SessionCreated`): `shared` = in the parent's folder and worktrees,
     /// else own worktrees of `repos` (the parent's; empty = all) branched from the parent's.
-    /// The parent's agent (provider, account, configuration).
+    /// `agent`: its provider, account and configuration (`None` = the parent's).
     SessionCreateChild {
         parent: String,
         shared: bool,
         repos: Vec<String>,
         title: String,
+        #[serde(default)]
+        agent: Option<ChildAgent>,
         start: bool,
         cols: u16,
         rows: u16,
