@@ -717,7 +717,8 @@ impl App {
                 background: Some(
                     match status {
                         button::Status::Hovered | button::Status::Pressed => style::HOVER,
-                        _ => Color::from_rgb8(0x16, 0x17, 0x1a),
+                        // Raised above the SIDEBAR ground of the repo bar.
+                        _ => style::PANEL,
                     }
                     .into(),
                 ),
