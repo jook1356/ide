@@ -64,6 +64,7 @@ composer-show = 터미널 아래 입력창 보기
 composer-hide = 입력창 숨기기 (터미널에 직접 입력)
 composer-placeholder = 메시지 입력 (Enter 전송, Shift+Enter 줄바꿈, ↑ 이전 입력)
 composer-send-tip = 보내기 (Enter): 터미널에 붙여넣고 Enter를 눌러요
+attach-to-input = 입력창에 첨부
 attach-no-folder-remote = 원격 서버로는 폴더를 보낼 수 없어요. 안의 파일을 끌어다 놓아 주세요.
 tab-web = 웹
 web-back = 뒤로

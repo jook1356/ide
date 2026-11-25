@@ -76,12 +76,30 @@ const ID_BASE: u32 = 0xFE00;
 const CHIP_SIZE: f32 = 11.5;
 const TEXT_SIZE: f32 = 13.0;
 
-/// An attachment chip: the label drawn in its pill and the path it stands for.
+/// An attachment chip: the label drawn in its pill and the text it stands for (a path, quoted
+/// when sent, or a reference sent as it is: a session, a commit).
 #[derive(Debug, Clone)]
 struct Chip {
     id: u32,
     label: String,
     path: String,
+    /// `path` is a file path (quoted when it has white space).
+    is_path: bool,
+}
+
+/// Longest chip label of a reference (a session title, a commit subject), in characters.
+const REF_LABEL: usize = 40;
+
+/// `s` cut to [`REF_LABEL`] characters, with an ellipsis when cut.
+pub(crate) fn ref_label(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= REF_LABEL {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(REF_LABEL - 1).collect();
+        out.push('…');
+        out
+    }
 }
 
 /// Width of `s` in the app's font at `size`.
@@ -356,6 +374,15 @@ impl Composer {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_owned());
+        self.push_chip(label, path.to_owned(), true);
+    }
+
+    /// Insert a chip labelled `label` that is sent as `text`, unquoted (a session, a commit).
+    pub fn insert_ref(&mut self, label: &str, text: &str) {
+        self.push_chip(label.to_owned(), text.to_owned(), false);
+    }
+
+    fn push_chip(&mut self, label: String, path: String, is_path: bool) {
         let id = self.next_id;
         self.next_id += 1;
         // Room for the label at the chip size, in blank cells of the text size (not spaces: a
@@ -365,7 +392,8 @@ impl Composer {
         self.chips.push(Chip {
             id,
             label,
-            path: path.to_owned(),
+            path,
+            is_path,
         });
         let marks = id_marks(id);
         self.content
@@ -386,7 +414,11 @@ impl Composer {
                 Some(c) => {
                     let id = chip_id(&after[..c]);
                     if let Some(chip) = self.chips.iter().find(|x| Some(x.id) == id) {
-                        out.push_str(&quote_path(&chip.path));
+                        if chip.is_path {
+                            out.push_str(&quote_path(&chip.path));
+                        } else {
+                            out.push_str(&chip.path);
+                        }
                     }
                     rest = &after[c + CLOSE.len_utf8()..];
                 }
@@ -633,6 +665,32 @@ impl App {
                 self.update(Message::TermInput(sid.to_owned(), bytes))
             }
         }
+    }
+
+    /// Put a reference (a session, a commit) where attachments of session `sid` go now: a chip
+    /// labelled `label` in the box, or `text` typed into the agent's own input.
+    pub(crate) fn deliver_ref(&mut self, sid: &str, label: &str, text: &str) -> Task<Message> {
+        crate::script::log(&format!("reference for {sid}: {text}"));
+        match self.attach_dest(sid) {
+            Dest::Composer => {
+                if let Some(l) = self.live_mut(sid) {
+                    l.composer.insert_ref(label, text);
+                }
+                operation::focus(COMPOSER_ID)
+            }
+            Dest::Terminal => {
+                let Some(l) = self.live(sid) else {
+                    return Task::none();
+                };
+                let bytes = l.term.paste_bytes(&format!("{text} "));
+                self.update(Message::TermInput(sid.to_owned(), bytes))
+            }
+        }
+    }
+
+    /// Whether references can be attached to session `sid` now (it runs).
+    pub(crate) fn can_attach(&self, sid: &str) -> bool {
+        self.live(sid).is_some_and(|l| l.state.is_alive())
     }
 
     /// A file dropped on the window (from the OS): a chip in the input box when it is shown,
@@ -949,6 +1007,15 @@ mod tests {
         assert_eq!(c.content.text(), "draft", "past the newest the draft comes back");
         c.walk(false);
         assert_eq!(c.content.text(), "draft");
+    }
+
+    #[test]
+    fn reference_chips_are_sent_as_they_are() {
+        let mut c = Composer::default();
+        c.insert_ref("abc1234 Fix it", "commit abc1234def (Fix it)");
+        c.insert_chip("C:/a b/x.png");
+        assert_eq!(c.take().as_deref(), Some("commit abc1234def (Fix it) \"C:/a b/x.png\""));
+        assert_eq!(ref_label(&"가".repeat(50)).chars().count(), REF_LABEL);
     }
 
     #[test]

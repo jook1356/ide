@@ -156,6 +156,12 @@ fn kind_box<'a>(st: ide_views::GitStatus) -> El<'a> {
 
 /// A context-menu item (Mantine `Menu.Item`).
 fn menu_item<'a>(i: Option<Icon>, label: String, color: Color, msg: Message) -> El<'a> {
+    menu_item_maybe(i, label, color, Some(msg))
+}
+
+/// A menu item that is greyed out without a message.
+fn menu_item_maybe<'a>(i: Option<Icon>, label: String, color: Color, msg: Option<Message>) -> El<'a> {
+    let color = if msg.is_some() { color } else { style::FAINT };
     let mut r = Row::<El<'a>>::new().spacing(8).align_y(Alignment::Center);
     if let Some(i) = i {
         r = r.add(icon(i, 14.0, color));
@@ -165,7 +171,7 @@ fn menu_item<'a>(i: Option<Icon>, label: String, color: Color, msg: Message) -> 
         .padding([5, 10])
         .width(Fill)
         .style(style::row(false))
-        .on_press(msg)
+        .on_press_maybe(msg)
         .boxed()
 }
 
@@ -1003,7 +1009,12 @@ impl App {
             ));
             (menu_card(items, 250.0), 250.0, rows)
         } else if let Some(sha) = &a.commit_menu {
+            let attach = self
+                .can_attach(sid)
+                .then(|| act(sid, ActMsg::Attach(sha.clone())));
             let mut items = Column::<El<'_>>::new()
+                .add(menu_item_maybe(None, tr::attach_to_input(), style::TEXT, attach))
+                .add(menu_divider())
                 .add(menu_item(
                     None,
                     tr::chg_copy_sha(),
@@ -1025,7 +1036,7 @@ impl App {
                     act(sid, ActMsg::CommitPick(sha.clone(), k)),
                 ));
             }
-            (menu_card(items, 270.0), 270.0, 3.0 + CommitKind::ALL.len() as f32)
+            (menu_card(items, 270.0), 270.0, 5.0 + CommitKind::ALL.len() as f32)
         } else {
             return space().boxed();
         };
