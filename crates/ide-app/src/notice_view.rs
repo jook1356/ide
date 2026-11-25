@@ -3,7 +3,7 @@
 
 use std::time::{Instant, UNIX_EPOCH};
 
-use iced::widget::{Column, button, column, container, mouse_area, popover, row, scrollable, space, stack, text, tooltip};
+use iced::widget::{Column, button, column, container, mouse_area, opaque, row, scrollable, space, stack, text, tooltip};
 use iced::{Alignment, Border, Color, Element, Fill, Theme, Widget as _};
 
 use crate::app::{App, Message};
@@ -20,6 +20,13 @@ pub type AppNotice = Notice<Message>;
 
 const PANEL_W: f32 = 360.0;
 const PANEL_H: f32 = 520.0;
+/// Space between the bell's right edge and the list.
+const PANEL_GAP: f32 = 12.0;
+/// The list never comes closer than this to the top of the window.
+const PANEL_TOP: f32 = 8.0;
+/// The bell: its size and its distance from the bottom of the rail (the rail's padding).
+const BELL: f32 = 44.0;
+const BELL_BOTTOM: f32 = 12.0;
 const TOAST_W: f32 = 340.0;
 /// Most toasts on screen at once (the newest).
 const MAX_TOASTS: usize = 3;
@@ -445,7 +452,8 @@ impl App {
         } else {
             tr::notice_bell()
         };
-        let b: El<'_> = if open {
+        if open {
+            // The list itself is `notice_layer`, a layer over the window.
             b.boxed()
         } else {
             tooltip(
@@ -455,13 +463,35 @@ impl App {
             .position(tooltip::Position::Right)
             .gap(8)
             .boxed()
-        };
-        let popup = open.then(|| self.notice_panel());
-        popover(b, popup)
-            .position(popover::Position::Right)
-            .gap(12)
-            .on_close(nm(NoticeMsg::Close))
-            .boxed()
+        }
+    }
+
+    /// The open notice list, a layer over the main window (under the title bar): right of the
+    /// bell, its bottom level with the bell's bottom, growing upwards (at most `PANEL_H`, and
+    /// `PANEL_TOP` below the top). A popover centred on the bell (iced's `Position::Right`)
+    /// hung below the window and was pushed up against its bottom edge, over the footer.
+    /// A click outside closes it.
+    pub(crate) fn notice_layer(&self) -> El<'_> {
+        if !self.notice_open {
+            return space().boxed();
+        }
+        // The bell is centred in the rail (`RAIL_W` less its 1 px border).
+        let left = (crate::app::RAIL_W - 1.0 + BELL) / 2.0 + PANEL_GAP;
+        let backdrop = mouse_area(space().width(Fill).height(Fill))
+            .on_press(nm(NoticeMsg::Close))
+            .on_right_press(nm(NoticeMsg::Close));
+        let panel = container(opaque(self.notice_panel()))
+            .width(Fill)
+            .height(Fill)
+            .align_y(Alignment::End)
+            .padding(iced::Padding {
+                top: PANEL_TOP,
+                left,
+                bottom: crate::self_update::FOOTER_H + BELL_BOTTOM,
+                right: 0.0,
+            });
+        // Only the card (`opaque`) takes clicks; around it they reach the backdrop.
+        stack![backdrop, panel].width(Fill).height(Fill).boxed()
     }
 
     fn notice_panel(&self) -> El<'_> {
@@ -519,14 +549,13 @@ impl App {
             }
             scrollable(list).height(Fill).boxed()
         };
-        let h = PANEL_H.min((self.window_size.height - 80.0).max(200.0));
         container(column![
             head,
             container(space()).height(1).width(Fill).style(style::bg(style::BORDER)),
             body
         ])
         .width(PANEL_W)
-        .height(h)
+        .height(iced::Length::Fill.max(PANEL_H))
         .style(style::modal_card)
         .boxed()
     }
