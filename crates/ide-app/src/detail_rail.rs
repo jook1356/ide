@@ -11,7 +11,7 @@ use std::time::Duration;
 use iced::widget::{
     Column, button, column, container, mouse_area, popover, row, scrollable, space, stack, text,
 };
-use iced::{Alignment, Border, Color, Element, Fill, Length, Shadow, Task, Vector, Widget as _};
+use iced::{Alignment, Border, Color, Element, Fill, Shadow, Task, Vector, Widget as _};
 
 use crate::app::{App, Live, Message};
 use crate::detail::{CloseSet, DetailMsg, Item, ItemKey, file_name};
@@ -291,7 +291,6 @@ impl App {
             }
             list = list.push(space().height(4).boxed());
         }
-        list = list.push(self.new_item_button(live, wide));
         if !listed && wide {
             list = list.push(
                 container(text(tr::rail_empty()).size(12).color(style::DIM))
@@ -299,6 +298,7 @@ impl App {
                     .boxed(),
             );
         }
+        list = list.push(self.new_item_button(live, wide));
         column![
             container(top).padding([0, 2]),
             scrollable(list).height(Fill),
@@ -408,6 +408,9 @@ fn rail_icon<'a>(app: &App, live: &Live, k: &ItemKey) -> El<'a> {
 
 /// One item of the list: its icon (with an unsaved dot on the icon rail), and wide its name
 /// and close button.
+/// Width kept free at a wide row's right end for its close button.
+const CLOSE_W: f32 = 24.0;
+
 fn rail_row<'a>(
     app: &'a App,
     sid: &str,
@@ -473,7 +476,12 @@ fn rail_row<'a>(
             .spacing(8)
             .align_y(Alignment::Center),
     )
-    .padding([0.0, ICON_X])
+    // Room on the right for the close button drawn over the row while it is hovered.
+    .padding(iced::Padding {
+        left: ICON_X,
+        right: ICON_X + CLOSE_W,
+        ..iced::Padding::ZERO
+    })
     .width(Fill)
     .height(ROW_H)
     .style(style::row(active))
@@ -495,11 +503,8 @@ fn rail_row<'a>(
         Some(Message::Detail(sid.to_owned(), DetailMsg::Close(k.clone()))),
         close_tip,
     );
-    row![main, close]
-        .spacing(2)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .boxed()
+    // The close button sits inside the row (one hover background) and shows while it is hovered.
+    crate::changes_view::row_actions(main.boxed(), vec![close], 3.0)
 }
 
 /// A group's heading: its name and count on the open list, a short line in its colour on the
