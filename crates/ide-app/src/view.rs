@@ -439,10 +439,10 @@ impl App {
         let mut top: Column<El<'_>> = Column::new().spacing(6).align_x(Alignment::Center);
         for page in [
             Page::Work,
-            Page::Accounts,
             Page::Configurations,
             Page::Repos,
             Page::Widgets,
+            Page::Accounts,
             Page::Settings,
         ] {
             let (icon, label) = self.rail_entry(page);
