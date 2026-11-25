@@ -704,6 +704,18 @@ impl App {
         self.attach_path(&sid, path, dest)
     }
 
+    /// A file dropped from another app (Explorer): Windows leaves that app in the foreground,
+    /// so the keys would still go there although the input box shows its cursor. The main
+    /// window takes the foreground (winit's `focus_window`) so typing goes on right after the
+    /// chip. Not for in-app scripts, which send `FileDropped` (the call fakes an Alt press).
+    pub(crate) fn on_os_file_dropped(&mut self, path: std::path::PathBuf) -> Task<Message> {
+        let front = match (self.selected.is_some(), self.window) {
+            (true, Some(id)) => iced::window::gain_focus(id),
+            _ => Task::none(),
+        };
+        Task::batch([self.on_file_dropped(path), front])
+    }
+
     /// An in-app file drag ended: over the input box it becomes a chip; over the terminal it
     /// goes where attachments of the session go now (the box, or the agent's own input).
     pub(crate) fn end_file_drag(&mut self) -> Task<Message> {

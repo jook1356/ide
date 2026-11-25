@@ -987,8 +987,11 @@ pub enum Message {
     /// An in-app file drag: the pointer entered (`Some`) or left a drop target, and moved.
     DropHover(crate::composer::Dest, bool),
     DragPointer(iced::Point),
-    /// A file dropped on a window from the OS (`composer.rs`).
+    /// A file dropped on a window (`composer.rs`); in-app scripts send it directly.
     FileDropped(std::path::PathBuf),
+    /// A file dropped on a window by the OS: `FileDropped` and the main window brought to the
+    /// front (`composer.rs`).
+    OsFileDropped(std::path::PathBuf),
     /// The keyboard's modifiers changed.
     Modifiers(keyboard::Modifiers),
     /// "+ 새로 열기" → 폴더 선택… (the server folder picker, for a 공용 terminal).
@@ -3969,6 +3972,7 @@ impl App {
             Message::AutoAnswer(m) => self.on_auto_answer(m),
             Message::Composer(m) => self.on_composer(m),
             Message::FileDropped(p) => self.on_file_dropped(p),
+            Message::OsFileDropped(p) => self.on_os_file_dropped(p),
             Message::DropHover(t, entered) => {
                 // Leaving clears only that target (another one may have been entered first).
                 if entered {
@@ -4671,7 +4675,7 @@ impl App {
         subs.push(self.footer_subscription());
         subs.push(event::listen_with(|e, _, _| match e {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
-            Event::Window(window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
+            Event::Window(window::Event::FileDropped(p)) => Some(Message::OsFileDropped(p)),
             _ => None,
         }));
         if self.file_drag.is_some() {
