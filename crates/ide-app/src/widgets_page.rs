@@ -8,6 +8,7 @@ use ide_client::WidgetInfo;
 
 use crate::app::{App, Message};
 use crate::i18n::tr;
+use crate::list_edit::ListKind;
 use crate::icons::{self, Icon};
 use crate::style;
 use crate::ui_state::Page;
@@ -73,6 +74,7 @@ impl App {
         let head = row![
             text(tr::nav_widgets()).size(13).font(style::bold()),
             space().width(Fill),
+            self.list_edit_toggle(ListKind::Widgets),
             tip(
                 button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
                     .padding(4)
@@ -83,6 +85,7 @@ impl App {
             ),
         ]
         .align_y(Alignment::Center);
+        let editing = self.list_editing(ListKind::Widgets);
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         for (scope, title) in groups() {
             let mut members = self.widgets.list.iter().filter(|w| w.scope == scope).peekable();
@@ -105,6 +108,7 @@ impl App {
                 list = list.push(
                     button(
                         row![
+                            editing.then(|| self.list_row_box(&w.id)),
                             icons::icon(Icon::Puzzle, 16.0, if sel { style::ACCENT_TEXT } else { style::DIM }),
                             text(w.name.as_str())
                                 .size(13)
@@ -121,8 +125,12 @@ impl App {
                     )
                     .width(Fill)
                     .padding([6, 8])
-                    .style(style::row(sel))
-                    .on_press(wm(WidgetMsg::Select(w.id.clone())))
+                    .style(style::row(self.list_row_lit(ListKind::Widgets, &w.id, sel)))
+                    .on_press(self.list_row_press(
+                        ListKind::Widgets,
+                        &w.id,
+                        wm(WidgetMsg::Select(w.id.clone())),
+                    ))
                     .boxed(),
                 );
             }
@@ -130,7 +138,8 @@ impl App {
         if self.widgets.list.is_empty() {
             list = list.push(text(tr::widgets_none()).size(12).color(style::DIM).boxed());
         }
-        container(column![head, scrollable(list).height(Fill)].spacing(10).padding(10))
+        let bar = editing.then(|| self.list_edit_bar(ListKind::Widgets));
+        container(column![head, bar, scrollable(list).height(Fill)].spacing(10).padding(10))
             .width(self.list_w())
             .height(Fill)
             .style(style::bg(style::SIDEBAR))

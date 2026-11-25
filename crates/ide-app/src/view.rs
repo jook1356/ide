@@ -19,6 +19,7 @@ use crate::app::{
     TERM_ID,
 };
 use crate::i18n::{self, tr};
+use crate::list_edit::ListKind;
 use crate::icons::{self, Icon};
 use crate::new_session_repos;
 use crate::session_sort::{SortDir, SortItem, SortKey};
@@ -2188,6 +2189,7 @@ impl App {
         let head = row![
             text(tr::nav_repos()).size(13).font(style::bold()),
             space().width(Fill),
+            self.list_edit_toggle(ListKind::Repos),
             tip(
                 button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
                     .padding(4)
@@ -2210,12 +2212,14 @@ impl App {
         .padding([6, 10])
         .style(style::primary)
         .on_press_maybe((online && !f.repos_busy).then_some(Message::PickOpen));
+        let editing = self.list_editing(ListKind::Repos);
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         for r in &self.repos {
             let sel = f.repo_selected.as_deref() == Some(r.id.as_str());
             list = list.push(
                 button(
                     row![
+                        editing.then(|| self.list_row_box(&r.id)),
                         icons::icon(
                             Icon::GitBranch,
                             16.0,
@@ -2241,16 +2245,21 @@ impl App {
                 )
                 .width(Fill)
                 .padding([6, 8])
-                .style(style::row(sel))
-                .on_press(Message::RepoSelect(r.id.clone()))
+                .style(style::row(self.list_row_lit(ListKind::Repos, &r.id, sel)))
+                .on_press(self.list_row_press(
+                    ListKind::Repos,
+                    &r.id,
+                    Message::RepoSelect(r.id.clone()),
+                ))
                 .boxed(),
             );
         }
         if self.repos.is_empty() {
             list = list.push(text(tr::repos_none()).size(12).color(style::DIM).boxed());
         }
+        let bar = editing.then(|| self.list_edit_bar(ListKind::Repos));
         container(
-            column![head, add, scrollable(list).height(Fill)]
+            column![head, add, bar, scrollable(list).height(Fill)]
                 .spacing(10)
                 .padding(10),
         )
@@ -3069,6 +3078,7 @@ impl App {
             Modal::AddProfile => self.add_profile_card(),
             Modal::NewChild(f) => self.child_card(f),
             Modal::BulkDelete(f) => self.bulk_delete_card(f),
+            Modal::ListDelete(f) => self.list_delete_card(f),
             Modal::SelfUpdate => self.update_card(),
             Modal::RestartOldServer(f) => self.old_server_card(f),
             Modal::WidgetRegister(f) => self.widget_register_card(f),
