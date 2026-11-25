@@ -13,7 +13,7 @@ use crate::files::{
 };
 
 /// Major protocol version. Peers with a different major version refuse each other.
-pub const PROTO_VERSION: u32 = 21;
+pub const PROTO_VERSION: u32 = 22;
 /// Largest `attach.put` piece (a frame holds at most 1 MiB).
 pub const ATTACH_CHUNK: usize = 512 * 1024;
 /// Largest attachment.
@@ -108,6 +108,9 @@ pub struct WidgetInfo {
     pub updated: u64,
     /// The sessions showing it (open tabs, remembered across restarts).
     pub open: Vec<String>,
+    /// Tools / features the user blocked for it (protocol 22; `*` = everything).
+    #[serde(default)]
+    pub blocked: Vec<String>,
 }
 
 /// `widget.data`: a widget's key-value store (values are JSON text).
@@ -424,6 +427,17 @@ pub enum MergeResult {
     Failed { error: String },
 }
 
+/// The agent of a new child session (`Request::SessionCreateChild`), when not the parent's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildAgent {
+    /// Provider id (see `provider.list`).
+    pub provider: String,
+    /// Account slug of that provider (`None` = the CLI's default login / no account).
+    pub account: Option<String>,
+    /// Configuration slug.
+    pub configuration: String,
+}
+
 /// `session.create` arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSession {
@@ -711,12 +725,14 @@ pub enum Request {
     },
     /// A child of `parent` (`SessionCreated`): `shared` = in the parent's folder and worktrees,
     /// else own worktrees of `repos` (the parent's; empty = all) branched from the parent's.
-    /// The parent's agent (provider, account, configuration).
+    /// `agent`: its provider, account and configuration (`None` = the parent's).
     SessionCreateChild {
         parent: String,
         shared: bool,
         repos: Vec<String>,
         title: String,
+        #[serde(default)]
+        agent: Option<ChildAgent>,
         start: bool,
         cols: u16,
         rows: u16,
@@ -1270,6 +1286,20 @@ pub enum Request {
         widget: String,
         op: WidgetDataOp,
     },
+    /// A widget page uses an ide feature directly (protocol 22, `docs/widgets.md` "Host API":
+    /// `exec`, `fs.*`, `term.*`, `sessions.*`; JSON `args`) -> `AgentResult` (JSON text).
+    WidgetHost {
+        session: String,
+        widget: String,
+        method: String,
+        args: String,
+    },
+    /// The user blocks / unblocks a tool or feature (`*` = everything) for a widget -> `Unit`.
+    WidgetSetBlocked {
+        widget: String,
+        name: String,
+        blocked: bool,
+    },
     /// A file of a session's preview (`docs/previews.md`; `path` empty = the preview's page)
     /// -> `WidgetFile`.
     PreviewFile {
@@ -1417,6 +1447,8 @@ impl Request {
             Request::ApprovalSetWait { .. } => "approval.set_wait",
             Request::WidgetCall { .. } => "widget.call",
             Request::WidgetData { .. } => "widget.data",
+            Request::WidgetHost { .. } => "widget.host",
+            Request::WidgetSetBlocked { .. } => "widget.set_blocked",
             Request::PreviewFile { .. } => "preview.file",
         }
     }

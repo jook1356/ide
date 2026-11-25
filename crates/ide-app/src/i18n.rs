@@ -91,6 +91,7 @@ pub fn proto_error(e: &ProtoError) -> String {
         "widget" => tr::err_widget(&a("detail")),
         "widget-changed" => tr::err_widget_changed(&a("widget")),
         "widget-not-allowed" => tr::err_widget_not_allowed(&a("tool")),
+        "widget-blocked" => tr::err_widget_blocked(&a("tool")),
         "preview" => tr::err_preview(&a("detail")),
         "approval-not-found" => tr::err_approval_not_found(),
         "session-has-children" => tr::err_session_has_children(n("count")),

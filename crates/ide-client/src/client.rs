@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ide_proto::{
-    AccountInfo, AccountState, Attached, BrowseListing, ChunkDecoder,
+    AccountInfo, AccountState, Attached, ChildAgent, BrowseListing, ChunkDecoder,
     ConfigurationInfo, DefResult, DiffAgainst, DiffFile, FileContent, FileMatch, FsEntry, FsStat, PathMatches,
     GitChange, GitLog, GitRev, GitStatus, Hello, Mux, MuxConfig, MuxError, NewSession, Notify, PROTO_VERSION,
     BaseRuleInfo, BaseRulePreview, ProtoError, ProviderInfo, RepoFailureInfo, RepoMerge, RepoInfo, Request, Response, ResumeToken, Role, RpcMessage, RpcReceiver,
@@ -1051,6 +1051,38 @@ impl Client {
         )
     }
 
+    /// `widget.host`: a widget uses an ide feature directly (JSON `args`; JSON text back).
+    pub async fn widget_host(
+        &self,
+        session: &str,
+        widget: &str,
+        method: &str,
+        args: &str,
+    ) -> Result<ide_proto::AgentToolResult, ProtoError> {
+        let req = Request::WidgetHost {
+            session: session.into(),
+            widget: widget.into(),
+            method: method.into(),
+            args: args.into(),
+        };
+        match self.call(req).await? {
+            Response::AgentResult(r) => Ok(r),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a widget host result")),
+        }
+    }
+
+    /// `widget.set_blocked`: block / unblock a tool or feature for a widget.
+    pub async fn widget_set_blocked(&self, widget: &str, name: &str, blocked: bool) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::WidgetSetBlocked {
+                widget: widget.into(),
+                name: name.into(),
+                blocked,
+            })
+            .await,
+        )
+    }
+
     /// `widget.call`: a widget calls an ide tool (JSON `args`).
     pub async fn widget_call(
         &self,
@@ -1110,7 +1142,7 @@ impl Client {
     }
 
     /// `session.create_child`: a child of `parent` (shared folder, or own worktrees of `repos`
-    /// branched from the parent's; empty = all of the parent's).
+    /// branched from the parent's; empty = all of the parent's). `agent`: `None` = the parent's.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_child_session(
         &self,
@@ -1118,6 +1150,7 @@ impl Client {
         shared: bool,
         repos: Vec<String>,
         title: &str,
+        agent: Option<ChildAgent>,
         start: bool,
         cols: u16,
         rows: u16,
@@ -1128,6 +1161,7 @@ impl Client {
                 shared,
                 repos,
                 title: title.into(),
+                agent,
                 start,
                 cols,
                 rows,

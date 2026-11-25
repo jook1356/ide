@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ide_core::widget::{self, Ask, Class, Manifest, Registry, WidgetError};
+use ide_core::widget::{self, Ask, Class, Manifest, Policy, Registry, WidgetError};
 use ide_core::{Session, SessionId};
 use ide_proto::{AgentToolResult, Notify, ProtoError, Response, WidgetDataOp, WidgetInfo};
 
@@ -15,6 +15,8 @@ use super::UserCtx;
 static DATA_LOCK: Mutex<()> = Mutex::new(());
 /// Serializes changes of the registry (read, change, save).
 static REG_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes changes of the block policy.
+static POLICY_LOCK: Mutex<()> = Mutex::new(());
 
 fn proto(e: WidgetError) -> ProtoError {
     ProtoError::new("widget").arg("detail", e.to_string())
@@ -41,9 +43,9 @@ fn detail(e: &ProtoError) -> String {
     e.get("detail").map_or_else(|| e.to_string(), str::to_owned)
 }
 
-/// The ide tools a widget may declare: the bridge's.
+/// What a widget may declare: the bridge's tools, the host features, `*` (everything).
 fn known_tool(t: &str) -> bool {
-    crate::bridge::tools().iter().any(|x| x.name == t)
+    t == widget::ALL || widget::FEATURES.contains(&t) || crate::bridge::tools().iter().any(|x| x.name == t)
 }
 
 /// A manifest's problem the core does not see: tools the bridge does not have.
@@ -95,6 +97,7 @@ impl UserCtx {
     /// `widget.list`.
     pub(crate) fn widget_list(&self) -> Vec<WidgetInfo> {
         let reg = Registry::load(&self.paths);
+        let policy = Policy::load(&self.paths);
         reg.classes
             .iter()
             .map(|(id, c)| WidgetInfo {
@@ -113,6 +116,7 @@ impl UserCtx {
                     .filter(|t| t.widget == *id)
                     .map(|t| t.session.clone())
                     .collect(),
+                blocked: policy.blocked(id),
             })
             .collect()
     }
@@ -169,6 +173,13 @@ impl UserCtx {
         if !gone {
             return Err(proto(WidgetError::NotFound(id.to_owned())));
         }
+        {
+            let _g = POLICY_LOCK.lock().unwrap();
+            let mut p = Policy::load(&self.paths);
+            if p.forget(id) {
+                let _ = p.save(&self.paths);
+            }
+        }
         self.audit("widget.delete", id);
         self.notify(Notify::WidgetsChanged);
         Ok(Response::Unit)
@@ -219,11 +230,71 @@ impl UserCtx {
             .await
             .map_err(ProtoError::internal)??
         };
-        if !c.tools.iter().any(|t| t == tool) {
-            return Err(ProtoError::new("widget-not-allowed").arg("tool", tool));
-        }
+        self.widget_may(&c, id, tool)?;
         self.audit("widget.call", &format!("{session} {id} {tool}"));
         Ok(self.agent_call(session, tool, args).await)
+    }
+
+    /// May widget `id` (registered as `c`) use `name` (a tool or a feature)? Declared, and not
+    /// blocked by the user.
+    fn widget_may(&self, c: &Class, id: &str, name: &str) -> Result<(), ProtoError> {
+        if !widget::grants(&c.tools, name) {
+            return Err(ProtoError::new("widget-not-allowed").arg("tool", name));
+        }
+        if Policy::load(&self.paths).blocks(id, name) {
+            return Err(ProtoError::new("widget-blocked").arg("tool", name));
+        }
+        Ok(())
+    }
+
+    /// `widget.host`: a widget uses an ide feature directly (`widget_host.rs`).
+    pub(crate) async fn widget_host(
+        self: &Arc<Self>,
+        session: &str,
+        id: &str,
+        method: &str,
+        args: &str,
+    ) -> Result<AgentToolResult, ProtoError> {
+        let Some(feature) = widget::feature_of(method) else {
+            return Ok(err(format!(
+                "unknown method `{method}` (exec, fs.read/write/list/stat/delete/mkdir,                  term.open/list/read/write/stop/rerun/remove, sessions.list/get)"
+            )));
+        };
+        let c = {
+            let (me, s, i) = (self.clone(), session.to_owned(), id.to_owned());
+            tokio::task::spawn_blocking(move || {
+                me.resolve_session(&s)?;
+                me.widget_class(&i)
+            })
+            .await
+            .map_err(ProtoError::internal)??
+        };
+        self.widget_may(&c, id, feature)?;
+        if method != "term.list" && method != "term.read" && method != "fs.read" && method != "fs.stat" && method != "fs.list" {
+            self.audit("widget.host", &format!("{session} {id} {method}"));
+        }
+        Ok(self.host_call(session, method, args).await)
+    }
+
+    /// `widget.set_blocked`.
+    pub(crate) fn widget_set_blocked(&self, id: &str, name: &str, blocked: bool) -> Result<Response, ProtoError> {
+        if !known_tool(name) {
+            return Err(proto(WidgetError::Data(format!("unknown tool or feature `{name}`"))));
+        }
+        let changed = {
+            let _g = POLICY_LOCK.lock().unwrap();
+            let mut p = Policy::load(&self.paths);
+            let changed = p.set(id, name, blocked);
+            if changed {
+                p.save(&self.paths).map_err(proto)?;
+            }
+            changed
+        };
+        if changed {
+            self.audit("widget.set_blocked", &format!("{id} {name} {blocked}"));
+            self.notify(Notify::WidgetsChanged);
+        }
+        Ok(Response::Unit)
     }
 
     /// `widget.data`: in the widget's scope, seen from `session`.
@@ -424,8 +495,9 @@ the navigation rail and in the 위젯 button of the status bar).
   }}
   ```
   - `name`: the tab title. `entry`: the page (default `index.html`), relative to the folder.
-  - `tools`: ide tools the page calls (`ide_*`, see your tool list); the user allows them when
-    the widget is registered. Leave it out if none.
+  - `tools`: what the page uses; the user allows them when the widget is registered. Leave it
+    out if none. Entries: ide tools (`ide_*`, see your tool list) for `ide.call`; the features
+    `exec`, `fs`, `terminal`, `sessions` of the host API (below); or `*` for everything.
   - `scope`: where `ide.data` lives, and so what a tab shows:
     - `session` (default): each session has its own data (sessions sharing a folder share it).
     - `family`: a parent session and all its children share the data.
@@ -446,6 +518,27 @@ the navigation rail and in the 위젯 button of the status bar).
     `ide.data.delete(key)`, `ide.data.keys()`: the widget's stored data in its scope (at most
     1 MiB).
   - `ide.widget` = `{{ id, session }}`: `session` is the session showing the tab.
+- Host API (the widget runs as the user, like a script of theirs; relative paths are under
+  the showing session's folder; results are JSON, errors reject):
+  - `exec`: `await ide.exec({{program, args, cwd, stdin, env, timeout_ms}})` or
+    `ide.exec({{command}})` (a command line for `cmd /c` / `sh -c`) -> `{{code, stdout, stderr,
+    timed_out, truncated, ms}}`. Default timeout 120 s, at most 3600 s. No console window.
+  - `fs`: `ide.fs.read(path, {{encoding:'base64'}}?)` -> `{{text | base64, size}}`,
+    `ide.fs.readText(path)`, `ide.fs.write(path, text, {{append, mkdirs}}?)` (whole files are
+    replaced atomically; `{{base64}}` in the options for bytes), `ide.fs.list(path)` ->
+    `{{entries:[{{name, dir, size, modified}}]}}`, `ide.fs.stat(path)` -> `{{exists, dir, size,
+    modified}}`, `ide.fs.delete(path, {{recursive}}?)`, `ide.fs.mkdir(path)`.
+  - `terminal` (user terminals of the terminal panel; output stays visible to the user):
+    `ide.term.open({{command, cwd, title, shell, session}})` -> `{{id, pid, ...}}`,
+    `ide.term.list({{session}})` (`"*"`: every session) -> `{{terminals:[{{id, session, title,
+    command, folder, state, running, pid, ports:[{{port, process}}]}}]}}`,
+    `ide.term.read(id, lines)` -> `{{text, state, running}}`, `ide.term.write(id, text, keys)`,
+    `ide.term.stop(id)`, `ide.term.rerun(id)`, `ide.term.remove(id)`.
+  - `sessions`: `ide.sessions.list()` -> `[{{id, title, folder, parent, shared, archived,
+    repositories:[{{name, repo, folder, branch, base}}]}}]`, `ide.sessions.get(id?)`.
+  - `ide.host(method, args)` is the generic form (`'fs.read'`, `'term.open'`, ...).
+  - The user can block any tool or feature per widget on the 위젯 page (calls then fail with
+    "blocked").
 - Keep it compact and readable on a dark background (ide's UI is dark: background #1e1f22,
   text #d4d6db); the tab may be narrow (from ~360px).
 
