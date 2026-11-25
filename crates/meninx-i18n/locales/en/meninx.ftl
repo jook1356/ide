@@ -29,7 +29,7 @@ conn-state-disconnected = disconnected
 ## Sidebar
 
 settings = Settings
-sessions-label = SESSIONS
+sessions-label = Sessions
 new-session = New session
 no-sessions = No sessions yet. Click + to start one.
 session-title-placeholder = Session title

@@ -544,7 +544,7 @@ impl App {
         ]
         .align_y(Alignment::Center);
         let sessions_header = row![
-            label(tr::sessions_label()),
+            text(tr::sessions_label()).size(13).font(style::bold()),
             space().width(Fill),
             self.sort_control(),
             self.edit_toggle(),
