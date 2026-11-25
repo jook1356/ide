@@ -113,7 +113,10 @@ pub enum WidgetMsg {
     Select(String),
     DeleteArm(bool),
     Delete(String),
-    Deleted(Result<(), ProtoError>),
+    /// The 위젯 page: block / unblock a tool or feature of a widget.
+    SetBlocked { widget: String, name: String, blocked: bool },
+    /// A delete or block change answered.
+    Changed(Result<(), ProtoError>),
 }
 
 /// Console lines of widget pages, kept for the app script (`script_widgets.rs`).
@@ -261,9 +264,34 @@ const IDE_JS: &str = r#"(() => {
     return j;
   }
   const parse = (t) => { try { return JSON.parse(t); } catch { return t; } };
+  const host = async (method, args) => parse((await post('host', { method, args: args ?? {} })).text);
   window.ide = Object.freeze({
     widget: Object.freeze({ id, session }),
     async call(tool, args) { return parse((await post('call', { tool, args: args ?? {} })).text); },
+    host,
+    exec: (opts) => host('exec', opts),
+    fs: Object.freeze({
+      read: (path, opts) => host('fs.read', { ...opts, path }),
+      readText: async (path) => (await host('fs.read', { path })).text,
+      write: (path, text, opts) => host('fs.write', { ...opts, path, text }),
+      list: (path) => host('fs.list', { path }),
+      stat: (path) => host('fs.stat', { path }),
+      delete: (path, opts) => host('fs.delete', { ...opts, path }),
+      mkdir: (path) => host('fs.mkdir', { path }),
+    }),
+    term: Object.freeze({
+      open: (opts) => host('term.open', opts),
+      list: (opts) => host('term.list', opts),
+      read: (id, lines) => host('term.read', { id, lines }),
+      write: (id, text, keys) => host('term.write', { id, text, keys }),
+      stop: (id) => host('term.stop', { id }),
+      rerun: (id) => host('term.rerun', { id }),
+      remove: (id) => host('term.remove', { id }),
+    }),
+    sessions: Object.freeze({
+      list: async () => (await host('sessions.list')).sessions,
+      get: (id) => host('sessions.get', { id }),
+    }),
     data: Object.freeze({
       async get(key) { const v = (await post('data', { op: 'get', key })).value; return v == null ? undefined : JSON.parse(v); },
       async set(key, value) { await post('data', { op: 'set', key, value: JSON.stringify(value === undefined ? null : value) }); },
@@ -664,10 +692,18 @@ impl App {
                 };
                 self.widgets.delete_armed = false;
                 Task::perform(async move { c.widget_delete(&id).await }, |r| {
-                    Message::Widget(WidgetMsg::Deleted(r))
+                    Message::Widget(WidgetMsg::Changed(r))
                 })
             }
-            WidgetMsg::Deleted(r) => {
+            WidgetMsg::SetBlocked { widget, name, blocked } => {
+                let Some(c) = self.online() else {
+                    return Task::none();
+                };
+                Task::perform(async move { c.widget_set_blocked(&widget, &name, blocked).await }, |r| {
+                    Message::Widget(WidgetMsg::Changed(r))
+                })
+            }
+            WidgetMsg::Changed(r) => {
                 if let Err(e) = r {
                     self.widgets.error = Some(crate::i18n::proto_error(&e));
                 }
@@ -711,6 +747,22 @@ impl App {
                     return Task::perform(
                         async move {
                             resp.respond(match c.widget_call(&session, &widget, &tool, &args).await {
+                                Ok(r) if !r.is_error => json(serde_json::json!({ "ok": true, "text": r.text })),
+                                Ok(r) => api_error(r.text),
+                                Err(e) => api_error(crate::i18n::proto_error(&e)),
+                            });
+                        },
+                        |_| (),
+                    )
+                    .discard();
+                }
+                "host" => {
+                    let method = text("method");
+                    let args = body.get("args").cloned().unwrap_or_else(|| serde_json::json!({})).to_string();
+                    crate::script::log(&format!("widget {widget}: host {method}"));
+                    return Task::perform(
+                        async move {
+                            resp.respond(match c.widget_host(&session, &widget, &method, &args).await {
                                 Ok(r) if !r.is_error => json(serde_json::json!({ "ok": true, "text": r.text })),
                                 Ok(r) => api_error(r.text),
                                 Err(e) => api_error(crate::i18n::proto_error(&e)),

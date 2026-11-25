@@ -243,18 +243,14 @@ impl App {
             None if !w.created_by_title.is_empty() => value(w.created_by_title.clone()),
             None => value(tr::widget_session_gone()),
         };
-        let tools = if w.tools.is_empty() {
-            tr::widget_tools_none()
-        } else {
-            w.tools.join(", ")
-        };
+        let tools = self.widget_tools(w, online);
         let mut info = column![
             line(
                 tr::widget_label_description(),
                 value(if w.description.is_empty() { "—".to_owned() } else { w.description.clone() })
             ),
             line(tr::widget_label_data(), value(scope_text(&w.scope))),
-            line(tr::widget_label_tools(), value(tools)),
+            line(tr::widget_label_tools(), tools),
             line(tr::widget_label_created_by(), creator),
             line(tr::widget_label_version(), value(tr::widget_version(&w.version.to_string()))),
             line(
@@ -266,6 +262,53 @@ impl App {
         info = info.push(line(tr::widget_label_open_in(), self.widget_open_in(w)));
         c = c.push(card(info.boxed()));
         self.page_frame(c)
+    }
+
+    /// The tools and features a widget declared, each with 차단 / 허용 (the user's block policy,
+    /// `widget.set_blocked`).
+    fn widget_tools(&self, w: &WidgetInfo, online: bool) -> El<'static> {
+        if w.tools.is_empty() {
+            return text(tr::widget_tools_none()).size(13).boxed();
+        }
+        let mut col: Column<El<'static>> = Column::new().spacing(4);
+        for t in &w.tools {
+            let blocked = w.blocked.iter().any(|b| b == t);
+            let what = match t.as_str() {
+                "*" => Some(tr::widget_feature_all()),
+                "exec" => Some(tr::widget_feature_exec()),
+                "fs" => Some(tr::widget_feature_fs()),
+                "terminal" => Some(tr::widget_feature_terminal()),
+                "sessions" => Some(tr::widget_feature_sessions()),
+                _ => None,
+            };
+            let mut r: iced::widget::Row<El<'static>> =
+                row![text(t.clone()).size(12).font(style::mono()).boxed()]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+            if let Some(what) = what {
+                r = r.push(text(what).size(12).color(style::DIM).boxed());
+            }
+            r = r.push(space().width(Fill).boxed());
+            if blocked {
+                r = r.push(text(tr::widget_feature_blocked()).size(11).color(style::RED).boxed());
+            }
+            r = r.push(
+                button(text(if blocked { tr::widget_unblock() } else { tr::widget_block() }).size(11))
+                    .padding([2, 8])
+                    .style(style::secondary)
+                    .on_press_maybe(online.then(|| {
+                        wm(WidgetMsg::SetBlocked {
+                            widget: w.id.clone(),
+                            name: t.clone(),
+                            blocked: !blocked,
+                        })
+                    }))
+                    .boxed(),
+            );
+            col = col.push(r.boxed());
+        }
+        col = col.push(text(tr::widget_block_note()).size(11).color(style::FAINT).boxed());
+        col.width(Fill).boxed()
     }
 
     /// The sessions showing a widget (a global one: 공용).
