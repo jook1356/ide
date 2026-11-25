@@ -2104,11 +2104,17 @@ impl App {
         };
         let uterms = Task::batch([uterms, self.load_uterms("")]);
         let attach = Task::batch([self.ensure_attached(), self.sync_detail(), uterms]);
-        if self.selected_live().is_some()
+        if let Some(live) = self.selected_live()
             && self.modal.is_none()
             && self.on_work_page()
         {
-            Task::batch([attach, operation::focus(TERM_ID)])
+            // The input box, when the session shows one, takes the keys; else the terminal.
+            let target = if self.composer_shown(live) && live.state.is_alive() {
+                crate::composer::COMPOSER_ID
+            } else {
+                TERM_ID
+            };
+            Task::batch([attach, operation::focus(target)])
         } else {
             attach
         }
