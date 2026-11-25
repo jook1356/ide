@@ -36,6 +36,7 @@ use ide_views::{ChangeGroup, ChangesMessage, CodeMessage, DiffMode, DiffViewMess
 
 use crate::app::{ALL_CONFIGURATIONS, App, Conn, McpField, Message, Modal, RunState, SortChange};
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
+use crate::list_edit::{ListEditMsg, ListKind};
 use crate::session_sort::SortKey;
 use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
 use ide_client::{AccountState, SessionKind};
@@ -840,8 +841,19 @@ fn steps(claude: bool) -> Vec<Step> {
         AcctDelete("fake", "script-login"),
         WaitAccount("fake", "script-login", false, 5000),
         GoPage(Page::Configurations),
-        CfgDelete("work"),
+        Log("--- profile list edit mode: check \"work\", delete it from the bar's dialog"),
+        App(Message::ListEdit(ListEditMsg::Toggle(ListKind::Profiles))),
+        App(Message::ListEdit(ListEditMsg::Row("work".into()))),
+        Wait(300),
+        Shot("09f_profile_list_edit"),
+        Pause("profile_list_edit"),
+        App(Message::ListEdit(ListEditMsg::AskDelete)),
+        Wait(300),
+        Shot("09g_profile_list_delete"),
+        Pause("profile_list_delete"),
+        App(Message::ListEdit(ListEditMsg::DeleteConfirm)),
         WaitConfig("work", false, 5000),
+        App(Message::ListEdit(ListEditMsg::Done)),
         GoPage(Page::Work),
         Select(0),
         Log("--- i18n: Korean UI, then back to English"),

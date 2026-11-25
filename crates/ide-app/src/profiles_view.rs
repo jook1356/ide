@@ -14,6 +14,7 @@ use ide_client::Support;
 
 use crate::app::{App, CONFIG_NAME_ID, ConfigEdit, McpField, Message};
 use crate::i18n::{self, tr};
+use crate::list_edit::ListKind;
 use crate::icons::{self, Icon};
 use crate::style;
 use crate::view::{card, error_box, icon_button, tip};
@@ -39,6 +40,7 @@ impl App {
         let head = row![
             text(tr::nav_configurations()).size(13).font(style::bold()),
             space().width(Fill),
+            self.list_edit_toggle(ListKind::Profiles),
             tip(
                 button(icons::icon(Icon::SidebarCollapse, 16.0, style::DIM))
                     .padding(4)
@@ -61,6 +63,7 @@ impl App {
         .padding([6, 10])
         .style(style::primary)
         .on_press_maybe(online.then_some(Message::ProfileAdding(true)));
+        let editing = self.list_editing(ListKind::Profiles);
         let mut list: Column<El<'_>> = Column::new().spacing(2);
         for c in &self.configs {
             let (total, _) = self.sessions_in_configuration(&c.slug);
@@ -68,6 +71,7 @@ impl App {
             list = list.push(
                 button(
                     row![
+                        editing.then(|| self.list_row_box(&c.slug)),
                         icons::icon(
                             Icon::Stack2,
                             16.0,
@@ -95,13 +99,18 @@ impl App {
                 )
                 .width(Fill)
                 .padding([6, 8])
-                .style(style::row(selected))
-                .on_press(Message::CfgEdit(c.slug.clone()))
+                .style(style::row(self.list_row_lit(ListKind::Profiles, &c.slug, selected)))
+                .on_press(self.list_row_press(
+                    ListKind::Profiles,
+                    &c.slug,
+                    Message::CfgEdit(c.slug.clone()),
+                ))
                 .boxed(),
             );
         }
+        let bar = editing.then(|| self.list_edit_bar(ListKind::Profiles));
         container(
-            column![head, add, scrollable(list).height(Fill)]
+            column![head, add, bar, scrollable(list).height(Fill)]
                 .spacing(10)
                 .padding(10),
         )

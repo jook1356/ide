@@ -559,6 +559,8 @@ pub enum Modal {
     NewChild(crate::family_ui::ChildForm),
     /// The session list's edit mode: delete the checked sessions (`session_edit.rs`).
     BulkDelete(crate::session_edit::BulkDeleteForm),
+    /// The profiles / repos / widgets list's edit mode: delete the checked items (`list_edit.rs`).
+    ListDelete(crate::list_edit::ListDeleteForm),
     /// ide 빌드 후 재시작: confirm (`self_update.rs`).
     SelfUpdate,
     /// An agent asks to register a widget (`widgets_ui.rs`).
@@ -959,6 +961,8 @@ pub enum Message {
     Family(crate::family_ui::FamilyMsg),
     /// The session list's edit mode (`session_edit.rs`).
     SessionEdit(crate::session_edit::EditMsg),
+    /// The profiles / repos / widgets list's edit mode (`list_edit.rs`).
+    ListEdit(crate::list_edit::ListEditMsg),
     /// An incompatible local server (`old_server.rs`).
     OldServer(crate::old_server::OldServerMsg),
     /// Self-update from the footer (`self_update.rs`).
@@ -1247,6 +1251,8 @@ pub struct App {
     pub sort_open: bool,
     /// The session list's edit mode (`session_edit.rs`).
     pub session_edit: crate::session_edit::SessionEdit,
+    /// The profiles / repos / widgets list's edit mode (`list_edit.rs`).
+    pub list_edit: crate::list_edit::ListEdit,
 }
 
 impl App {
@@ -1380,6 +1386,7 @@ impl App {
             explore_settings: false,
             sort_open: false,
             session_edit: Default::default(),
+            list_edit: Default::default(),
         }
     }
 
@@ -2650,6 +2657,7 @@ impl App {
                     Some(Modal::SessionRepos(f)) => f.busy,
                     Some(Modal::NewChild(f)) => f.busy,
                     Some(Modal::BulkDelete(f)) => f.busy,
+                    Some(Modal::ListDelete(f)) => f.busy,
                     Some(Modal::Changes(f)) => f.busy,
                     Some(Modal::Footer(f)) => f.busy(),
                     _ => false,
@@ -2706,6 +2714,7 @@ impl App {
                 }
                 crate::script::log(&format!("page {page:?}"));
                 self.ui.page = page;
+                self.list_edit = Default::default();
                 self.open_items = false;
                 self.rail_hover = None;
                 self.settings.error = None;
@@ -3828,6 +3837,11 @@ impl App {
                 Task::none()
             }
             Message::WindowFocus(id, on) => {
+                if Some(id) == self.detail_window && !on {
+                    // A moved / resized detail window is read here on Windows (it sends the
+                    // app no `Moved` messages).
+                    return crate::detail_window::save_placement(id);
+                }
                 if Some(id) == self.window {
                     self.focused = on;
                     // Looking at the selected session again: its notices are read.
@@ -3867,6 +3881,7 @@ impl App {
             Message::SessionAct(a) => self.on_session_act(a),
             Message::Family(m) => self.on_family(m),
             Message::SessionEdit(m) => self.on_session_edit(m),
+            Message::ListEdit(m) => self.on_list_edit(m),
             Message::Update(m) => self.on_update(m),
             Message::OldServer(m) => self.on_old_server(m),
             Message::Notice(m) => self.on_notice(m),
@@ -4129,7 +4144,7 @@ impl App {
         self.save_ui();
         crate::script::finish(self);
         self.link = None;
-        iced::exit()
+        self.exit_after_saving_detail()
     }
 
     /// List `dir` in the repos page's folder picker (`None` = the start list).
@@ -4462,7 +4477,9 @@ impl App {
             Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
             _ => None,
         }));
-        if self.detail_window.is_some() {
+        // Not on Windows: there the placement is read from the OS (`detail_window.rs`), and a
+        // message for each step of a drag rebuilt every window's view while it moved.
+        if self.detail_window.is_some() && !cfg!(windows) {
             subs.push(event::listen_with(|e, _, id| match e {
                 Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(id, p)),
                 _ => None,
@@ -4613,7 +4630,10 @@ impl App {
     pub fn close_for_reopen(&mut self) -> Task<Message> {
         self.save_ui();
         // The detail window closes with the app (it stays detached in `ui.json`).
-        let detail_window = self.detail_window.take().map(window::close);
+        let detail_window = self
+            .detail_window
+            .take()
+            .map(|id| crate::detail_window::save_placement(id).chain(window::close(id)));
         self.link = None;
         for live in &self.sessions {
             if let Some(w) = &live.web {
