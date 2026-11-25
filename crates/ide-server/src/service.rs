@@ -37,6 +37,7 @@ mod branch_badges;
 mod auto_answers;
 pub(crate) mod browser;
 mod terminals;
+mod widget_host;
 mod widgets;
 mod write_guard;
 mod previews;
@@ -2457,6 +2458,7 @@ impl UserCtx {
             Request::WidgetDelete { widget } => self.widget_delete(&widget),
             Request::WidgetSetOpen { session, widget, open } => self.widget_set_open(&session, &widget, open),
             Request::WidgetData { session, widget, op } => self.widget_data(&session, &widget, op),
+            Request::WidgetSetBlocked { widget, name, blocked } => self.widget_set_blocked(&widget, &name, blocked),
             Request::ProviderSetAutoAnswer { provider, answer, enabled } => self.set_auto_answer(&provider, &answer, enabled),
             Request::PreviewFile { session, preview, path } => self.preview_file(&session, &preview, &path),
             Request::ApprovalList => Ok(self.approval_list()),
@@ -3705,6 +3707,8 @@ struct OpenArgs {
     shell: Option<String>,
     /// 공용: the folder to start in.
     start: Option<String>,
+    /// Any folder to start in, ahead of the above (a widget's `term.open`, `docs/widgets.md`).
+    dir: Option<PathBuf>,
 }
 
 /// A shell user terminals can run.
@@ -3896,6 +3900,7 @@ impl UserCtx {
             title,
             shell,
             start,
+            dir,
         } = a;
         let session = session.as_str();
         // An empty session: a 공용 terminal (no session; starts in the home folder).
@@ -3904,15 +3909,21 @@ impl UserCtx {
         } else {
             Some(self.resolve_session(session)?)
         };
-        let cwd = match &repo {
-            Some(r) => {
+        let cwd = match (&dir, &repo) {
+            (Some(d), _) => {
+                if !d.is_dir() {
+                    return Err(ProtoError::new("fs-not-found").arg("path", d.display().to_string()));
+                }
+                d.clone()
+            }
+            (None, Some(r)) => {
                 let j = self.worktree_root(session, r)?.2;
                 match folder.as_deref().filter(|f| !f.is_empty()) {
                     Some(f) => j.resolve(f)?,
                     None => j.root().to_path_buf(),
                 }
             }
-            None => match &s {
+            (None, None) => match &s {
                 Some(s) => s.root.clone(),
                 // 공용: the folder picked for it, else the home folder.
                 None => match start.as_deref().filter(|p| !p.trim().is_empty()) {
@@ -4087,6 +4098,7 @@ impl UserCtx {
                     title,
                     shell,
                     start: cwd,
+                    dir: None,
                 })
                 .map(Response::UTerm),
             Request::UTermShells => Ok(Response::Shells(

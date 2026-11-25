@@ -326,6 +326,14 @@ where
                     conn.reply(id, r.map(Response::AgentResult));
                 });
             }
+            Request::WidgetHost { session, widget, method, args } => {
+                // Async: `exec` may run for minutes.
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    let r = conn.ctx.widget_host(&session, &widget, &method, &args).await;
+                    conn.reply(id, r.map(Response::AgentResult));
+                });
+            }
             Request::TermDetach { session } => {
                 if let Some(h) = conn.attachments.lock().unwrap().remove(&session) {
                     h.abort();

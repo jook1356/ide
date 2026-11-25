@@ -1017,6 +1017,38 @@ impl Client {
         )
     }
 
+    /// `widget.host`: a widget uses an ide feature directly (JSON `args`; JSON text back).
+    pub async fn widget_host(
+        &self,
+        session: &str,
+        widget: &str,
+        method: &str,
+        args: &str,
+    ) -> Result<ide_proto::AgentToolResult, ProtoError> {
+        let req = Request::WidgetHost {
+            session: session.into(),
+            widget: widget.into(),
+            method: method.into(),
+            args: args.into(),
+        };
+        match self.call(req).await? {
+            Response::AgentResult(r) => Ok(r),
+            _ => Err(ProtoError::new("bad-message").arg("detail", "expected a widget host result")),
+        }
+    }
+
+    /// `widget.set_blocked`: block / unblock a tool or feature for a widget.
+    pub async fn widget_set_blocked(&self, widget: &str, name: &str, blocked: bool) -> Result<(), ProtoError> {
+        expect_unit(
+            self.call(Request::WidgetSetBlocked {
+                widget: widget.into(),
+                name: name.into(),
+                blocked,
+            })
+            .await,
+        )
+    }
+
     /// `widget.call`: a widget calls an ide tool (JSON `args`).
     pub async fn widget_call(
         &self,
