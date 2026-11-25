@@ -68,6 +68,7 @@ composer-show = Show the input box under the terminal
 composer-hide = Hide the input box (type in the terminal)
 composer-placeholder = Message (Enter to send, Shift+Enter for a new line, ↑ for earlier ones)
 composer-send-tip = Send (Enter): paste into the terminal and press Enter
+attach-to-input = Attach to input
 attach-no-folder-remote = A folder cannot be sent to a remote server; drop its files instead.
 tab-web = Web
 web-back = Back

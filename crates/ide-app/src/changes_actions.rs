@@ -211,6 +211,16 @@ pub fn stash_paths(files: &[GitChange]) -> Vec<String> {
         .collect()
 }
 
+/// What an attached commit is sent as: its full id and subject (and the worktree it is in, when
+/// the session has several).
+pub fn commit_ref(c: &CommitInfo, worktree: Option<&str>) -> String {
+    let mut s = format!("commit {} \"{}\"", c.sha, c.subject.trim());
+    if let Some(w) = worktree {
+        s.push_str(&format!(" in {w}"));
+    }
+    s
+}
+
 /// The commit context menu actions that need a confirmation (`CommitContextMenu` labels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitKind {
@@ -341,6 +351,8 @@ pub enum ActMsg {
     /// Copy a commit's sha (`false`) or subject (`true`).
     Copy(String, bool),
     Copied(bool, bool),
+    /// Put a commit into the session's input box (입력창에 첨부).
+    Attach(String),
     /// A commit action picked in the menu: asks for confirmation.
     CommitPick(String, CommitKind),
     CommitDone(Result<(), ProtoError>),
@@ -721,6 +733,22 @@ impl App {
                 let sid = sid.to_owned();
                 iced::clipboard::write(text)
                     .map(move |r| dm(&sid, ActMsg::Copied(subject, r.is_ok())))
+            }
+            ActMsg::Attach(sha) => {
+                a.commit_menu = None;
+                let Some(c) = d.history.commit(&sha).cloned() else {
+                    return Task::none();
+                };
+                let repo = d.repo.clone();
+                // Several worktrees: say which one the commit is in.
+                let path = self
+                    .live(sid)
+                    .filter(|l| l.info.repos.len() > 1)
+                    .and_then(|l| l.info.repos.iter().find(|r| r.repo == repo))
+                    .map(|r| r.path.clone());
+                let label = crate::composer::ref_label(&format!("{} {}", c.short, c.subject));
+                let text = commit_ref(&c, path.as_deref());
+                self.deliver_ref(sid, &label, &text)
             }
             ActMsg::Copied(subject, ok) => {
                 let (tone, msg): (Tone, fn() -> String) = match (ok, subject) {

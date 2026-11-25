@@ -1,8 +1,9 @@
 //! Right-click menu of a session row (Hermes Desk's `SessionSidebar` `rowMenu`), drawn at the
 //! pointer at the root of the app window.
 //!
-//! Desk's items this app has no counterpart for are left out: 채팅에 첨부 / 마스터 세션에 첨부 (no
-//! session attachments, no master session).
+//! 입력창에 첨부 (Desk's 채팅에 첨부) puts the session into the input box of the selected session as a
+//! chip sent as its title, id and folder (an agent reads it with `ide_read_session`). Desk's 마스터
+//! 세션에 첨부 is left out (no master session).
 
 use iced::widget::{Column, button, container, mouse_area, pin, space, stack, text};
 use iced::{Element, Fill, Point, Task, Widget as _};
@@ -25,6 +26,8 @@ pub struct SessionMenu {
 
 #[derive(Debug, Clone)]
 pub enum SessionAct {
+    /// Into the input box of the selected session.
+    Attach,
     OpenFolder,
     CopyFolder,
     CopyId,
@@ -61,6 +64,16 @@ impl App {
             }
         };
         match act {
+            SessionAct::Attach => {
+                let Some(target) = self.selected.clone().filter(|t| *t != m.session) else {
+                    return Task::none();
+                };
+                let title = live.info.title.trim();
+                let label = if title.is_empty() { m.session.as_str() } else { title };
+                let label = crate::composer::ref_label(label);
+                let text = session_ref(&live.info.title, &m.session, &root);
+                self.deliver_ref(&target, &label, &text)
+            }
             SessionAct::CopyFolder => {
                 toast(self, crate::notices::Tone::Success, crate::notices::Text::tr(tr::session_copied_folder));
                 iced::clipboard::write(root).discard()
@@ -124,6 +137,13 @@ impl App {
             })
         };
         let mut items: Vec<El<'_>> = Vec::new();
+        // Into the selected session's input box (another session than this one, running).
+        let attach = self
+            .selected
+            .as_deref()
+            .is_some_and(|t| t != sid && self.can_attach(t));
+        items.push(entry(tr::attach_to_input(), attach.then(|| act(SessionAct::Attach)).flatten(), false));
+        items.push(rule());
         // An archived session cannot be pinned (Desk's `canPin`).
         if !s.archived {
             items.push(entry(
@@ -208,6 +228,22 @@ impl App {
     }
 }
 
+/// What an attached session is sent as: enough for an agent to find it (`ide_read_session`
+/// takes the id) or read its folder.
+fn session_ref(title: &str, id: &str, root: &str) -> String {
+    let title = title.trim();
+    let mut s = String::from("ide session");
+    if !title.is_empty() {
+        s.push_str(&format!(" \"{title}\""));
+    }
+    s.push_str(&format!(" (id {id}"));
+    if !root.is_empty() {
+        s.push_str(&format!(", folder {root}"));
+    }
+    s.push(')');
+    s
+}
+
 /// Open `path` (a folder) in the OS file manager.
 fn open_folder(path: &str) -> Result<(), String> {
     #[cfg(windows)]
@@ -217,4 +253,18 @@ fn open_folder(path: &str) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(path).spawn();
     r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_ref;
+
+    #[test]
+    fn session_reference_text() {
+        assert_eq!(
+            session_ref("Fix login", "abc", "C:/w/abc"),
+            "ide session \"Fix login\" (id abc, folder C:/w/abc)"
+        );
+        assert_eq!(session_ref(" ", "abc", ""), "ide session (id abc)");
+    }
 }
