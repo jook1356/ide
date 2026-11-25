@@ -228,7 +228,7 @@ Known gaps (phase 1):
   by dragging its left edge, `ui.json` `side_width`, min 220 px; outside the split; the divider
   shares the rest; hidden or detached, the detail pane takes no room and the session header's
   "상세 영역" toggle shows it). The detail pane has one header row: the shown item's
-  identity (file-type icon, name, dirty dot, "kind · folder") or, for the web page, its
+  identity (file-type icon, name, dirty dot, "kind · folder") or, for a browser tab, its
   navigation (back / forward / reload / URL); then an "Open items" switcher (popover grouped
   Browser / Changes / History / Explore with close buttons) and the collapse button. No tab
   strip. The side panel has the tabs Changes (count badge) / History (unpushed badge) / Explore

@@ -191,7 +191,7 @@ pub enum JobAction {
     CreateNow,
     /// 확인: open the recheck dialog.
     Recheck,
-    /// Open this page in the session's web tab.
+    /// Open this page in a browser tab of the session.
     Open(String),
 }
 
@@ -920,18 +920,10 @@ impl App {
         }
     }
 
-    /// Open `url` in the session's web tab (Desk opens PR pages in the OS browser).
+    /// Open `url` in a browser tab of the session (Desk opens PR pages in the OS browser).
     pub fn footer_open_url(&mut self, sid: &str, url: &str) -> Task<Message> {
         crate::script::log(&format!("footer: open {url}"));
-        // The page belongs to the folder's detail area.
-        let owner = self.workspace_owner(sid);
-        if let Some(l) = self.live_mut(&owner) {
-            l.url_input = url.to_owned();
-            if let Some(w) = &l.web {
-                w.navigate(url);
-            }
-        }
-        self.activate(sid, crate::detail::ItemKey::Web)
+        self.show_url(sid, url)
     }
 
     /// The footer timer: periodic fetch of the shown repo, PR job polling.

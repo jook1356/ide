@@ -113,7 +113,7 @@ async fn browser_tools_ask_per_site() {
 
     // The fake app: tabs and their sites, scripted approval answers.
     let sites: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(vec![
-        ("page".into(), "about:blank".into()),
+        ("tab-1".into(), "about:blank".into()),
         ("tab-2".into(), "https://other.dev/x".into()),
     ]));
     let answers = Arc::new(Mutex::new(VecDeque::<Result<String, String>>::new()));
@@ -135,7 +135,7 @@ async fn browser_tools_ask_per_site() {
                     Some(u) => Ok(json!({"origin": meninx_proto::browser::origin(&u), "url": u, "title": "T"}).to_string()),
                     None => Err(format!("no tab `{tab}`")),
                 },
-                TOOL_LIST => Ok(json!({"tabs": [{"tab": "page"}]}).to_string()),
+                TOOL_LIST => Ok(json!({"tabs": [{"tab": "tab-1"}]}).to_string()),
                 TOOL_OPEN => {
                     sites2.lock().unwrap().push(("tab-3".into(), args["url"].as_str().unwrap().into()));
                     Ok(json!({"tab": "tab-3"}).to_string())
@@ -152,12 +152,12 @@ async fn browser_tools_ask_per_site() {
 
     // List: nothing to approve.
     let r = call(&mux, &mut rx, 3, TOOL_LIST, json!({})).await;
-    assert!(!r.is_error && r.text.contains("page"), "{r:?}");
+    assert!(!r.is_error && r.text.contains("tab-1"), "{r:?}");
     assert_eq!(asked(&seen), 0);
 
     // Bad arguments never reach the app.
     let n = seen.lock().unwrap().len();
-    let r = call(&mux, &mut rx, 4, TOOL_ACT, json!({"tab": "page", "action": "hover"})).await;
+    let r = call(&mux, &mut rx, 4, TOOL_ACT, json!({"tab": "tab-1", "action": "hover"})).await;
     assert!(r.is_error && r.text.contains("unknown action"), "{r:?}");
     let r = call(&mux, &mut rx, 5, TOOL_OPEN, json!({"url": "javascript:alert(1)"})).await;
     assert!(r.is_error, "{r:?}");

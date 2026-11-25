@@ -1,5 +1,5 @@
 //! The per-session detail area (Hermes Desk `DetailTabs` + `ChangesPanel`): open items (the
-//! session's web page, files, diffs) shown one at a time under a header with an "open items"
+//! browser tabs, files, diffs) shown one at a time under a header with an "open items"
 //! switcher, and a side panel with Changes / History / Explore (Explore has the file-name and
 //! text search on top of its tree; History is in [`crate::history`]).
 //!
@@ -78,9 +78,8 @@ impl SideTab {
 /// Identity of an open item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemKey {
-    /// The session's web page (opened on demand, e.g. a PR link; closable, not remembered).
-    /// Also the "nothing" value of `Detail::active` while it is not open.
-    Web,
+    /// No item: the value of `Detail::active` while nothing is shown.
+    Nothing,
     /// A file in the editor ([`qualify`]d path).
     File(String),
     /// A changed file's diff (`staged` = index vs HEAD, else working tree vs index;
@@ -88,7 +87,7 @@ pub enum ItemKey {
     Diff { staged: bool, path: String },
     /// A file on disk compared with the unsaved buffer (save conflict; [`qualify`]d path).
     Compare(String),
-    /// A browser tab beyond the session's web page (`browser.rs`; not in `items`).
+    /// A browser tab (`browser.rs`; not in `items`).
     Browser(u32),
     /// A user terminal of the session (`uterm.rs`; kept by the server, not in `items`).
     Terminal(String),
@@ -102,11 +101,11 @@ pub enum ItemKey {
 }
 
 impl ItemKey {
-    /// Stable string for `ui.json` (`Web`, `Compare`, terminals and browser tabs are not
+    /// Stable string for `ui.json` (`Nothing`, `Compare`, terminals and browser tabs are not
     /// remembered).
     pub fn encode(&self) -> Option<String> {
         Some(match self {
-            ItemKey::Web => return None,
+            ItemKey::Nothing => return None,
             ItemKey::File(p) => format!("file:{p}"),
             ItemKey::Diff { staged: true, path } => format!("diff:s:{path}"),
             ItemKey::Diff {
@@ -121,9 +120,6 @@ impl ItemKey {
     }
 
     pub fn decode(s: &str) -> Option<Self> {
-        if s == "web" {
-            return Some(ItemKey::Web);
-        }
         if let Some(rest) = s.strip_prefix("commit:") {
             // `commit:<repo>:<sha>:<path>` (empty path = the whole commit).
             let (repo, rest) = rest.split_once(':')?;
@@ -160,7 +156,7 @@ impl ItemKey {
             }
         };
         Some(match self {
-            ItemKey::Web => ItemKey::Web,
+            ItemKey::Nothing => ItemKey::Nothing,
             k @ (ItemKey::Terminal(_) | ItemKey::Browser(_)) => k,
             ItemKey::File(p) => ItemKey::File(q(p)?),
             ItemKey::Diff { staged, path } => ItemKey::Diff {
@@ -175,7 +171,7 @@ impl ItemKey {
     /// The repo of a file / diff key.
     pub fn repo(&self) -> Option<&str> {
         match self {
-            ItemKey::Web | ItemKey::Terminal(_) | ItemKey::Browser(_) => None,
+            ItemKey::Nothing | ItemKey::Terminal(_) | ItemKey::Browser(_) => None,
             ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
                 Some(split_q(p).0)
             }
@@ -265,7 +261,6 @@ impl DiffItem {
 // A handful of items per session: boxing the file variant would only add indirection.
 #[allow(clippy::large_enum_variant)]
 pub enum Item {
-    Web,
     File(FileItem),
     Diff(DiffItem),
 }
@@ -393,9 +388,8 @@ impl Detail {
     /// `first_repo`: the session's first repo; files saved before multi-repo sessions (plain
     /// paths) belong to it.
     pub fn new(saved: Option<&DetailUi>, first_repo: Option<&str>) -> Self {
-        // Nothing is open by default (the web page opens on demand).
         let mut items: Vec<(ItemKey, Item)> = Vec::new();
-        let mut active = ItemKey::Web;
+        let mut active = ItemKey::Nothing;
         let mut side = SideTab::Explore;
         if let Some(ui) = saved {
             let fix = |k: ItemKey| k.qualified(first_repo);
@@ -404,7 +398,7 @@ impl Detail {
                     continue;
                 }
                 let item = match &k {
-                    ItemKey::Web | ItemKey::Compare(_) | ItemKey::Terminal(_) | ItemKey::Browser(_) => {
+                    ItemKey::Nothing | ItemKey::Compare(_) | ItemKey::Terminal(_) | ItemKey::Browser(_) => {
                         continue;
                     }
                     ItemKey::File(p) => Item::File(FileItem::new(p)),
@@ -635,7 +629,7 @@ pub enum SearchItem {
 }
 
 /// Which items "close several" closes (Desk's 탭 모두 닫기, 작업 중 아닌 항목 닫기, 다른 항목
-/// 닫기). The web page always stays.
+/// 닫기).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloseSet {
     All,
@@ -1262,16 +1256,16 @@ impl App {
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
-        // A terminal is shown from the session's terminal list (not an item).
-        if let ItemKey::Terminal(_) | ItemKey::Browser(_) = &key {
+        // A terminal or browser tab is shown from its own list (not an item); `Nothing` shows
+        // the empty pane.
+        if let ItemKey::Nothing | ItemKey::Terminal(_) | ItemKey::Browser(_) = &key {
             d.active = key;
             self.sync_web();
             return Task::none();
         }
         if d.item(&key).is_none() {
             let item = match &key {
-                ItemKey::Web => Item::Web,
-                ItemKey::Terminal(_) | ItemKey::Browser(_) => return Task::none(),
+                ItemKey::Nothing | ItemKey::Terminal(_) | ItemKey::Browser(_) => return Task::none(),
                 ItemKey::File(p) => Item::File(FileItem::new(p)),
                 ItemKey::Diff { .. } | ItemKey::Compare(_) | ItemKey::Commit { .. } => {
                     Item::Diff(DiffItem::empty())
@@ -1392,9 +1386,6 @@ impl App {
 
     /// Remove `keys` and show the item that took the shown one's place.
     pub(crate) fn close_items(&mut self, sid: &str, keys: &[ItemKey]) -> Task<Message> {
-        if keys.contains(&ItemKey::Web) {
-            self.close_page(sid);
-        }
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
         };
@@ -1405,7 +1396,7 @@ impl App {
                 .items
                 .get(i.min(d.items.len().saturating_sub(1)))
                 .map(|(k, _)| k.clone())
-                .unwrap_or(ItemKey::Web);
+                .unwrap_or(ItemKey::Nothing);
         }
         let next = d.active.clone();
         self.activate(sid, next)
@@ -1414,9 +1405,6 @@ impl App {
     fn close_item(&mut self, sid: &str, key: &ItemKey) -> Task<Message> {
         if self.detail(sid).is_none_or(|d| d.item(key).is_none()) {
             return Task::none();
-        }
-        if *key == ItemKey::Web {
-            self.close_page(sid);
         }
         let Some(d) = self.detail_mut(sid) else {
             return Task::none();
@@ -1430,7 +1418,7 @@ impl App {
                 .items
                 .get(i.min(d.items.len().saturating_sub(1)))
                 .map(|(k, _)| k.clone())
-                .unwrap_or(ItemKey::Web);
+                .unwrap_or(ItemKey::Nothing);
         }
         let next = d.active.clone();
         self.activate(sid, next)
@@ -2708,8 +2696,8 @@ mod tests {
 
     #[test]
     fn keys_round_trip() {
-        // The web page is not remembered (it is not open by default).
-        assert_eq!(ItemKey::Web.encode(), None);
+        // Nothing is not remembered.
+        assert_eq!(ItemKey::Nothing.encode(), None);
         for k in [
             ItemKey::File("src/한글.ts".into()),
             ItemKey::Diff {

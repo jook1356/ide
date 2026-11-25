@@ -1,6 +1,6 @@
-//! Browser tabs of the detail area beyond the session's own web page (Hermes Desk's
-//! `BrowserPane`, `main/browsers.ts`), opened from "+ 새로 열기" (address or 즐겨찾기) or by a
-//! page's "open in a new window"; 공용 ones belong to no session. And the 즐겨찾기 (bookmarks,
+//! Browser tabs of the detail area (Hermes Desk's `BrowserPane`, `main/browsers.ts`), opened
+//! from "+ 새로 열기" (address or 즐겨찾기), by a page's "open in a new window", by the footer's
+//! PR links and by agents; 공용 ones belong to no session. And the 즐겨찾기 (bookmarks,
 //! `ui.json`, shared by every session), toggled with ☆ in a page's header.
 
 use iced::widget::{button, container, row, text, text_input};
@@ -239,6 +239,29 @@ impl App {
         Task::batch([show, self.sync_detail()])
     }
 
+    /// Show `url` in a browser tab of `sid`'s folder: the tab that already shows it, else a new
+    /// one (PR pages opened from the footer).
+    pub(crate) fn show_url(&mut self, sid: &str, url: &str) -> Task<Message> {
+        let owner = self.workspace_owner(sid);
+        let same = |b: &Browser| {
+            b.widget.is_none()
+                && b.preview.is_none()
+                && b.view.as_ref().map(WebView::url).unwrap_or_else(|| b.url_input.clone()) == url
+        };
+        let found = self
+            .live(&owner)
+            .and_then(|l| l.browsers.iter().find(|b| same(b)))
+            .map(|b| b.id);
+        match found {
+            Some(id) => {
+                self.ui.detail_collapsed = false;
+                let show = self.activate(&owner, ItemKey::Browser(id));
+                Task::batch([show, self.sync_detail()])
+            }
+            None => self.open_browser(Some(owner), false, url.to_owned()),
+        }
+    }
+
     /// Close a browser tab (its page goes); the widget it showed, if any.
     pub(crate) fn close_browser(&mut self, id: u32) -> Option<crate::widgets_ui::WidgetTab> {
         let take = |v: &mut Vec<Browser>| v.iter().position(|b| b.id == id).map(|i| v.remove(i));
@@ -255,7 +278,7 @@ impl App {
         }
         for l in &mut self.sessions {
             if l.detail.active == ItemKey::Browser(id) {
-                l.detail.active = ItemKey::Web;
+                l.detail.active = ItemKey::Nothing;
             }
         }
         self.sync_web();
@@ -282,7 +305,7 @@ impl App {
     }
 
     /// A page event of a browser tab (`false`: not one of them).
-    pub(crate) fn browser_web_event(&mut self, ev: &meninx_web::WebViewEvent) -> bool {
+    pub(crate) fn browser_web_event(&mut self, ev: &meninx_web::WebViewEvent) {
         use meninx_web::WebEvent;
         let shown = self.shown_browser();
         let mut new_tab = None;
@@ -293,7 +316,7 @@ impl App {
             .chain(self.global_browsers.iter_mut())
             .find(|b| b.view.as_ref().is_some_and(|v| v.id() == ev.view))
         else {
-            return false;
+            return;
         };
         match &ev.event {
             WebEvent::Created => {
@@ -338,7 +361,6 @@ impl App {
                 .map(|l| l.info.id.clone());
             let _ = self.open_browser(sid, global, url);
         }
-        true
     }
 
     pub(crate) fn on_browser(&mut self, m: BrowserMsg) -> Task<Message> {

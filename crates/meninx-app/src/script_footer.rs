@@ -52,7 +52,7 @@ pub(super) enum FStep {
     WaitJobFile(u64),
     /// Write the PR file like the agent would.
     WritePrFile,
-    /// The web tab shows the fake PR page.
+    /// A browser tab shows the fake PR page.
     ExpectPrPage,
     MarkBranch,
     /// The worktree is on another branch than at [`FStep::MarkBranch`].
@@ -622,13 +622,18 @@ pub(super) fn run(
             true
         }
         FStep::ExpectPrPage => {
-            let l = app.live(&sid);
-            let url = l.map(|l| l.url_input.clone()).unwrap_or_default();
-            let active = l.is_some_and(|l| l.detail.active == ItemKey::Web);
+            // The PR page opens in a browser tab of the folder's detail area.
+            let l = app.live(&app.workspace_owner(&sid));
+            let tab = l.and_then(|l| match l.detail.active {
+                ItemKey::Browser(id) => app.browser(l, id),
+                _ => None,
+            });
+            let active = tab.is_some();
+            let url = tab.map(|b| b.url_input.clone()).unwrap_or_default();
             sc.check(
                 active && url.contains("Fake%20PR"),
                 &format!(
-                    "PR page in the web tab (active {active}): {}",
+                    "PR page in a browser tab (active {active}): {}",
                     url.chars().take(60).collect::<String>()
                 ),
             );

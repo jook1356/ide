@@ -1,5 +1,5 @@
 //! The app's part of browser control by agents (`docs/browser-control.md`): the
-//! `meninx_browser_*` tools on the session's web page and browser tabs, through the DevTools
+//! `meninx_browser_*` tools on the session's browser tabs, through the DevTools
 //! protocol of their CEF views (`meninx_web::DevTools`); input is dispatched inside the browser,
 //! never as OS input. The daemon has checked the arguments and the user's approval of the site
 //! before a call gets here; the app refuses when the tab shows another site by now.
@@ -13,8 +13,6 @@ use serde_json::{Value, json};
 
 use crate::app::{App, Message};
 
-/// The session's own web page.
-const PAGE: &str = "page";
 /// Browser tabs: `tab-<id>`.
 const TAB_PREFIX: &str = "tab-";
 /// Longest run of one call (the daemon waits 60 s).
@@ -84,22 +82,11 @@ impl App {
         Task::batch([show, reply])
     }
 
-    /// The tabs `session` can use: its folder's web page and browser tabs, and the 공용 ones.
+    /// The tabs `session` can use: its folder's browser tabs and the 공용 ones.
     fn browser_list(&self, session: &str) -> String {
         let owner = self.workspace_owner(session);
         let mut rows = Vec::new();
-        let shown = self.shown_live().map(|l| l.info.id.clone());
         if let Some(live) = self.live(&owner) {
-            let page_shown = shown.as_deref() == Some(owner.as_str()) && self.page_shown(live);
-            let url = live.web.as_ref().map(WebView::url).unwrap_or_else(|| live.url_input.clone());
-            rows.push(json!({
-                "tab": PAGE,
-                "kind": "session page",
-                "url": url,
-                "title": live.web_title,
-                "shown": page_shown,
-                "loading": live.web.as_ref().is_some_and(WebView::is_loading),
-            }));
             let shown_tab = self.shown_browser();
             let tabs = live
                 .browsers
@@ -132,22 +119,7 @@ impl App {
         let make = |url: &str| {
             WebView::new(&runtime, url, Size::new(800.0, 600.0), 1.0).map_err(|e| format!("could not open the page: {e:#}"))
         };
-        let view = if tab == PAGE {
-            let live = self.live_mut(&owner).ok_or("this session is not open in the Meninx window")?;
-            match &live.web {
-                Some(v) => v.clone(),
-                None => {
-                    let url = if live.url_input.trim().is_empty() {
-                        crate::app::DEFAULT_URL.to_owned()
-                    } else {
-                        live.url_input.clone()
-                    };
-                    let v = make(&url)?;
-                    live.web = Some(v.clone());
-                    v
-                }
-            }
-        } else {
+        let view = {
             let id: u32 = tab
                 .strip_prefix(TAB_PREFIX)
                 .and_then(|n| n.parse().ok())

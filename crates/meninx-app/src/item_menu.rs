@@ -61,7 +61,7 @@ pub struct ItemDrag {
 /// The 열린 항목 group of an item (rows move only within their group).
 fn group(k: &ItemKey) -> u8 {
     match k {
-        ItemKey::Web | ItemKey::Browser(_) => 0,
+        ItemKey::Nothing | ItemKey::Browser(_) => 0,
         ItemKey::Diff { .. } | ItemKey::Compare(_) => 1,
         ItemKey::Commit { .. } => 2,
         ItemKey::File(_) => 3,
@@ -216,7 +216,7 @@ impl App {
                 .browser(live, *id)
                 .map(|b| b.url_input.clone())
                 .unwrap_or_default(),
-            _ => live.url_input.clone(),
+            _ => String::new(),
         };
         let copy = |this: &mut Self, s: Option<String>, done: String| -> Task<Message> {
             let Some(s) = s else {
@@ -246,7 +246,7 @@ impl App {
                         let text = crate::changes_actions::commit_ref(&c, worktree.as_deref());
                         self.deliver_ref(sid, &label, &text)
                     }
-                    ItemKey::Web | ItemKey::Browser(_) => {
+                    ItemKey::Browser(_) => {
                         let url = url.trim().to_owned();
                         if url.is_empty() {
                             return Task::none();
@@ -377,11 +377,6 @@ impl App {
                 }
             }
             ItemKey::Browser(_) => {
-                items.push(entry(tr::item_copy_url(), act(ItemAct::CopyUrl)));
-                items.push(entry(tr::item_open_external(), act(ItemAct::OpenExternal)));
-            }
-            ItemKey::Web => {
-                items.push(entry(tr::web_reload(), Some(Message::WebReload)));
                 items.push(entry(tr::item_copy_url(), act(ItemAct::CopyUrl)));
                 items.push(entry(tr::item_open_external(), act(ItemAct::OpenExternal)));
             }

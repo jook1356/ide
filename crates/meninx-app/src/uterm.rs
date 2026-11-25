@@ -164,7 +164,7 @@ impl App {
     }
 
     /// The server's list replaces the one of `sid` (output kept per id); a pane showing a
-    /// terminal that is gone shows the web page.
+    /// terminal that is gone shows nothing.
     fn set_uterms(&mut self, sid: &str, list: Vec<UserTerm>) {
         let config = self.term_config.clone();
         let Some(cur) = self.uterm_list_mut(sid) else {
@@ -191,7 +191,7 @@ impl App {
                 && l.uterm(id).is_none()
                 && !global.contains(id)
             {
-                l.detail.active = ItemKey::Web;
+                l.detail.active = ItemKey::Nothing;
             }
         }
     }

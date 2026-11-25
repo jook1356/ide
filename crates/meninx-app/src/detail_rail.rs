@@ -65,7 +65,7 @@ fn groups() -> [Group; 4] {
         Group {
             label: tr::group_browser(),
             color: style::ORANGE,
-            is: |k| matches!(k, ItemKey::Web),
+            is: |k| matches!(k, ItemKey::Browser(_)),
         },
         Group {
             label: tr::side_changes(),
@@ -248,8 +248,8 @@ impl App {
                 .filter(|(k, _)| (g.is)(k) && !self.is_common(sid, k))
                 .map(|(k, item)| (k.clone(), matches!(item, Item::File(f) if f.dirty())))
                 .collect();
-            // The session's browser tabs follow its web page.
-            if (g.is)(&ItemKey::Web) {
+            // Browser tabs are not items: the group lists the session's tabs.
+            if (g.is)(&ItemKey::Browser(0)) {
                 rows.extend(
                     live.browsers
                         .iter()

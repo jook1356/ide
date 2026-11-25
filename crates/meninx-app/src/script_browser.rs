@@ -140,11 +140,9 @@ fn steps() -> Vec<Step> {
         b(Expect(19, true, "\"data\":\"iVBOR", t)),
         Wait(300),
         Shot("browser_01_tab"),
-        // The session's own page is hidden behind the tab: it still answers and paints.
+        // There is no session page beside the browser tabs.
         b(Call(20, "meninx_browser_act", r#"{"tab":"page","action":"evaluate","expression":"document.readyState","origin":"about:"}"#)),
-        b(Expect(20, true, "complete", t)),
-        b(Call(21, "meninx_browser_screenshot", r#"{"tab":"page","origin":"about:"}"#)),
-        b(Expect(21, true, "\"data\":\"iVBOR", t)),
+        b(Expect(20, false, "no tab `page`", t)),
         // The tab shows another site than the approved one.
         b(Call(22, "meninx_browser_read", r#"{"tab":"$TAB","what":"text","max_chars":100,"origin":"https://example.com"}"#)),
         b(Expect(22, false, "another site", t)),

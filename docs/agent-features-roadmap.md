@@ -54,7 +54,7 @@ Desk: `terminal_inspect`(사용자 터미널 읽기), `terminal_input`(텍스트
 Desk: `browser_inspect`(목록·콘솔·컴포넌트·선택), `browser_act`(이동·클릭·입력·키·스크롤·대기·
 스크린샷·강조·선택·evaluate·cdp·녹화), `browser_diagnose`. 사이트마다 사용자 승인.
 
-- **재료**: CEF는 앱에 있어요(`meninx-web`, 상세 영역의 웹 탭·브라우저 탭). 그래서 전부 **앱이 답하는
+- **재료**: CEF는 앱에 있어요(`meninx-web`, 상세 영역의 브라우저 탭). 그래서 전부 **앱이 답하는
   도구**예요.
 - **방식**: CEF의 DevTools 프로토콜(`cef` 크레이트의 devtools 메서드 실행)을 앱 안에서 써요.
   `evaluate`는 `Runtime.evaluate`, 클릭·입력은 `Input.dispatchMouseEvent` / `dispatchKeyEvent`,

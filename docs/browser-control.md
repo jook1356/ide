@@ -19,7 +19,7 @@ script `MENINX_APP_SCRIPT_ONLY=browser` (`script_browser.rs`, real CEF, screensh
 
 | Tool | Approval | What |
 |---|---|---|
-| `meninx_browser_list` | none | tabs this session can use: `page` (its folder's web page), `tab-<n>` (its browser tabs, 공용 tabs, widget tabs) with kind, address, title, shown, loading |
+| `meninx_browser_list` | none | tabs this session can use: `tab-<n>` (its folder's browser tabs, 공용 tabs, widget tabs) with kind, address, title, shown, loading |
 | `meninx_browser_open {url}` | `browser.act` for the address's site | a new browser tab of the session (shown in its detail area); answers `{tab, url, loading}` after the page loaded (at most 15 s) |
 | `meninx_browser_read {tab, what, selector?, max_chars?, limit?}` | `browser.read` | `text` (`innerText`, default), `dom` (`outerHTML`) of the page or of the first element matching `selector` (cut at `max_chars`, default 20 000, at most 200 000); `console`: the last `limit` (default 100, at most 300) console messages |
 | `meninx_browser_act {tab, action, ...}` | `browser.act` (`wait`: `browser.read`; `navigate`: for the destination's site) | `navigate {url}`, `click {selector \| x, y}`, `type {text, selector?}`, `key {key}`, `scroll {selector \| dx?, dy?, x?, y?}`, `wait {selector \| text \| ms, timeout_ms?}` (at most 45 s), `evaluate {expression}` |

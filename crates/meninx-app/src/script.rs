@@ -3147,7 +3147,7 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     "navigate detail tab to a data: URL ({} chars)",
                     url.len()
                 ));
-                // The session's page is not open by default: open it at `url`.
+                // Opened like a footer link: in a browser tab.
                 if let Some(sid) = app.selected.clone() {
                     tasks.push(app.footer_open_url(&sid, &url));
                 }
@@ -3155,7 +3155,9 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             Step::WaitWebTitle(needle, ms) => {
                 let title = app
                     .selected_live()
-                    .map(|l| l.web_title.clone())
+                    .zip(app.shown_browser())
+                    .and_then(|(l, id)| app.browser(l, id))
+                    .map(|b| b.title.clone())
                     .unwrap_or_default();
                 if title.contains(needle) {
                     sc.check(true, &format!("web tab title {title:?}"));
@@ -3255,14 +3257,6 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 sc.check(
                     (app.ui.split_ratio - 0.55).abs() < 0.01,
                     &format!("split ratio restored: {:.3}", app.ui.split_ratio),
-                );
-                let url = app
-                    .selected_live()
-                    .map(|l| l.url_input.clone())
-                    .unwrap_or_default();
-                sc.check(
-                    url.starts_with("data:text/html"),
-                    "web URL restored for the session",
                 );
             }
             Step::TransportOffline => {

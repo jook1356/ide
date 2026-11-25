@@ -21,7 +21,7 @@ use meninx_client::{
 };
 use meninx_i18n::LanguagePref;
 use meninx_term::{TermConfig, TermModel, ViewEvent};
-use meninx_web::{WebEvent, WebRuntime, WebView, WebViewEvent};
+use meninx_web::{WebRuntime, WebView, WebViewEvent};
 use tokio::sync::mpsc;
 
 use crate::detail::{Detail, DetailMsg, ItemKey};
@@ -44,7 +44,7 @@ pub const DIVIDER_W: f32 = 5.0;
 const SIDE_MIN: f32 = 220.0;
 const CENTRE_MIN: f32 = 320.0;
 const DETAIL_MIN: f32 = 240.0;
-/// URL of a new session's web tab.
+/// URL of a browser tab without an address.
 pub const DEFAULT_URL: &str = "about:blank";
 /// Configuration slug a fresh server has (used before the configuration list arrived).
 pub const DEFAULT_CONFIGURATION: &str = "default";
@@ -111,7 +111,7 @@ impl Conn {
     }
 }
 
-/// One session: the server's view of it plus the local terminal model and web tab.
+/// One session: the server's view of it plus the local terminal model and browser tabs.
 pub struct Live {
     pub info: SessionInfo,
     pub state: RunState,
@@ -122,15 +122,9 @@ pub struct Live {
     /// Last grid size reported by the widget.
     pub size: Option<(u16, u16)>,
     pub error: Option<String>,
-    pub web: Option<WebView>,
-    pub url_input: String,
-    pub web_title: String,
-    pub loading: bool,
-    pub can_back: bool,
-    pub can_forward: bool,
     /// The session's user terminals (`uterm.rs`).
     pub uterms: Vec<crate::uterm::UTermView>,
-    /// Browser tabs beyond the session's web page (`browser.rs`).
+    /// Browser tabs (`browser.rs`).
     pub browsers: Vec<crate::browser::Browser>,
     /// The input box under the terminal: draft and sent history (`composer.rs`).
     pub composer: crate::composer::Composer,
@@ -139,7 +133,7 @@ pub struct Live {
 }
 
 impl Live {
-    fn new(info: SessionInfo, url: String, config: &TermConfig, detail: Option<&DetailUi>) -> Self {
+    fn new(info: SessionInfo, config: &TermConfig, detail: Option<&DetailUi>) -> Self {
         Self {
             detail: Detail::new(detail, info.repos.first().map(|r| r.repo.as_str())),
             state: info.state.into(),
@@ -148,12 +142,6 @@ impl Live {
             attached: false,
             size: None,
             error: None,
-            web: None,
-            url_input: url,
-            web_title: String::new(),
-            loading: false,
-            can_back: false,
-            can_forward: false,
             uterms: Vec::new(),
             browsers: Vec::new(),
             composer: Default::default(),
@@ -1545,11 +1533,12 @@ impl App {
         self.new_answers.remove(id);
         if let Some(idx) = self.sessions.iter().position(|l| l.id() == id) {
             let live = self.sessions.remove(idx);
-            if let Some(w) = live.web {
-                w.close();
+            for b in live.browsers {
+                if let Some(v) = b.view {
+                    v.close();
+                }
             }
         }
-        self.ui.web_urls.remove(id);
         self.ui.detail.remove(id);
         self.session_edit.checked.remove(id);
         if self.selected.as_deref() == Some(id) {
@@ -1671,7 +1660,7 @@ impl App {
 
     /// The session whose folder `sid` works in: a shared child's owner (up its parents),
     /// else `sid` itself. Sessions of one folder share one detail area (open items, browser
-    /// tabs, web page, side panel); terminals stay each session's (`docs/session-family.md`).
+    /// tabs, side panel); terminals stay each session's (`docs/session-family.md`).
     pub fn workspace_owner(&self, sid: &str) -> String {
         let mut cur = sid.to_owned();
         for _ in 0..=crate::family_ui::MAX_DEPTH {
@@ -1719,33 +1708,6 @@ impl App {
             }
             _ => true,
         }
-    }
-
-    /// Whether `owner`'s pane shows its web page: the page is open (an item that can be
-    /// closed, not open by default) and active, or the active item is another session's
-    /// terminal (the pane falls back to the page).
-    pub(crate) fn page_shown(&self, owner: &Live) -> bool {
-        let d = &owner.detail;
-        d.item(&ItemKey::Web).is_some()
-            && (d.active == ItemKey::Web || !self.item_shown(owner, &d.active))
-    }
-
-    /// Close `sid`'s web page item's view and forget its address (the item itself is removed
-    /// by the caller).
-    pub(crate) fn close_page(&mut self, sid: &str) {
-        let owner = self.workspace_owner(sid);
-        if let Some(l) = self.live_mut(&owner) {
-            if let Some(w) = l.web.take() {
-                w.close();
-            }
-            l.url_input.clear();
-            l.web_title.clear();
-            l.loading = false;
-            l.can_back = false;
-            l.can_forward = false;
-            l.error = None;
-        }
-        self.ui.web_urls.remove(&owner);
     }
 
     /// Configuration whose sessions the sidebar shows.
@@ -1892,20 +1854,16 @@ impl App {
                     next.push(l);
                 }
                 None => {
-                    let url = self
-                        .ui
-                        .web_urls
-                        .get(&info.id)
-                        .cloned()
-                        .unwrap_or_else(|| DEFAULT_URL.into());
                     let saved = self.ui.detail.get(&info.id).cloned();
-                    next.push(Live::new(info, url, &self.term_config, saved.as_ref()));
+                    next.push(Live::new(info, &self.term_config, saved.as_ref()));
                 }
             }
         }
         for gone in old {
-            if let Some(w) = gone.web {
-                w.close();
+            for b in gone.browsers {
+                if let Some(v) = b.view {
+                    v.close();
+                }
             }
         }
         self.sessions = next;
@@ -2189,40 +2147,8 @@ impl App {
         !self.ui.detail_collapsed
     }
 
-    /// Create the selected session's web view if needed and hide every other one (and the
-    /// selected one while another detail item is shown).
+    /// Create the shown browser tab's view if needed and hide every other one.
     pub(crate) fn sync_web(&mut self) {
-        let show = self
-            .detail_visible()
-            .then(|| self.selected.clone())
-            .flatten()
-            .map(|id| self.workspace_owner(&id))
-            .filter(|id| {
-                // The page shows when it is active, or when the active item is another
-                // session's terminal (the pane falls back to the page).
-                self.live(id).is_some_and(|l| self.page_shown(l))
-            });
-        if let Some(id) = &show {
-            let runtime = self.runtime.clone();
-            if let Some(live) = self.live_mut(id)
-                && live.web.is_none()
-            {
-                let url = if live.url_input.trim().is_empty() {
-                    DEFAULT_URL.to_owned()
-                } else {
-                    live.url_input.clone()
-                };
-                match WebView::new(&runtime, &url, Size::new(640.0, 600.0), 1.0) {
-                    Ok(v) => live.web = Some(v),
-                    Err(e) => live.error = Some(tr::err_web_view(&format!("{e:#}"))),
-                }
-            }
-        }
-        for live in &self.sessions {
-            if let Some(web) = &live.web {
-                web.set_hidden(show.as_deref() != Some(live.id()));
-            }
-        }
         let shown = self.detail_visible().then(|| self.shown_browser()).flatten();
         self.sync_browsers(shown);
     }
@@ -3617,32 +3543,21 @@ impl App {
             }
 
             Message::UrlInput(v) => {
-                if let Some(b) = self.shown_browser() {
-                    if let Some(b) = self.browser_mut(b) {
-                        b.url_input = v;
-                    }
-                } else if let Some(id) = self.selected.clone().map(|i| self.workspace_owner(&i))
-                    && let Some(live) = self.live_mut(&id)
+                if let Some(b) = self.shown_browser()
+                    && let Some(b) = self.browser_mut(b)
                 {
-                    live.url_input = v;
+                    b.url_input = v;
                 }
                 Task::none()
             }
             Message::UrlSubmit => {
                 self.sync_web();
-                if let Some(b) = self.shown_browser() {
-                    if let Some(b) = self.browser_mut(b)
-                        && let Some(url) = crate::browser::address_to_url(&b.url_input)
-                        && let Some(v) = &b.view
-                    {
-                        v.navigate(&url);
-                    }
-                } else if let Some(live) = self.shown_live() {
-                    let url = crate::browser::address_to_url(&live.url_input)
-                        .unwrap_or_else(|| normalize_url(""));
-                    if let Some(w) = &live.web {
-                        w.navigate(&url);
-                    }
+                if let Some(b) = self.shown_browser()
+                    && let Some(b) = self.browser_mut(b)
+                    && let Some(url) = crate::browser::address_to_url(&b.url_input)
+                    && let Some(v) = &b.view
+                {
+                    v.navigate(&url);
                 }
                 Task::none()
             }
@@ -4311,11 +4226,10 @@ impl App {
         Task::none()
     }
 
-    /// Run `f` on the page shown in the selected session's pane (a browser tab or its web page).
+    /// Run `f` on the browser tab shown in the selected session's pane.
     fn with_web(&mut self, f: impl FnOnce(&WebView)) -> Task<Message> {
         let view = match (self.shown_browser(), self.shown_live()) {
             (Some(id), Some(l)) => self.browser(l, id).and_then(|b| b.view.as_ref()),
-            (None, Some(l)) => l.web.as_ref(),
             _ => None,
         };
         if let Some(w) = view {
@@ -4464,7 +4378,7 @@ impl App {
                 l.info = info;
             }
             None => {
-                let live = Live::new(info, DEFAULT_URL.into(), &self.term_config, None);
+                let live = Live::new(info, &self.term_config, None);
                 self.sessions.push(live);
             }
         }
@@ -4480,60 +4394,8 @@ impl App {
     }
 
     fn on_web(&mut self, ev: WebViewEvent) {
-        if self.browser_web_event(&ev) {
-            return;
-        }
-        let show = self
-            .detail_visible()
-            .then(|| self.selected.clone())
-            .flatten()
-            .map(|id| self.workspace_owner(&id))
-            .filter(|id| {
-                // The page shows when it is active, or when the active item is another
-                // session's terminal (the pane falls back to the page).
-                self.live(id).is_some_and(|l| self.page_shown(l))
-            });
-        let Some(live) = self
-            .sessions
-            .iter_mut()
-            .find(|l| l.web.as_ref().is_some_and(|w| w.id() == ev.view))
-        else {
-            return;
-        };
-        match ev.event {
-            WebEvent::Created => {
-                if let Some(w) = &live.web {
-                    w.set_hidden(show.as_deref() != Some(live.info.id.as_str()));
-                }
-            }
-            WebEvent::UrlChanged(u) => {
-                live.url_input = u.clone();
-                self.ui.web_urls.insert(live.info.id.clone(), u);
-                self.ui.save(&self.data_dir);
-            }
-            WebEvent::TitleChanged(t) => live.web_title = t,
-            WebEvent::LoadingStateChanged {
-                is_loading,
-                can_go_back,
-                can_go_forward,
-            } => {
-                live.loading = is_loading;
-                live.can_back = can_go_back;
-                live.can_forward = can_go_forward;
-            }
-            WebEvent::LoadError { url, error } => {
-                tracing::warn!("web load error {url}: {error}");
-                if let Some(n) = crate::notice_view::load_error_notice(&url, &error) {
-                    self.notices.push(n.session(live.info.id.clone()));
-                }
-            }
-            WebEvent::NewWindowRequested(url) => {
-                // Desk: a page's new window is a new browser tab of the session.
-                let sid = live.info.id.clone();
-                let _ = self.open_browser(Some(sid), false, url);
-            }
-            _ => {}
-        }
+        // Every page is a browser tab's (`browser.rs`).
+        self.browser_web_event(&ev);
     }
 
     // ------------------------------------------------------------------ subscriptions
@@ -4714,11 +4576,6 @@ impl App {
             .take()
             .map(|id| crate::detail_window::save_placement(id).chain(window::close(id)));
         self.link = None;
-        for live in &self.sessions {
-            if let Some(w) = &live.web {
-                w.close();
-            }
-        }
         let window = self.window;
         let size = self.window_size;
         let script = self.script.take();
@@ -4732,27 +4589,6 @@ impl App {
         self.script = script;
         self.conn = Conn::Disconnected(tr::conn_closed());
         detail_window.unwrap_or_else(Task::none)
-    }
-}
-
-/// Keep URLs with a scheme (`https://`, `about:`, `data:`, ...); add `http://` to local hosts
-/// and `https://` to other bare host names.
-pub fn normalize_url(input: &str) -> String {
-    let s = input.trim();
-    if s.is_empty() {
-        return DEFAULT_URL.into();
-    }
-    let lower = s.to_ascii_lowercase();
-    let has_scheme = lower.contains("://")
-        || ["about:", "data:", "file:", "javascript:", "chrome:"]
-            .iter()
-            .any(|p| lower.starts_with(p));
-    if has_scheme {
-        s.to_owned()
-    } else if lower.starts_with("localhost") || lower.starts_with("127.0.0.1") {
-        format!("http://{s}")
-    } else {
-        format!("https://{s}")
     }
 }
 
@@ -4790,7 +4626,7 @@ fn installed_font_families() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PickRootForm, crumbs, is_fs_root, normalize_url, same_path};
+    use super::{PickRootForm, crumbs, is_fs_root, same_path};
     use meninx_client::{BrowseEntry, BrowseListing};
 
     fn c(path: &str) -> Vec<(&'static str, &'static str)> {
@@ -4868,16 +4704,6 @@ mod tests {
         assert_eq!(f.target(), Some(r"D:\repository"));
         f.selected = Some(0);
         assert_eq!(f.target(), Some(r"D:\repository\a"));
-    }
-
-    #[test]
-    fn urls() {
-        assert_eq!(normalize_url(""), "about:blank");
-        assert_eq!(normalize_url(" example.com "), "https://example.com");
-        assert_eq!(normalize_url("localhost:3000"), "http://localhost:3000");
-        assert_eq!(normalize_url("http://x"), "http://x");
-        assert_eq!(normalize_url("data:text/html,hi"), "data:text/html,hi");
-        assert_eq!(normalize_url("about:blank"), "about:blank");
     }
 
     #[test]

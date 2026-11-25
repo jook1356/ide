@@ -140,8 +140,6 @@ pub struct UiState {
     pub detail_collapsed: bool,
     /// The input box under agent terminals (`composer.rs`).
     pub composer_open: bool,
-    /// Last URL of each session's web tab, by session id.
-    pub web_urls: BTreeMap<String, String>,
     /// Last repository folder used in the new-session dialog.
     pub last_repo: Option<String>,
     /// UI language (`"system"` or a language code); missing in older files = system.
@@ -280,7 +278,6 @@ impl Default for UiState {
             split_ratio: DEFAULT_SPLIT,
             detail_collapsed: false,
             composer_open: true,
-            web_urls: BTreeMap::new(),
             last_repo: None,
             language: LanguagePref::System,
             on_close: CloseAction::Ask,
@@ -399,11 +396,10 @@ mod tests {
             },
             ..Default::default()
         };
-        s.web_urls.insert("abc".into(), "about:blank".into());
         s.detail.insert(
             "abc".into(),
             DetailUi {
-                open: vec!["web".into(), "file:src/한글.ts".into()],
+                open: vec!["file:src/한글.ts".into()],
                 active: Some("file:src/한글.ts".into()),
                 side: "search".into(),
             },
@@ -415,7 +411,7 @@ mod tests {
         std::fs::write(UiState::file(&base), r#"{"split_ratio": 5.0}"#).unwrap();
         let l = UiState::load(&base);
         assert_eq!(l.split_ratio, SPLIT_RANGE.1);
-        assert!(l.web_urls.is_empty() && !l.detail_collapsed);
+        assert!(!l.detail_collapsed);
         assert_eq!((l.page, l.sessions_open), (Page::Work, true));
         assert_eq!(l.language, LanguagePref::System);
         std::fs::write(

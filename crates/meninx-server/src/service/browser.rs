@@ -41,7 +41,7 @@ pub(crate) fn tools() -> Vec<AgentTool> {
     vec![
         tool(
             TOOL_LIST,
-            "List the web pages of Meninx's browser this session can use: its own page (`page`), \
+            "List the web pages of Meninx's browser this session can use: \
              its browser tabs and the shared (공용) tabs, with id, address, title, whether \
              it is shown and loading. Use the ids with the other meninx_browser_* tools.",
             r#"{"type":"object","properties":{},"additionalProperties":false}"#,
@@ -373,12 +373,12 @@ mod tests {
         assert_eq!(plan, Plan::Site { origin: "http://localhost:3000".into(), detail: "open http://localhost:3000/app".into() });
         assert!(p(TOOL_OPEN, json!({})).is_err());
 
-        let (a, plan) = p(TOOL_READ, json!({"tab": "page"})).unwrap();
-        assert_eq!(a, json!({"tab": "page", "what": "text", "max_chars": 20000}));
+        let (a, plan) = p(TOOL_READ, json!({"tab": "tab-1"})).unwrap();
+        assert_eq!(a, json!({"tab": "tab-1", "what": "text", "max_chars": 20000}));
         assert!(matches!(plan, Plan::Tab { cap: CAP_READ, .. }));
         let (a, _) = p(TOOL_READ, json!({"tab": "tab-2", "what": "console", "limit": 9999})).unwrap();
         assert_eq!(a["limit"], 300);
-        assert!(p(TOOL_READ, json!({"tab": "page", "what": "cookies"})).is_err());
+        assert!(p(TOOL_READ, json!({"tab": "tab-1", "what": "cookies"})).is_err());
         assert!(p(TOOL_READ, json!({"what": "text"})).is_err());
 
         let (a, plan) = p(TOOL_ACT, json!({"tab": "tab-1", "action": "navigate", "url": "https://x.dev/a"})).unwrap();
@@ -409,7 +409,7 @@ mod tests {
         assert!(matches!(plan, Plan::Tab { cap: CAP_ACT, detail, .. } if detail == "run JavaScript: 1+1"));
         assert!(p(TOOL_ACT, json!({"tab": "t", "action": "hover"})).is_err());
 
-        let (_, plan) = p(TOOL_SCREENSHOT, json!({"tab": "page"})).unwrap();
+        let (_, plan) = p(TOOL_SCREENSHOT, json!({"tab": "tab-1"})).unwrap();
         assert!(matches!(plan, Plan::Tab { cap: CAP_READ, .. }));
     }
 

@@ -41,7 +41,7 @@ also hides the side panel; files opened from it show in the detail window.
   `window::events()` must not be subscribed (it also carries `RedrawRequested`); use
   `resize_events`, `close_requests`, `close_events` and an `event::listen_with` for `Moved`.
 - One wgpu device serves every window (iced's compositor), so the CEF OSR texture import works
-  unchanged in the second window: the web page renders crisp (1:1) there; the script checks the
+  unchanged in the second window: browser tabs render crisp (1:1) there; the script checks the
   page's colours in the window's `window::screenshot` (`ExpectWebDrawn`) and a read-only OS capture
   showed the page and the URL input value.
 - The widget's per-window state re-registers CEF's waker when the view moves windows (state is new
@@ -53,7 +53,7 @@ also hides the side panel; files opened from it show in the detail window.
 - Input, IME and cursor are per window in iced_winit (each window has its own user interface and
   `InputMethod` requests); widget operations (`operation::focus`) run on every window, so focusing
   the terminal (session switch) unfocuses inputs in the detail window, as clicking the app would.
-  Real Korean IME in the detail window's inputs / web page was not typed (no OS input from
+  Real Korean IME in the detail window's inputs / browser tabs was not typed (no OS input from
   tests): manual check.
 - The script's in-app event injector (`meninx_web::testing::Injector`) wraps the app window only.
 

@@ -9,9 +9,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Fill, FillPortion, Length, Padding, Widget as _, mouse};
 use meninx_views::icons;
-use meninx_web::WebViewWidget;
 
-use crate::app::{App, Live, Message, URL_ID};
+use crate::app::{App, Live, Message};
 use crate::detail::{
     CloseSet, DetailMsg, FileBar, FileItem, Item, ItemKey, SEARCH_ID, SideTab, file_name, parent,
 };
@@ -23,9 +22,6 @@ use crate::view::{icon_button, tip};
 
 type El<'a> = Element<'a, Message>;
 
-const I_BACK: &str = "←";
-const I_FORWARD: &str = "→";
-const I_RELOAD: &str = "⟳";
 const I_COLLAPSE: &str = "»";
 pub(crate) const I_CLOSE: &str = "✕";
 const I_CHEVRON: &str = "▾";
@@ -118,14 +114,7 @@ pub(crate) fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
                 ),
             }
         }
-        ItemKey::Web => {
-            let t = if live.web_title.trim().is_empty() {
-                tr::tab_web()
-            } else {
-                live.web_title.clone()
-            };
-            (t, live.url_input.clone())
-        }
+        ItemKey::Nothing => (String::new(), String::new()),
         ItemKey::File(p) | ItemKey::Diff { path: p, .. } | ItemKey::Compare(p) => {
             let folder = parent(p);
             // Several repos: the folder starts with the repo's name.
@@ -152,7 +141,7 @@ pub(crate) fn item_names(key: &ItemKey, live: &Live) -> (String, String) {
 
 fn item_kind(key: &ItemKey) -> String {
     match key {
-        ItemKey::Web => tr::tab_web(),
+        ItemKey::Nothing => String::new(),
         ItemKey::File(_) => tr::kind_file(),
         ItemKey::Diff { staged: true, .. } => tr::kind_staged(),
         ItemKey::Diff { staged: false, .. } => tr::kind_changed(),
@@ -173,7 +162,7 @@ pub(crate) fn item_icon<'a>(app: &App, live: &Live, key: &ItemKey) -> El<'a> {
         ItemKey::Browser(id) if app.browser(live, *id).is_some_and(|b| b.preview.is_some()) => {
             crate::icons::icon(Icon::Eye, 14.0, style::DIM)
         }
-        ItemKey::Web | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
+        ItemKey::Nothing | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
         ItemKey::Terminal(_) => text(">_").size(11).font(style::mono()).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
         ItemKey::Diff { path, .. } | ItemKey::Compare(path) => row![
@@ -268,42 +257,16 @@ impl App {
     pub(crate) fn pane<'a>(&'a self, live: &'a Live, in_window: bool) -> El<'a> {
         let d = &live.detail;
         let sid = live.info.id.clone();
-        // Another session's terminal is the folder's active item: show the page instead.
+        // Another session's terminal is the folder's active item: show nothing instead.
         let active = if self.item_shown(live, &d.active) {
             d.active.clone()
         } else {
-            ItemKey::Web
+            ItemKey::Nothing
         };
         let identity: El<'a> = match &active {
             ItemKey::Terminal(id) => self.uterm_identity(live, id),
             ItemKey::Browser(id) => self.browser_identity(live, *id),
-            // Nothing open (the page is not open by default).
-            ItemKey::Web if d.item(&ItemKey::Web).is_none() => space().width(Fill).boxed(),
-            ItemKey::Web => row![
-                icon_button(
-                    I_BACK,
-                    live.can_back.then_some(Message::WebBack),
-                    tr::web_back()
-                ),
-                icon_button(
-                    I_FORWARD,
-                    live.can_forward.then_some(Message::WebForward),
-                    tr::web_forward()
-                ),
-                icon_button(I_RELOAD, Some(Message::WebReload), tr::web_reload()),
-                text_input(tr::url_placeholder(), &live.url_input)
-                    .id(URL_ID)
-                    .on_input(Message::UrlInput)
-                    .on_submit(Message::UrlSubmit)
-                    .size(12)
-                    .padding([4, 8])
-                    .style(style::input)
-                    .width(Fill),
-                self.bookmark_star(&live.url_input, &live.web_title),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .boxed(),
+            ItemKey::Nothing => space().width(Fill).boxed(),
             key => {
                 let (title, folder) = item_names(key, live);
                 let dirty = matches!(d.active_item(), Some(Item::File(f)) if f.dirty());
@@ -373,23 +336,10 @@ impl App {
         } else if let ItemKey::Terminal(id) = &active {
             self.uterm_body(live, id)
         } else {
-            // `None` (the fallback above) shows the page.
+            // Nothing (also the fallback above) shows the empty pane.
             let item = if active == d.active { d.active_item() } else { None };
             match item {
-            None if d.item(&ItemKey::Web).is_none() => message_body(tr::rail_empty(), false),
-            Some(Item::Web) | None => match &live.web {
-                // Under a modal the page stays visible as a frozen, dimmed snapshot of its
-                // last frame (no input reaches it, CEF stops rendering); the backdrop and the
-                // dialog are drawn above it (see docs, "modal z-order").
-                Some(w) => WebViewWidget::new(w)
-                    .width(Fill)
-                    .height(Fill)
-                    .dimmed(self.web_covered())
-                    .boxed(),
-                None => container(text(live.error.as_deref().unwrap_or("")).size(12))
-                    .center(Fill)
-                    .boxed(),
-            },
+            None => message_body(tr::rail_empty(), false),
             Some(Item::File(f)) => self.file_body(&sid, f),
             Some(Item::Diff(x)) => {
                 let key = d.active.clone();
@@ -488,7 +438,7 @@ impl App {
             }
             type Group = (String, fn(&ItemKey) -> bool);
             let groups: [Group; 4] = [
-                (tr::group_browser(), |k| matches!(k, ItemKey::Web)),
+                (tr::group_browser(), |k| matches!(k, ItemKey::Browser(_))),
                 (tr::side_changes(), |k| {
                     matches!(k, ItemKey::Diff { .. } | ItemKey::Compare(_))
                 }),
@@ -502,8 +452,8 @@ impl App {
                     .filter(|(k, _)| is(k) && !self.is_common(&live.info.id, k))
                     .map(|(k, item)| (k.clone(), matches!(item, Item::File(f) if f.dirty())))
                     .collect();
-                // The session's browser tabs follow its web page.
-                if is(&ItemKey::Web) {
+                // Browser tabs are not items: the group lists the session's tabs.
+                if is(&ItemKey::Browser(0)) {
                     rows.extend(
                         live.browsers
                             .iter()
