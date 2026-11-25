@@ -170,6 +170,25 @@ pub struct SkillInfo {
     pub enabled: bool,
 }
 
+/// One change in a configuration's history (`configuration.history`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConfigurationChange {
+    /// Change id (commit hash; for `configuration.restore`).
+    pub id: String,
+    /// Unix seconds.
+    pub time: u64,
+    /// Who made it: `ui`, `agent` (a session through `ide_profile_edit`), `restore`, `import`.
+    pub source: String,
+    /// One line: the agent's reason, else a fixed English text.
+    pub summary: String,
+    /// The session whose agent made it, and that session's title then.
+    pub session: Option<String>,
+    pub session_title: Option<String>,
+    /// Changed files, relative to the configuration's folder (`instructions.md`,
+    /// `mcp/<name>.json`, `skills/<name>/...`, `profile.json`).
+    pub files: Vec<String>,
+}
+
 /// A configuration: skills, MCP servers, instructions.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConfigurationInfo {

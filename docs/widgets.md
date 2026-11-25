@@ -19,7 +19,8 @@ open / close, delete).
 
 - Draft: `<session folder>/.ide/widgets/<id>/` (`id`: 1-40 of `a-z0-9-`, not starting or ending
   with `-`: it is a URL host label). `widget.json`: `name`, `description`, `entry` (default
-  `index.html`), `tools` (`ide_*` names the bridge has), `scope` (`session` default / `family` /
+  `index.html`), `tools` (`ide_*` names the bridge has, the host features `exec` / `fs` /
+  `terminal` / `sessions`, or `*` for everything), `scope` (`session` default / `family` /
   `global`). Unknown keys are refused (typos show up in the agent's `list`).
 - `ide_widget register` copies the draft (files and folders, no links; 8 MiB per file, 64 MiB in
   all) to `<data>/widgets/sources/<id>/` and records it in `<data>/widgets/registry.json`
@@ -61,6 +62,32 @@ open / close, delete).
 - `widget.call` refuses tools the registration did not allow (`widget-not-allowed`) and runs the
   tool as the session showing the tab would (audit `widget.call <session> <widget> <tool>`).
 
+## Host API (protocol 22)
+
+Desk's mods are sandboxed (`deskAccess` asks per call); ide's widgets are the user's own tools,
+so a page reaches ide directly, as the user, through `widget.host` (`ide-server/src/service/
+widget_host.rs`, `/__ide/host` in the app). Which features a widget may use is its `tools`
+list (allowed at registration) minus what the user blocked (below).
+
+| Feature | Methods (`ide.host(method, args)`; helpers on `window.ide`) |
+|---|---|
+| `exec` | `exec {program, args, cwd, stdin, env, timeout_ms}` or `{command}` (`cmd /d /s /c` / `sh -c`) -> `{code, stdout, stderr, timed_out, truncated, ms}`; no console window, default 120 s, at most 3600 s, 16 MiB kept per stream |
+| `fs` | `fs.read {path, encoding?: base64}` (at most 32 MiB), `fs.write {path, text \| base64, append?, mkdirs? = true}` (atomic replace), `fs.list`, `fs.stat`, `fs.delete {recursive?}`, `fs.mkdir` |
+| `terminal` | `term.open {command, cwd, title, shell, session}` (a user terminal, `uterm.open` with any folder), `term.list {session \| "*", ports?}` (with listening ports), `term.read {id, lines}`, `term.write {id, text, keys}` (no approval: the widget is the user's), `term.stop`, `term.rerun`, `term.remove` |
+| `sessions` | `sessions.list`, `sessions.get {id?}`: id, title, folder, parent, shared (works in the parent's folder), archived, repositories |
+
+Relative paths are under the showing session's folder. A failing call answers an error result
+(the page's promise rejects). Calls that change something are audited (`widget.host <session>
+<widget> <method>`).
+
+### Block policy
+
+`<data>/widgets/policy.json` (`ide_core::widget::Policy`): `all` (blocked for every widget,
+hand-edited) and `widgets.<id>` (the 위젯 page's 차단 / 허용 per declared tool or feature,
+`widget.set_blocked`). A blocked name (or `*`) fails `widget.call` / `widget.host` with
+`widget-blocked`, whatever the widget declares: meant for widgets shared by others. Deleting a
+widget forgets its entries. `WidgetInfo.blocked` lists a widget's own.
+
 ## Agent tool `ide_widget`
 
 | Action | Answered by | What |
@@ -99,14 +126,18 @@ The base instructions mention widgets in one sentence; the guide is fetched on d
 | `widget.set_open` | `{session, widget, open}` -> `Unit` |
 | `widget.call` | `{session, widget, tool, args}` -> `AgentResult` |
 | `widget.data` | `{session, widget, op: Get / Set / Delete / Keys}` -> `WidgetData(Option<json text>)` |
+| `widget.host` (22) | `{session, widget, method, args}` -> `AgentResult` (JSON text) |
+| `widget.set_blocked` (22) | `{widget, name, blocked}` -> `Unit` |
 
 `Notify::WidgetsChanged` after registrations, deletions and open / close. Errors:
-`widget {detail}`, `widget-changed {widget}`, `widget-not-allowed {tool}`.
+`widget {detail}`, `widget-changed {widget}`, `widget-not-allowed {tool}`, `widget-blocked {tool}`.
 
 ## Not like Desk (yet)
 
 - No separate OS windows (Desk's default `display: window`, 앱 위에 고정): widgets are tabs.
 - One tab per session (Desk's `single: true`); no multi-instance widgets.
-- No env file (secrets / allowed origins), no `deskAccess`, no code view on the page.
+- No env file (secrets / allowed origins), no code view on the page. Instead of `deskAccess`
+  the host API above (no per-call questions; the block policy instead).
+- No events yet (Desk's `onTermData` / `onTermList`): pages poll `term.list` / `term.read`.
 - React / TSX without a CDN (a bundled runtime + transpiler page, Desk's approach).
 - `macOS` / Linux: the scheme code is not OS-specific, but the app script ran on Windows only.

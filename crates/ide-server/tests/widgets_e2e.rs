@@ -198,3 +198,116 @@ async fn widgets_end_to_end() {
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The host API (`widget.host`): files, programs, terminals and sessions for widgets that
+/// declare them, and the user's block policy (`widget.set_blocked`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn widget_host_api() {
+    let dir = tmp_dir("widget-host");
+    let repo = dir.join("repo");
+    init_repo(&repo);
+    let server = server(&dir.join("data"));
+    let app = Client::connect(memory(&server), opts()).await.unwrap();
+    let repo_id = app.register_repo(&repo.display().to_string()).await.unwrap().id;
+    let (s, _) = app
+        .create_session(NewSession {
+            provider: "shell".into(),
+            account: None,
+            configuration: "default".into(),
+            repos: Vec::new(),
+            original_repo: Some(repo_id),
+            refresh_base: false,
+            background: false,
+            bases: Default::default(),
+            title: String::new(),
+            start: false,
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .unwrap();
+    let sid = s.id.as_str();
+    let widgets = repo.join(".ide").join("widgets");
+    write(
+        &widgets.join("ops").join("widget.json"),
+        r#"{"name":"Ops","tools":["exec","fs","terminal","sessions"],"scope":"global"}"#,
+    );
+    write(&widgets.join("ops").join("index.html"), "<p>ops</p>");
+    write(&widgets.join("plain").join("widget.json"), r#"{"name":"Plain"}"#);
+    write(&widgets.join("plain").join("index.html"), "<p>plain</p>");
+    let tools = |t: &[&str]| t.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    app.widget_register(sid, "ops", tools(&["exec", "fs", "terminal", "sessions"])).await.unwrap();
+    app.widget_register(sid, "plain", Vec::new()).await.unwrap();
+    let host = |method: &'static str, args: serde_json::Value| {
+        let app = app.clone();
+        let sid = sid.to_owned();
+        async move {
+            let r = app.widget_host(&sid, "ops", method, &args.to_string()).await.unwrap();
+            assert!(!r.is_error, "{method}: {}", r.text);
+            serde_json::from_str::<serde_json::Value>(&r.text).unwrap()
+        }
+    };
+
+    // Files: relative paths are under the session folder.
+    host("fs.write", serde_json::json!({ "path": "out/state.json", "text": "{\"a\":1}" })).await;
+    assert_eq!(std::fs::read_to_string(repo.join("out").join("state.json")).unwrap(), "{\"a\":1}");
+    assert_eq!(host("fs.read", serde_json::json!({ "path": "out/state.json" })).await["text"], "{\"a\":1}");
+    // Programs: in the session folder by default.
+    let v = host("exec", serde_json::json!({ "command": "echo widget-exec" })).await;
+    assert_eq!((v["code"].as_i64(), v["stdout"].as_str().map(str::trim)), (Some(0), Some("widget-exec")));
+    // Sessions.
+    let v = host("sessions.list", serde_json::json!({})).await;
+    assert!(v["sessions"].as_array().unwrap().iter().any(|x| x["id"] == sid), "{v}");
+    assert_eq!(host("sessions.get", serde_json::json!({})).await["id"], sid);
+    // Terminals: a command in a chosen folder, listed, read, removed.
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    let t = host(
+        "term.open",
+        serde_json::json!({ "command": "echo from-term", "cwd": "sub", "title": "probe" }),
+    )
+    .await;
+    let id = t["id"].as_str().unwrap().to_owned();
+    assert!(t["folder"].as_str().unwrap().ends_with("sub"), "{t}");
+    let v = host("term.list", serde_json::json!({ "session": "*" })).await;
+    assert!(v["terminals"].as_array().unwrap().iter().any(|x| x["id"] == id.as_str()), "{v}");
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = host("term.read", serde_json::json!({ "id": id })).await["text"].as_str().unwrap().to_owned();
+        if seen.contains("from-term") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(seen.contains("from-term"), "{seen}");
+    host("term.remove", serde_json::json!({ "id": id })).await;
+    let v = host("term.list", serde_json::json!({})).await;
+    assert!(v["terminals"].as_array().unwrap().is_empty(), "{v}");
+    // Errors of a call come back as an error result; unknown methods too.
+    let r = app.widget_host(sid, "ops", "fs.read", r#"{"path":"missing.txt"}"#).await.unwrap();
+    assert!(r.is_error);
+    let r = app.widget_host(sid, "ops", "rm.rf", "{}").await.unwrap();
+    assert!(r.is_error && r.text.contains("unknown method"), "{}", r.text);
+
+    // Undeclared features are refused; blocked ones too, until unblocked.
+    let e = app.widget_host(sid, "plain", "exec", r#"{"command":"echo x"}"#).await.unwrap_err();
+    assert_eq!(e.id, "widget-not-allowed");
+    app.widget_set_blocked("ops", "exec", true).await.unwrap();
+    assert_eq!(app.widget_list().await.unwrap().iter().find(|w| w.id == "ops").unwrap().blocked, ["exec"]);
+    let e = app.widget_host(sid, "ops", "exec", r#"{"command":"echo x"}"#).await.unwrap_err();
+    assert_eq!(e.id, "widget-blocked");
+    host("fs.stat", serde_json::json!({ "path": "out" })).await;
+    app.widget_set_blocked("ops", "*", true).await.unwrap();
+    let e = app.widget_host(sid, "ops", "fs.stat", r#"{"path":"out"}"#).await.unwrap_err();
+    assert_eq!(e.id, "widget-blocked");
+    app.widget_set_blocked("ops", "*", false).await.unwrap();
+    app.widget_set_blocked("ops", "exec", false).await.unwrap();
+    host("exec", serde_json::json!({ "command": "echo again" })).await;
+    assert_eq!(app.widget_set_blocked("ops", "ide_nope", true).await.unwrap_err().id, "widget");
+    // Deleting the widget forgets its blocks.
+    app.widget_set_blocked("ops", "fs", true).await.unwrap();
+    app.widget_delete("ops").await.unwrap();
+    assert!(!std::fs::read_to_string(dir.join("data").join("widgets").join("policy.json")).unwrap().contains("ops"));
+
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}

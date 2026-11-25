@@ -184,6 +184,15 @@ impl App {
                     .boxed(),
             );
         }
+        if dirty && e.outdated {
+            title = title.push(tip(
+                container(text(tr::profile_outdated()).size(11).color(style::RED))
+                    .padding([2, 8])
+                    .style(style::card)
+                    .boxed(),
+                tr::profile_outdated_tooltip(),
+            ));
+        }
         let actions: El<'_> = if f.profile_delete_armed {
             row![
                 text(tr::profile_delete_question()).size(12).color(style::DIM),
@@ -337,7 +346,14 @@ impl App {
             repos.boxed(),
         );
 
-        vec![basic, instructions, skills, mcp, repos]
+        let history = section(
+            tr::profile_history(),
+            Some(tr::profile_history_note()),
+            None,
+            self.profile_history_view(&e.base.slug, online),
+        );
+
+        vec![basic, instructions, skills, mcp, repos, history]
     }
 
     /// Which features the providers pass on, per session mode (✓ native, ~ fallback, ✕ not).
