@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::clean_name;
 use crate::error::{Error, IoAction, Result};
+use crate::profile_files;
+use crate::profile_history::{self, ChangeNote, ChangeSource, HistoryEntry};
 use crate::skill::{self, SKILL_FILE, SkillEntry};
 use crate::paths::{Paths, now_unix, read_json, write_json};
 use crate::slug::{slugify, validate_slug};
@@ -100,25 +102,73 @@ impl Configuration {
         }
     }
 
-    /// Check names: display name, MCP server names (format, uniqueness), env keys.
+    /// Check names: display name, MCP server names (format, uniqueness ignoring case: each is
+    /// a file `mcp/<name>.json`), env keys.
     pub fn validate(&self) -> Result<()> {
         validate_slug(&self.slug)?;
         clean_name(&self.name)?;
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for m in &self.mcp_servers {
-            validate_mcp_name(&m.name)?;
-            if seen.contains(&m.name.as_str()) {
+            validate_mcp_server(m)?;
+            let key = m.name.to_ascii_lowercase();
+            if seen.contains(&key) {
                 return Err(Error::InvalidMcpName(m.name.clone()));
             }
-            seen.push(&m.name);
-            if m.command.trim().is_empty()
-                || m.env.iter().any(|(k, _)| k.is_empty() || k.contains('='))
-            {
-                return Err(Error::InvalidMcpName(m.name.clone()));
-            }
+            seen.push(key);
         }
         Ok(())
     }
+}
+
+/// Check one MCP server: name, a command, env keys.
+pub(crate) fn validate_mcp_server(m: &McpServer) -> Result<()> {
+    validate_mcp_name(&m.name)?;
+    if m.command.trim().is_empty() || m.env.iter().any(|(k, _)| k.is_empty() || k.contains('=')) {
+        return Err(Error::InvalidMcpName(m.name.clone()));
+    }
+    Ok(())
+}
+
+/// `mcp/<name>.json`: one MCP server (the name is the file's).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpFile {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: Vec<(String, String)>,
+}
+
+impl McpFile {
+    pub(crate) fn into_server(self, name: &str) -> McpServer {
+        McpServer {
+            name: name.to_owned(),
+            command: self.command,
+            args: self.args,
+            env: self.env,
+        }
+    }
+
+    fn of(m: &McpServer) -> Self {
+        McpFile {
+            command: m.command.clone(),
+            args: m.args.clone(),
+            env: m.env.clone(),
+        }
+    }
+}
+
+/// `profile.json`: what is not a file of its own.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProfileMeta {
+    name: String,
+    #[serde(default)]
+    created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_repos: Option<Vec<crate::registry::RepoId>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled_skills: Vec<String>,
 }
 
 /// MCP server names: 1..=64 chars of `[A-Za-z0-9_-]` (a TOML bare key and a JSON key).
@@ -134,33 +184,152 @@ pub fn validate_mcp_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// `configurations.json`: the order of the configurations (older files held them whole; they
+/// are moved into their folders on open).
+#[derive(Debug, Default, Deserialize)]
 struct ConfigurationsFile {
     #[serde(default)]
-    configurations: Vec<Configuration>,
+    configurations: Vec<serde_json::Value>,
 }
 
-/// Persistent configuration list backed by `configurations.json`. Every mutation saves
-/// immediately. There is always at least one configuration.
+/// Persistent configurations. `configurations.json` lists their slugs in order; each one's
+/// data lives in its folder `configurations/<slug>/` (`profile.json`, `instructions.md`,
+/// `mcp/<name>.json`, `skills/`), a git repository of its own where every change is a commit
+/// (`profile_history.rs`). Every mutation saves immediately. There is always at least one
+/// configuration.
 #[derive(Debug)]
 pub struct ConfigurationStore {
     paths: Paths,
     configs: Vec<Configuration>,
 }
 
+/// Read configuration `slug` from its folder (`None`: no `profile.json`).
+fn load_profile(paths: &Paths, slug: &str) -> Result<Option<Configuration>> {
+    let dir = paths.configuration_dir(slug);
+    let Some(meta) = read_json::<ProfileMeta>(&dir.join(profile_files::PROFILE_FILE))? else {
+        return Ok(None);
+    };
+    let instructions = match std::fs::read_to_string(dir.join(profile_files::INSTRUCTIONS_FILE)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Error::io(IoAction::Reading, &dir, e)),
+    };
+    let mut mcp_servers = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir.join(profile_files::MCP_DIR)) {
+        let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for f in files {
+            let Some(name) = f
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".json"))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            match read_json::<McpFile>(&f) {
+                Ok(Some(m)) => {
+                    let server = m.into_server(&name);
+                    match validate_mcp_server(&server) {
+                        Ok(()) => mcp_servers.push(server),
+                        Err(e) => tracing::warn!(file = %f.display(), "MCP server left out: {e}"),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(file = %f.display(), "MCP server left out: {e}"),
+            }
+        }
+    }
+    mcp_servers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Some(Configuration {
+        slug: slug.to_owned(),
+        name: meta.name,
+        skills: Vec::new(),
+        disabled_skills: meta.disabled_skills,
+        mcp_servers,
+        instructions,
+        default_repos: meta.default_repos,
+        created_at: meta.created_at,
+    }))
+}
+
+/// Write `path` unless it already holds `bytes`.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|b| b == bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        crate::paths::ensure_dir(parent)?;
+    }
+    std::fs::write(path, bytes).map_err(|e| Error::io(IoAction::Writing, path, e))
+}
+
+/// Write configuration `c` into its folder (MCP files of removed servers are deleted).
+fn store_profile(paths: &Paths, c: &Configuration) -> Result<()> {
+    let dir = paths.configuration_dir(&c.slug);
+    let meta = ProfileMeta {
+        name: c.name.clone(),
+        created_at: c.created_at,
+        default_repos: c.default_repos.clone(),
+        disabled_skills: c.disabled_skills.clone(),
+    };
+    let mut json = serde_json::to_vec_pretty(&meta).expect("json");
+    json.push(b'\n');
+    write_if_changed(&dir.join(profile_files::PROFILE_FILE), &json)?;
+    write_if_changed(&dir.join(profile_files::INSTRUCTIONS_FILE), c.instructions.as_bytes())?;
+    let mcp_dir = dir.join(profile_files::MCP_DIR);
+    let keep: Vec<String> = c.mcp_servers.iter().map(|m| format!("{}.json", m.name)).collect();
+    if let Ok(rd) = std::fs::read_dir(&mcp_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_file() && !keep.contains(&name) {
+                std::fs::remove_file(e.path())
+                    .map_err(|err| Error::io(IoAction::Removing, &e.path(), err))?;
+            }
+        }
+    }
+    for m in &c.mcp_servers {
+        let mut json = serde_json::to_vec_pretty(&McpFile::of(m)).expect("json");
+        json.push(b'\n');
+        write_if_changed(&mcp_dir.join(format!("{}.json", m.name)), &json)?;
+    }
+    Ok(())
+}
+
 impl ConfigurationStore {
-    /// Load `configurations.json`; creates the `default` configuration if there is none.
-    /// Run [`crate::migrate::migrate_profiles`] first so legacy profiles become configurations.
+    /// Load `configurations.json` and the configurations' folders; creates the `default`
+    /// configuration if there is none. Older files that held the configurations whole are
+    /// moved into the folders. Run [`crate::migrate::migrate_profiles`] first so legacy
+    /// profiles become configurations.
     pub fn open(paths: &Paths) -> Result<Self> {
         let file: ConfigurationsFile = read_json(&paths.configurations_file())?.unwrap_or_default();
-        for c in &file.configurations {
-            validate_slug(&c.slug)?;
+        let mut configs = Vec::new();
+        let mut dirty = false;
+        for v in file.configurations {
+            let slug = v
+                .get("slug")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            validate_slug(&slug)?;
+            if configs.iter().any(|c: &Configuration| c.slug == slug) {
+                continue;
+            }
+            match load_profile(paths, &slug)? {
+                Some(c) => configs.push(c),
+                None => {
+                    // An older file holding the whole configuration (or a lost folder).
+                    dirty = true;
+                    let c = serde_json::from_value::<Configuration>(v)
+                        .unwrap_or_else(|_| Configuration::empty(&slug, &slug));
+                    configs.push(c);
+                }
+            }
         }
         let mut store = Self {
             paths: paths.clone(),
-            configs: file.configurations,
+            configs,
         };
-        let mut dirty = false;
         if store.configs.is_empty() {
             store.configs.push(Configuration::empty(
                 DEFAULT_CONFIGURATION,
@@ -196,7 +365,94 @@ impl ConfigurationStore {
         if dirty {
             store.save()?;
         }
+        // Folders without a history get one (their state now is the first change).
+        for c in &store.configs {
+            let dir = paths.configuration_dir(&c.slug);
+            if !dir.join(".git").exists() {
+                store_profile(paths, c)?;
+                store.commit(&c.slug, &ChangeNote::new(ChangeSource::Import, "Start history"));
+            }
+        }
         Ok(store)
+    }
+
+    /// Record the current files of configuration `slug` as one change (best effort: without
+    /// git there is no history; logged).
+    fn commit(&self, slug: &str, note: &ChangeNote) {
+        if let Err(e) = profile_history::commit(&self.paths.configuration_dir(slug), note) {
+            tracing::warn!(configuration = slug, "profile change not recorded: {e}");
+        }
+    }
+
+    /// Save configuration `slug` and record the change.
+    fn save_change(&self, slug: &str, note: &ChangeNote) -> Result<()> {
+        self.save()?;
+        self.commit(slug, note);
+        Ok(())
+    }
+
+    /// Read configuration `slug` again from its folder (after its files changed).
+    fn reload(&mut self, slug: &str) -> Result<()> {
+        let i = self.index(slug)?;
+        if let Some(c) = load_profile(&self.paths, slug)? {
+            self.configs[i] = c;
+        }
+        self.refresh(i);
+        Ok(())
+    }
+
+    /// The folder of configuration `slug` (its files; a git repository).
+    pub fn folder(&self, slug: &str) -> Result<PathBuf> {
+        self.index(slug)?;
+        Ok(self.paths.configuration_dir(slug))
+    }
+
+    /// The editable files of configuration `slug` (`profile_files.rs`).
+    pub fn files(&self, slug: &str) -> Result<Vec<profile_files::FileInfo>> {
+        Ok(profile_files::list(&self.folder(slug)?))
+    }
+
+    /// Apply edits to the files of configuration `slug` (checked against the current files;
+    /// all or nothing) and record them as one change.
+    pub fn edit_files(
+        &mut self,
+        slug: &str,
+        ops: &[profile_files::EditOp],
+        note: &ChangeNote,
+    ) -> Result<std::result::Result<Vec<profile_files::Changed>, profile_files::EditError>> {
+        let dir = self.folder(slug)?;
+        let changed = match profile_files::apply(&dir, ops) {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.reload(slug)?;
+        // A deleted skill is no longer switched off.
+        let i = self.index(slug)?;
+        let present: Vec<String> = skill::scan(&self.paths.configuration_skills_dir(slug), &[])
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let before = self.configs[i].disabled_skills.len();
+        self.configs[i].disabled_skills.retain(|n| present.contains(n));
+        if self.configs[i].disabled_skills.len() != before {
+            self.save()?;
+        }
+        self.commit(slug, note);
+        Ok(Ok(changed))
+    }
+
+    /// The last `limit` changes of configuration `slug`, newest first.
+    pub fn history(&self, slug: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+        profile_history::log(&self.folder(slug)?, limit)
+    }
+
+    /// Make configuration `slug` what it was after change `id` (recorded as a new change).
+    pub fn restore(&mut self, slug: &str, id: &str, note: &ChangeNote) -> Result<()> {
+        let dir = self.folder(slug)?;
+        profile_history::restore(&dir, id, note)?;
+        self.reload(slug)?;
+        // The slug list is unchanged; the name may be.
+        self.save()
     }
 
     /// Fill `skills` of configuration `i` from its skill folder.
@@ -265,6 +521,7 @@ impl ConfigurationStore {
         std::fs::write(&file, skill::template(&folder, description))
             .map_err(|e| Error::io(IoAction::Writing, &file, e))?;
         self.refresh(i);
+        self.commit(slug, &ChangeNote::new(ChangeSource::Ui, format!("Add skill {folder}")));
         Ok(folder)
     }
 
@@ -285,6 +542,7 @@ impl ConfigurationStore {
             return Err(e);
         }
         self.refresh(i);
+        self.commit(slug, &ChangeNote::new(ChangeSource::Ui, format!("Import skill {folder}")));
         Ok(folder)
     }
 
@@ -300,6 +558,7 @@ impl ConfigurationStore {
         std::fs::write(&file, text).map_err(|e| Error::io(IoAction::Writing, &file, e))?;
         let i = self.index(slug)?;
         self.refresh(i);
+        self.commit(slug, &ChangeNote::new(ChangeSource::Ui, format!("Edit skill {name}")));
         Ok(())
     }
 
@@ -310,7 +569,7 @@ impl ConfigurationStore {
         let i = self.index(slug)?;
         self.configs[i].disabled_skills.retain(|n| n != name);
         self.refresh(i);
-        self.save()
+        self.save_change(slug, &ChangeNote::new(ChangeSource::Ui, format!("Delete skill {name}")))
     }
 
     /// Switch skill `name` on or off for new sessions.
@@ -323,7 +582,8 @@ impl ConfigurationStore {
             off.push(name.to_owned());
         }
         self.refresh(i);
-        self.save()
+        let what = if enabled { "Switch on" } else { "Switch off" };
+        self.save_change(slug, &ChangeNote::new(ChangeSource::Ui, format!("{what} skill {name}")))
     }
 
     /// All configurations in creation order.
@@ -353,7 +613,7 @@ impl ConfigurationStore {
             n += 1;
         }
         self.configs.push(Configuration::empty(&slug, &name));
-        self.save()?;
+        self.save_change(&slug, &ChangeNote::new(ChangeSource::Ui, "Create profile"))?;
         Ok(self.configs.last().expect("just pushed"))
     }
 
@@ -361,8 +621,9 @@ impl ConfigurationStore {
     pub fn adopt(&mut self, config: Configuration) -> Result<()> {
         config.validate()?;
         if self.get(&config.slug).is_none() {
+            let slug = config.slug.clone();
             self.configs.push(config);
-            self.save()?;
+            self.save_change(&slug, &ChangeNote::new(ChangeSource::Import, "Start history"))?;
         }
         Ok(())
     }
@@ -380,8 +641,11 @@ impl ConfigurationStore {
         config.created_at = self.configs[idx].created_at;
         // Skills are managed with the `skill_*` calls (their folder is the source).
         config.disabled_skills = std::mem::take(&mut self.configs[idx].disabled_skills);
+        // One file per server: listed by name, as they are read back.
+        config.mcp_servers.sort_by(|a, b| a.name.cmp(&b.name));
+        let slug = config.slug.clone();
         self.configs[idx] = config;
-        self.save()?;
+        self.save_change(&slug, &ChangeNote::new(ChangeSource::Ui, "Edit profile"))?;
         self.refresh(idx);
         Ok(&self.configs[idx])
     }
@@ -405,15 +669,23 @@ impl ConfigurationStore {
         Ok(c)
     }
 
+    /// Write `configurations.json` (the slugs in order) and every configuration's folder.
     fn save(&self) -> Result<()> {
         #[derive(Serialize)]
+        struct Entry<'a> {
+            slug: &'a str,
+        }
+        #[derive(Serialize)]
         struct Out<'a> {
-            configurations: &'a [Configuration],
+            configurations: Vec<Entry<'a>>,
+        }
+        for c in &self.configs {
+            store_profile(&self.paths, c)?;
         }
         write_json(
             &self.paths.configurations_file(),
             &Out {
-                configurations: &self.configs,
+                configurations: self.configs.iter().map(|c| Entry { slug: &c.slug }).collect(),
             },
         )
     }
@@ -493,6 +765,88 @@ mod tests {
         store.create("other").unwrap();
         store.delete("default").unwrap();
         assert!(!paths.configuration_dir("default").exists());
+    }
+
+    #[test]
+    fn folders_edits_and_history() {
+        use crate::profile_files::{EditError, EditOp};
+        let t = TempDir::new("cfg-folders");
+        let paths = Paths::new(&t.0);
+        // An older file holding the configuration whole: moved into its folder.
+        std::fs::write(
+            paths.configurations_file(),
+            r#"{"configurations":[{"slug":"web","name":"Web","instructions":"Use pnpm.","mcp_servers":[{"name":"docs","command":"node","args":["d.js"],"env":[["K","v"]]}],"disabled_skills":["gone"],"created_at":7}]}"#,
+        )
+        .unwrap();
+        let mut store = ConfigurationStore::open(&paths).unwrap();
+        let dir = paths.configuration_dir("web");
+        assert_eq!(std::fs::read_to_string(dir.join("instructions.md")).unwrap(), "Use pnpm.");
+        assert!(dir.join("mcp/docs.json").is_file());
+        assert!(dir.join(".git").is_dir());
+        let index = std::fs::read_to_string(paths.configurations_file()).unwrap();
+        assert!(!index.contains("pnpm"), "{index}");
+        let reopened = ConfigurationStore::open(&paths).unwrap();
+        assert_eq!(reopened.list(), store.list());
+        assert_eq!(reopened.get("web").unwrap().created_at, 7);
+
+        // An agent's edit: checked, applied, read back, recorded.
+        let note = ChangeNote {
+            source: ChangeSource::Agent,
+            summary: "Pin pnpm".into(),
+            session: Some("s1".into()),
+            session_title: None,
+        };
+        let patch = |old: &str, new: &str| EditOp::Patch {
+            path: "instructions.md".into(),
+            old: old.into(),
+            new: new.into(),
+        };
+        let changed = store.edit_files("web", &[patch("pnpm", "pnpm 9")], &note).unwrap().unwrap();
+        assert_eq!(changed[0].path, "instructions.md");
+        assert_eq!(store.get("web").unwrap().instructions, "Use pnpm 9.");
+        let stale = store.edit_files("web", &[patch("Use pnpm.", "x")], &note).unwrap();
+        assert!(matches!(stale, Err(EditError::NoMatch { .. })));
+        store
+            .edit_files(
+                "web",
+                &[
+                    EditOp::Write {
+                        path: "mcp/db.json".into(),
+                        content: r#"{"command":"db"}"#.into(),
+                        rev: None,
+                    },
+                    EditOp::Write {
+                        path: "skills/pdf/SKILL.md".into(),
+                        content: skill::template("pdf", "PDFs"),
+                        rev: None,
+                    },
+                ],
+                &note,
+            )
+            .unwrap()
+            .unwrap();
+        let c = store.get("web").unwrap();
+        assert_eq!(c.mcp_servers.len(), 2);
+        assert_eq!(c.skills.len(), 1);
+        assert!(c.disabled_skills.is_empty(), "a missing skill is no longer switched off");
+
+        let log = store.history("web", 10).unwrap();
+        assert_eq!(log.len(), 3, "{log:?}");
+        assert_eq!(log[0].session.as_deref(), Some("s1"));
+        assert_eq!(log[2].source, ChangeSource::Import);
+
+        // A profiles page edit is recorded too; restore goes back to the first change.
+        let mut ui = store.get("web").unwrap().clone();
+        ui.name = "Web 2".into();
+        store.update(ui).unwrap();
+        assert_eq!(store.history("web", 10).unwrap()[0].source, ChangeSource::Ui);
+        store
+            .restore("web", &log[2].id, &ChangeNote::new(ChangeSource::Restore, "Restore"))
+            .unwrap();
+        let c = store.get("web").unwrap();
+        assert_eq!((c.name.as_str(), c.instructions.as_str()), ("Web", "Use pnpm."));
+        assert_eq!((c.mcp_servers.len(), c.skills.len()), (1, 0));
+        assert!(!dir.join("skills/pdf").exists());
     }
 
     #[test]
