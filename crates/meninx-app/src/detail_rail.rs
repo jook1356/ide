@@ -397,13 +397,13 @@ fn rail_icon<'a>(app: &App, live: &Live, k: &ItemKey) -> El<'a> {
     let icon = match k {
         ItemKey::Terminal(id) => match app.find_uterm(live, id) {
             Some(t) => crate::uterm::dot(t.info.state),
-            None => item_icon(k),
+            None => item_icon(app, live, k),
         },
         ItemKey::File(p)
         | ItemKey::Diff { path: p, .. }
         | ItemKey::Compare(p)
         | ItemKey::Commit { path: Some(p), .. } => meninx_views::icons::file_icon(file_name(p)),
-        _ => item_icon(k),
+        _ => item_icon(app, live, k),
     };
     container(icon).center(ICON_BOX).boxed()
 }

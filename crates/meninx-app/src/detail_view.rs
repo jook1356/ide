@@ -163,8 +163,12 @@ fn item_kind(key: &ItemKey) -> String {
     }
 }
 
-pub(crate) fn item_icon<'a>(key: &ItemKey) -> El<'a> {
+pub(crate) fn item_icon<'a>(app: &App, live: &Live, key: &ItemKey) -> El<'a> {
     match key {
+        // A widget's tab: the puzzle of its header and the widgets page, not the browser's globe.
+        ItemKey::Browser(id) if app.browser(live, *id).is_some_and(|b| b.widget.is_some()) => {
+            crate::icons::icon(Icon::Puzzle, 14.0, style::DIM)
+        }
         ItemKey::Web | ItemKey::Browser(_) => text(I_GLOBE).size(14).color(style::DIM).boxed(),
         ItemKey::Terminal(_) => text(">_").size(11).font(style::mono()).color(style::DIM).boxed(),
         ItemKey::File(p) => icons::file_icon(file_name(p)),
@@ -317,7 +321,7 @@ impl App {
                     title_row = title_row.push(text("●").size(10).color(style::TEXT).boxed());
                 }
                 row![
-                    item_icon(key),
+                    item_icon(self, live, key),
                     column![
                         title_row,
                         text(subtitle)
@@ -540,7 +544,7 @@ impl App {
                         );
                     }
                     let main = button(
-                        row![item_icon(k), names]
+                        row![item_icon(self, live, k), names]
                             .spacing(8)
                             .align_y(Alignment::Center),
                     )
