@@ -156,7 +156,7 @@ pub(crate) fn key_bytes(name: &str, app_cursor: bool) -> Option<Vec<u8>> {
 }
 
 /// Text as typed: line breaks become Enter (`\r`), like pressing it.
-fn text_bytes(text: &str) -> Vec<u8> {
+pub(super) fn text_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
@@ -189,7 +189,7 @@ fn render_read(head: &str, history: &[String], total: usize, screen: &[String]) 
     out
 }
 
-fn state_text(s: SessionState) -> String {
+pub(super) fn state_text(s: SessionState) -> String {
     match s {
         SessionState::Running => "running".into(),
         SessionState::Stopped => "stopped".into(),
@@ -200,7 +200,7 @@ fn state_text(s: SessionState) -> String {
 
 /// The keys of `ide_terminal_input` (`keys`: an array, or one string of names separated by
 /// blanks).
-fn key_names(v: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+pub(super) fn key_names(v: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
     match v {
         None | Some(serde_json::Value::Null) => Ok(Vec::new()),
         Some(serde_json::Value::String(s)) => Ok(s.split_whitespace().map(str::to_owned).collect()),

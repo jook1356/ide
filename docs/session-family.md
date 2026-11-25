@@ -25,7 +25,9 @@ its own worktrees branched from the parent's, and the parent merges them back.
   provider files are not written into the shared folder (`SessionContext::shared_root`): the
   guidance goes into its instructions instead.
 - The child runs the parent's agent (provider, account, configuration) unless the request
-  names others.
+  names others (`session.create_child`'s `agent`; checked like `session.create`'s: the provider,
+  its account and the configuration must exist). Merging and syncing are git only, so a child
+  with another agent merges like any other.
 
 ## Rules
 
@@ -53,7 +55,7 @@ its own worktrees branched from the parent's, and the parent merges them back.
 | Tool | Who | What |
 |---|---|---|
 | `ide_list_related_sessions` | any | parent, siblings, children: id, title, mode, activity, repos / branches |
-| `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?}`: create, start, send the first prompt |
+| `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?, agent?, account?, profile?}`: create, start, send the first prompt. `agent`: a provider id or name (default: the caller's); `account`: an account slug or name of it, `default` = the CLI's own login (default: the caller's for the same provider, else that provider's first account); `profile`: a configuration slug or name (default: the caller's) |
 | `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
 | `ide_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
 | `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); other CLIs: not supported yet |
@@ -67,7 +69,9 @@ provider's prompt input), never through tests (no prompts to real CLIs).
 
 - Session list: children under their parent (indented per level, the parent folds them with a
   count), as Desk's tree.
-- Row menu: 하위 세션 만들기 (title, 분리 / 공유, the parent's repos for 분리).
+- Row menu: 하위 세션 만들기 (title; agent, account and profile, the parent's at first, as in
+  the new-session dialog; 분리 / 공유; the parent's repos for 분리). The parent's agent is sent
+  as no `agent`.
 - Errors above appear as the usual banner.
 - **The detail area is per folder**: the sessions of one folder (a parent and its shared
   children) share one detail area — open items (files, diffs, commits), browser tabs, the web

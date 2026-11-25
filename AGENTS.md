@@ -8,14 +8,14 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
 - CEF binaries: set `CEF_PATH` to an exported CEF 156 directory
   (`cargo run -p export-cef-dir -- --force <dir>` from tauri-apps/cef-rs) and put it on `PATH`
   so `libcef.dll` loads at run time.
-- Keep `CARGO_TARGET_DIR` short (e.g. `C:/t/ide`); deep target paths overflow the Windows path limit
+- Keep `CARGO_TARGET_DIR` short (e.g. `D:/t/ide`); deep target paths overflow the Windows path limit
   in the CEF wrapper build (`cl.exe C1083`).
 - Force DX12 for CEF texture sharing: `WGPU_BACKEND=dx12`.
 - Build: **always build the app and the server together** (`ide.exe` starts `ide-server.exe` from
   its own folder): `cargo build --release -p ide-app -p ide-server` (alias `cargo app`; debug:
   `cargo app-debug`). `IDE_SERVER_BIN` points the app at another server binary.
 - Check: `cargo clippy --workspace --all-targets`, `cargo test --workspace` with
-  `IDE_TEST_TMP=<scratch dir outside any git repository>` (e.g. `C:/t/test-tmp`; server e2e tests
+  `IDE_TEST_TMP=<scratch dir outside any git repository>` (e.g. `D:/t/test-tmp`; server e2e tests
   spawn real `ide-server` daemons there). Not inside this repo: tests that need a plain, non-git
   folder (`register_unregister`, `files_e2e`, `repos_e2e`) fail when the folder is in a git work tree.
 - Run: `WGPU_BACKEND=dx12 <target>/release/ide.exe`. `IDE_DATA_DIR` overrides the data dir of the app

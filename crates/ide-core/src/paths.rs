@@ -3,7 +3,9 @@
 //! Layout (relative to the data root):
 //! ```text
 //! accounts.json
-//! configurations.json
+//! configurations.json                  (the configurations' slugs, in order)
+//! configurations/<slug>/               (one configuration: profile.json, instructions.md,
+//!                                       mcp/<name>.json, skills/; a git repository of its own)
 //! sessions.json
 //! accounts/<provider>/<slug>/          (a CLI's own config home for one login)
 //! providers/*.toml                     (declarative agent providers)

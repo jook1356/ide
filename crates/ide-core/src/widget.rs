@@ -146,8 +146,11 @@ fn read_manifest(dir: &Path) -> Result<Manifest, String> {
         return Err(format!("{MANIFEST}: the entry file `{}` does not exist", m.entry));
     }
     for t in &m.tools {
-        if !t.starts_with("ide_") {
-            return Err(format!("{MANIFEST}: `tools` lists `{t}`, not an ide tool (ide_*)"));
+        if !t.starts_with("ide_") && t != ALL && !FEATURES.contains(&t.as_str()) {
+            return Err(format!(
+                "{MANIFEST}: `tools` lists `{t}`: not an ide tool (ide_*), a feature ({}) or `*`",
+                FEATURES.join(", ")
+            ));
         }
     }
     Ok(m)
@@ -524,9 +527,122 @@ fn copy_widget(from: &Path, to: &Path, total: &mut u64) -> Result<(), WidgetErro
     Ok(())
 }
 
+// ---------------------------------------------------------------- host features, block policy
+
+/// ide features a widget page reaches directly (`window.ide.exec`, `.fs`, `.term`,
+/// `.sessions`; `widget.host`), beside the agent tools (`ide_*`). A widget lists the ones it
+/// uses in `tools` like a tool; `*` there stands for every tool and feature.
+pub const FEATURES: &[&str] = &["exec", "fs", "terminal", "sessions"];
+/// `tools` entry granting everything.
+pub const ALL: &str = "*";
+
+/// The feature a host method belongs to (`None`: no such method).
+pub fn feature_of(method: &str) -> Option<&'static str> {
+    match method {
+        "exec" => Some("exec"),
+        "fs.read" | "fs.write" | "fs.list" | "fs.stat" | "fs.delete" | "fs.mkdir" => Some("fs"),
+        "term.open" | "term.list" | "term.read" | "term.write" | "term.stop" | "term.rerun" | "term.remove" => {
+            Some("terminal")
+        }
+        "sessions.list" | "sessions.get" => Some("sessions"),
+        _ => None,
+    }
+}
+
+/// Does a widget registered with `tools` have `name` (a tool or a feature)?
+pub fn grants(tools: &[String], name: &str) -> bool {
+    tools.iter().any(|t| t == name || t == ALL)
+}
+
+/// `<data>/widgets/policy.json`: what the user blocked, whatever widgets declare (for widgets
+/// shared by others). `all`: blocked for every widget; `widgets`: per widget. Entries are tool
+/// or feature names, or `*` (everything).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    #[serde(default)]
+    pub all: Vec<String>,
+    #[serde(default)]
+    pub widgets: BTreeMap<String, Vec<String>>,
+}
+
+/// `<data>/widgets/policy.json`.
+pub fn policy_file(paths: &Paths) -> PathBuf {
+    home(paths).join("policy.json")
+}
+
+impl Policy {
+    pub fn load(paths: &Paths) -> Policy {
+        read_json(&policy_file(paths)).ok().flatten().unwrap_or_default()
+    }
+
+    pub fn save(&self, paths: &Paths) -> Result<(), WidgetError> {
+        write_json(&policy_file(paths), self).map_err(|e| WidgetError::Io(e.to_string()))
+    }
+
+    /// Is `name` (a tool or a feature) blocked for `widget`?
+    pub fn blocks(&self, widget: &str, name: &str) -> bool {
+        let hit = |l: &Vec<String>| l.iter().any(|b| b == name || b == ALL);
+        hit(&self.all) || self.widgets.get(widget).is_some_and(hit)
+    }
+
+    /// What is blocked for `widget` alone.
+    pub fn blocked(&self, widget: &str) -> Vec<String> {
+        self.widgets.get(widget).cloned().unwrap_or_default()
+    }
+
+    /// Block / unblock `name` for `widget`; true when it changed.
+    pub fn set(&mut self, widget: &str, name: &str, blocked: bool) -> bool {
+        let l = self.widgets.entry(widget.to_owned()).or_default();
+        let had = l.iter().any(|b| b == name);
+        if blocked && !had {
+            l.push(name.to_owned());
+            l.sort();
+        } else if !blocked && had {
+            l.retain(|b| b != name);
+        }
+        if l.is_empty() {
+            self.widgets.remove(widget);
+        }
+        had != blocked
+    }
+
+    /// A widget was deleted: its entries go.
+    pub fn forget(&mut self, widget: &str) -> bool {
+        self.widgets.remove(widget).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn features_and_policy() {
+        assert_eq!(feature_of("exec"), Some("exec"));
+        assert_eq!(feature_of("fs.write"), Some("fs"));
+        assert_eq!(feature_of("term.open"), Some("terminal"));
+        assert_eq!(feature_of("sessions.list"), Some("sessions"));
+        assert_eq!(feature_of("rm"), None);
+        let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(grants(&t(&["exec"]), "exec"));
+        assert!(!grants(&t(&["exec"]), "fs"));
+        assert!(grants(&t(&["*"]), "ide_session"));
+        let mut p = Policy::default();
+        assert!(!p.blocks("a", "exec"));
+        assert!(p.set("a", "exec", true));
+        assert!(!p.set("a", "exec", true));
+        assert!(p.blocks("a", "exec"));
+        assert!(!p.blocks("b", "exec"));
+        assert_eq!(p.blocked("a"), vec!["exec".to_owned()]);
+        assert!(p.set("a", "exec", false));
+        assert!(p.widgets.is_empty());
+        p.all.push("*".into());
+        assert!(p.blocks("b", "fs"));
+        let tmp = tmp("wpolicy");
+        let paths = Paths::new(tmp.0.clone());
+        p.save(&paths).unwrap();
+        assert_eq!(Policy::load(&paths), p);
+    }
 
     fn tmp(tag: &str) -> crate::paths::TempDir {
         crate::paths::TempDir::new(tag)

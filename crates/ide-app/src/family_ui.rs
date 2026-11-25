@@ -4,11 +4,13 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, button, checkbox, column, row, space, text, text_input};
+use iced::widget::{
+    Column, button, checkbox, column, pick_list, row, scrollable, space, text, text_input,
+};
 use iced::{Alignment, Element, Fill, Task, Widget as _};
 use ide_client::{MergeResult, ProtoError, RepoMerge};
 
-use crate::app::{App, Live, Message, Modal};
+use crate::app::{App, Choice, Live, Message, Modal};
 use crate::i18n::{self, tr};
 use crate::style;
 
@@ -24,6 +26,10 @@ pub const MAX_DEPTH: usize = 2;
 pub struct ChildForm {
     pub parent: String,
     pub title: String,
+    /// The child's agent: provider, account, configuration (the parent's at first).
+    pub provider: String,
+    pub account: Option<String>,
+    pub configuration: String,
     pub shared: bool,
     /// The parent's repos picked for a separate child.
     pub repos: Vec<String>,
@@ -36,6 +42,10 @@ pub enum FamilyMsg {
     /// Open the dialog for a child of this session.
     Open(String),
     Title(String),
+    Provider(String),
+    /// Account slug; empty = the CLI's default login.
+    Account(String),
+    Configuration(String),
     Shared(bool),
     Repo(String, bool),
     Submit,
@@ -126,13 +136,18 @@ impl App {
                 if !self.connected() || !self.can_have_child(&parent) {
                     return Task::none();
                 }
-                let repos = self
-                    .live(&parent)
-                    .map(|l| l.info.repos.iter().map(|r| r.repo.clone()).collect())
-                    .unwrap_or_default();
+                let Some(info) = self.live(&parent).map(|l| &l.info) else {
+                    return Task::none();
+                };
+                let repos = info.repos.iter().map(|r| r.repo.clone()).collect();
+                let (provider, account, configuration) =
+                    (info.provider.clone(), info.account.clone(), info.configuration.clone());
                 self.modal = Some(Modal::NewChild(ChildForm {
                     parent,
                     title: String::new(),
+                    provider,
+                    account,
+                    configuration,
                     shared: false,
                     repos,
                     error: None,
@@ -143,6 +158,34 @@ impl App {
             FamilyMsg::Title(t) => {
                 if let Some(Modal::NewChild(f)) = &mut self.modal {
                     f.title = t;
+                }
+                Task::none()
+            }
+            FamilyMsg::Provider(p) => {
+                // The parent's account for the parent's provider, else the provider's default.
+                let parent_account = match &self.modal {
+                    Some(Modal::NewChild(f)) => self
+                        .live(&f.parent)
+                        .filter(|l| l.info.provider == p)
+                        .map(|l| l.info.account.clone()),
+                    _ => None,
+                };
+                let account = parent_account.unwrap_or_else(|| self.default_account(&p));
+                if let Some(Modal::NewChild(f)) = &mut self.modal {
+                    f.provider = p;
+                    f.account = account;
+                }
+                Task::none()
+            }
+            FamilyMsg::Account(a) => {
+                if let Some(Modal::NewChild(f)) = &mut self.modal {
+                    f.account = (!a.is_empty()).then_some(a);
+                }
+                Task::none()
+            }
+            FamilyMsg::Configuration(v) => {
+                if let Some(Modal::NewChild(f)) = &mut self.modal {
+                    f.configuration = v;
                 }
                 Task::none()
             }
@@ -175,10 +218,24 @@ impl App {
                 f.error = None;
                 let (parent, shared, repos, title) =
                     (f.parent.clone(), f.shared, f.repos.clone(), f.title.trim().to_owned());
-                crate::script::log(&format!("new child of {parent}: shared={shared} repos={repos:?}"));
+                let agent = ide_client::ChildAgent {
+                    provider: f.provider.clone(),
+                    account: f.account.clone(),
+                    configuration: f.configuration.clone(),
+                };
+                // The parent's agent goes as `None` (the server's default).
+                let same = self.live(&parent).is_some_and(|l| {
+                    l.info.provider == agent.provider
+                        && l.info.account == agent.account
+                        && l.info.configuration == agent.configuration
+                });
+                let agent = (!same).then_some(agent);
+                crate::script::log(&format!(
+                    "new child of {parent}: shared={shared} repos={repos:?} agent={agent:?}"
+                ));
                 Task::perform(
                     async move {
-                        c.create_child_session(&parent, shared, repos, &title, true, 0, 0)
+                        c.create_child_session(&parent, shared, repos, &title, agent, true, 0, 0)
                             .await
                     },
                     |r| fm(FamilyMsg::Created(Box::new(r))),
@@ -257,7 +314,6 @@ impl App {
         let ptitle = parent.map(|l| l.info.title.as_str()).unwrap_or("?");
         let mut c = Column::<El<'a>>::new()
             .spacing(10)
-            .push(text(tr::child_dialog_title(ptitle)).size(18).font(style::bold()).boxed())
             .push(
                 column![
                     text(tr::session_name_label()).size(12).font(style::bold()),
@@ -270,7 +326,8 @@ impl App {
                 ]
                 .spacing(4)
                 .boxed(),
-            );
+            )
+            .push(self.child_agent_fields(f));
         let choice = |shared: bool, label: String, hint: String| -> El<'a> {
             let on = f.shared == shared;
             button(
@@ -310,6 +367,13 @@ impl App {
                 );
             }
         }
+        // The title and the buttons stay put; the fields between them scroll when the dialog
+        // would be taller than the window.
+        let mut c = column![
+            text(tr::child_dialog_title(ptitle)).size(18).font(style::bold()),
+            scrollable(c).height(crate::view::fit_up_to_room()).spacing(6),
+        ]
+        .spacing(10);
         if let Some(e) = &f.error {
             c = c.push(crate::view::error_box(e));
         }
@@ -331,6 +395,70 @@ impl App {
             .boxed(),
         );
         c.width(520).boxed()
+    }
+
+    /// The child's agent, account (providers with accounts) and configuration, as in the new
+    /// session dialog.
+    fn child_agent_fields<'a>(&'a self, f: &'a ChildForm) -> El<'a> {
+        use crate::view::label;
+        let providers = self
+            .providers
+            .iter()
+            // The parent's provider stays listed even when it is no longer detected.
+            .filter(|p| p.detection.usable || p.id == f.provider)
+            .fold(row![].spacing(6), |r, p| {
+                let (g, col) = crate::view::provider_glyph(self, &p.id);
+                r.push(
+                    button(
+                        row![text(g).color(col).size(13), text(p.name.as_str()).size(13)]
+                            .spacing(6),
+                    )
+                    .padding([5, 12])
+                    .style(style::choice(f.provider == p.id))
+                    .on_press(fm(FamilyMsg::Provider(p.id.clone())))
+                    .boxed(),
+                )
+            });
+        let mut c = column![label(tr::agent_label()), providers].spacing(8);
+        if self.provider(&f.provider).is_some_and(|p| p.caps.accounts) {
+            let accounts: Vec<Choice> = std::iter::once(Choice {
+                key: String::new(),
+                label: tr::account_default(),
+            })
+            .chain(
+                self.accounts
+                    .iter()
+                    .filter(|a| a.provider == f.provider)
+                    .map(|a| Choice {
+                        key: a.slug.clone(),
+                        label: a.name.clone(),
+                    }),
+            )
+            .collect();
+            let key = f.account.clone().unwrap_or_default();
+            let sel = accounts.iter().find(|c| c.key == key).cloned();
+            c = c.push(label(tr::account_label())).push(
+                pick_list(sel, accounts, |c: &Choice| c.label.clone())
+                    .on_select(|c: Choice| fm(FamilyMsg::Account(c.key)))
+                    .text_size(13)
+                    .padding([5, 8])
+                    .width(Fill)
+                    .boxed(),
+            );
+        }
+        let configs = self.config_choices();
+        let sel = configs.iter().find(|c| c.key == f.configuration).cloned();
+        c.push(label(tr::configuration_label()))
+            .push(
+                pick_list(sel, configs, |c: &Choice| c.label.clone())
+                    .on_select(|c: Choice| fm(FamilyMsg::Configuration(c.key)))
+                    .text_size(13)
+                    .padding([5, 8])
+                    .width(Fill)
+                    .boxed(),
+            )
+            .push(text(tr::child_agent_hint()).size(11).color(style::DIM).boxed())
+            .boxed()
     }
 }
 

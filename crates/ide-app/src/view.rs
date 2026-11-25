@@ -55,7 +55,7 @@ pub fn provider_glyph(app: &App, id: &str) -> (String, Color) {
 /// As wide as the content, but never more than the room a row leaves after its fixed-size
 /// siblings (iced's `Length::Fluid(Constraint::Max)`; `iced::length` is not re-exported, and
 /// stacking `Fit` onto a max-bounded `Fill` yields exactly that length).
-fn fit_up_to_room() -> Length {
+pub(crate) fn fit_up_to_room() -> Length {
     Length::Fit.stack(Length::Fill.max(f32::INFINITY))
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn icon_button<'a>(glyph: &'a str, msg: Option<Message>, label: Strin
     tip(b.boxed(), label)
 }
 
-fn label<'a>(s: String) -> El<'a> {
+pub(crate) fn label<'a>(s: String) -> El<'a> {
     text(s).size(11).color(style::DIM).boxed()
 }
 
@@ -369,7 +369,7 @@ impl App {
             return (icon, label);
         }
         let open = self.ui.sessions_open;
-        let icon = match (self.rail_hover, open) {
+        let icon = match (self.rail_hover == Some(page), open) {
             (false, _) => icon,
             (true, true) => Icon::SidebarCollapse,
             (true, false) => Icon::SidebarExpand,
@@ -449,8 +449,8 @@ impl App {
             let mut b: El<'static> = link(icon, self.ui.page == page, Message::Page(page)).boxed();
             if matches!(page, Page::Work | Page::Configurations | Page::Repos | Page::Widgets) {
                 b = mouse_area(b)
-                    .on_enter(Message::RailHover(true))
-                    .on_exit(Message::RailHover(false))
+                    .on_enter(Message::RailHover(page, true))
+                    .on_exit(Message::RailHover(page, false))
                     .boxed();
             }
             // The active page also gets an accent bar on the rail's left edge, 11 px in from the
@@ -2604,7 +2604,7 @@ impl App {
     // ------------------------------------------------------------------ modals
 
     /// Configurations as pick-list entries.
-    fn config_choices(&self) -> Vec<Choice> {
+    pub(crate) fn config_choices(&self) -> Vec<Choice> {
         self.configs
             .iter()
             .map(|c| Choice {

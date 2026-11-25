@@ -47,6 +47,8 @@ pub mod migrate;
 pub mod ops;
 pub mod paths;
 pub mod preview;
+pub mod profile_files;
+pub mod profile_history;
 pub mod prompts;
 pub mod registry;
 pub mod repo;
@@ -77,6 +79,7 @@ pub use workspace::{
     create_session, detach_repo, is_managed_path, migrate_workspaces, pin_session_bases,
     remove_session_files, session_guidance, set_session_base, write_pending_marker,
 };
+pub use profile_history::{ChangeNote, ChangeSource, HistoryEntry};
 pub use paths::{DATA_DIR_ENV, Paths, TempDir, ensure_dir, now_unix, read_json, write_json};
 pub use repo::{GitOutput, Repo, git_raw, same_path};
 pub use session::{

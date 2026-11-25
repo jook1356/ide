@@ -125,18 +125,18 @@ async fn families() {
 
     // A separate child: only the parent's repos; its worktree starts at the parent's branch.
     let e = c
-        .create_child_session(&p.id, false, vec![id2.clone()], "", false, 80, 24)
+        .create_child_session(&p.id, false, vec![id2.clone()], "", None, false, 80, 24)
         .await
         .unwrap_err();
     assert_eq!(e.id, "repo-not-in-parent");
-    let (a, f) = c.create_child_session(&p.id, false, Vec::new(), "A", false, 80, 24).await.unwrap();
+    let (a, f) = c.create_child_session(&p.id, false, Vec::new(), "A", None, false, 80, 24).await.unwrap();
     assert!(f.is_empty());
     assert_eq!((a.parent.as_deref(), a.shared), (Some(p.id.as_str()), false));
     assert_eq!(a.repos[0].base, p.repos[0].branch);
     let aw = PathBuf::from(&a.repos[0].path);
     assert!(aw.join("p.txt").is_file() && aw != pw);
     // A shared child: the parent's folder and worktrees.
-    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", true, 80, 24).await.unwrap();
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", None, true, 80, 24).await.unwrap();
     assert_eq!((s.root.as_str(), s.repos[0].path.as_str()), (p.root.as_str(), p.repos[0].path.as_str()));
 
     // Rules.
@@ -155,9 +155,9 @@ async fn families() {
     assert_eq!(a2.repos.iter().find(|r| r.repo == id2).unwrap().base, p_r2.branch);
 
     // Depth: P -> A -> G; no deeper.
-    let (g, _) = c.create_child_session(&a.id, false, Vec::new(), "G", false, 80, 24).await.unwrap();
+    let (g, _) = c.create_child_session(&a.id, false, Vec::new(), "G", None, false, 80, 24).await.unwrap();
     assert_eq!(
-        c.create_child_session(&g.id, false, Vec::new(), "", false, 80, 24).await.unwrap_err().id,
+        c.create_child_session(&g.id, false, Vec::new(), "", None, false, 80, 24).await.unwrap_err().id,
         "family-too-deep"
     );
 
@@ -288,7 +288,7 @@ async fn send_modes_and_approvals() {
     let c = Client::connect(memory(&server), opts()).await.unwrap();
     let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
     let (p, _) = c.create_session(shell_session(vec![id1.clone()], true)).await.unwrap();
-    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", true, 80, 24).await.unwrap();
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", None, true, 80, 24).await.unwrap();
     let ctx = server.authorize(server.user()).unwrap();
     let (mux, mut rx) = agent(&server, &p.id).await;
 
@@ -398,6 +398,59 @@ async fn send_modes_and_approvals() {
     c.delete_session(&s.id, true).await.unwrap();
     assert!(c.approval_list().await.unwrap().is_empty());
     assert!(!std::fs::read_to_string(dir.join("data").join("approvals.json")).unwrap().contains("session.interrupt"));
+    c.delete_session(&p.id, true).await.unwrap();
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A child with another agent than its parent's: through the app's request and the bridge tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn child_with_another_agent() {
+    let dir = tmp_dir("family-agent");
+    let r1 = dir.join("r1");
+    init_repo(&r1);
+    let server = bridged(&dir.join("data"));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
+    let (p, _) = c.create_session(shell_session(vec![id1.clone()], false)).await.unwrap();
+    let review = c.create_configuration("Review").await.unwrap();
+    assert_ne!(review.slug, p.configuration);
+
+    // `None`: the parent's agent.
+    let (same, _) = c.create_child_session(&p.id, true, Vec::new(), "same", None, false, 80, 24).await.unwrap();
+    assert_eq!((same.provider.as_str(), same.configuration.as_str()), ("shell", p.configuration.as_str()));
+    // Another configuration.
+    let other = ide_client::ChildAgent {
+        provider: "shell".into(),
+        account: None,
+        configuration: review.slug.clone(),
+    };
+    let (o, _) = c.create_child_session(&p.id, true, Vec::new(), "other", Some(other), false, 80, 24).await.unwrap();
+    assert_eq!(o.configuration, review.slug);
+    // Unknown agents and configurations are refused.
+    let bad = |provider: &str, configuration: &str| ide_client::ChildAgent {
+        provider: provider.into(),
+        account: None,
+        configuration: configuration.into(),
+    };
+    let e = c.create_child_session(&p.id, true, Vec::new(), "", Some(bad("nope", "default")), false, 80, 24).await.unwrap_err();
+    assert_eq!(e.id, "provider-not-found");
+    let e = c.create_child_session(&p.id, true, Vec::new(), "", Some(bad("shell", "nope")), false, 80, 24).await.unwrap_err();
+    assert_ne!(e.id, "", "{e:?}");
+
+    // The bridge tool: `agent` / `profile` by id or name.
+    let (mux, mut rx) = agent(&server, &p.id).await;
+    let (bad_call, v) = tool(&mux, &mut rx, 10, "ide_create_child_session", serde_json::json!({"shared": true, "profile": "review"})).await;
+    assert!(!bad_call, "{v}");
+    assert_eq!((v["agent"].as_str(), v["profile"].as_str()), (Some("shell"), Some(review.slug.as_str())));
+    let (bad_call, v) = tool(&mux, &mut rx, 11, "ide_create_child_session", serde_json::json!({"shared": true, "agent": "nope"})).await;
+    assert!(bad_call && v.as_str().unwrap().contains("no agent"), "{v}");
+    let (bad_call, v) = tool(&mux, &mut rx, 12, "ide_create_child_session", serde_json::json!({"shared": true, "profile": "nope"})).await;
+    assert!(bad_call && v.as_str().unwrap().contains("no profile"), "{v}");
+
+    for s in c.sessions().await.unwrap().iter().filter(|s| s.parent.as_deref() == Some(p.id.as_str())) {
+        c.delete_session(&s.id, true).await.unwrap();
+    }
     c.delete_session(&p.id, true).await.unwrap();
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
