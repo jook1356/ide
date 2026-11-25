@@ -58,7 +58,7 @@ its own worktrees branched from the parent's, and the parent merges them back.
 | `ide_create_child_session` | depth allows | `{title?, shared?, repos?, prompt?, agent?, account?, profile?}`: create, start, send the first prompt. `agent`: a provider id or name (default: the caller's); `account`: an account slug or name of it, `default` = the CLI's own login (default: the caller's for the same provider, else that provider's first account); `profile`: a configuration slug or name (default: the caller's) |
 | `ide_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
 | `ide_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
-| `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); other CLIs: not supported yet |
+| `ide_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); Codex: `<CODEX_HOME>/sessions/**/rollout-*-<thread>.jsonl` (`response_item` records; Codex's own context and reasoning left out; a start placeholder is resolved as a resume does); other CLIs: not supported yet |
 | `ide_merge_child` | parent | `{child, squash?}` -> per repo result |
 | `ide_sync_from_parent` | separate child | per repo result |
 
@@ -132,6 +132,3 @@ owner, i.e. the parent, by default; `SessionInfo.writer`, ✎ in the list).
 
 A parent (or any agent session) can hand its conversation off to a new one without
 changing the family: `docs/session-handoff.md`.
-
-## Later
-- Reading Codex conversations (`CODEX_HOME/sessions/.../rollout-*.jsonl`, once its conversation id is recorded).

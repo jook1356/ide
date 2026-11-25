@@ -337,11 +337,14 @@ pub trait AgentProvider: Send + Sync {
     }
 
     /// The last `limit` entries of the stored conversation `id` (`ide_read_session`,
-    /// `docs/session-family.md`). `None`: this CLI's transcripts cannot be read. Default: `None`.
+    /// `docs/session-family.md`). `cwd`: the session's folder (a CLI that stores a placeholder
+    /// id finds the conversation by it). `None`: this CLI's transcripts cannot be read.
+    /// Default: `None`.
     fn transcript(
         &self,
         _acct: Option<&AccountDir>,
         _id: &str,
+        _cwd: &Path,
         _limit: usize,
     ) -> Option<std::result::Result<Vec<TranscriptEntry>, String>> {
         None
@@ -360,6 +363,7 @@ pub trait AgentProvider: Send + Sync {
         &self,
         _acct: Option<&AccountDir>,
         _id: &str,
+        _cwd: &Path,
     ) -> Option<std::result::Result<HandoffTranscript, String>> {
         None
     }

@@ -14,6 +14,7 @@
 //! | Instructions | `-c developer_instructions="..."` (added as a developer message; `model_instructions_file` would replace the built-in instructions) |
 //! | Hooks | account integration (user-installed): ide's entries in `CODEX_HOME/hooks.json`, approved once in Codex with `/hooks` (d) |
 //! | Windows sandbox | account integration also runs `codex sandbox setup --elevated --current-user` once per Codex home (UAC; it writes `[windows] sandbox = "elevated"` and `.sandbox/setup_marker.json`, v 0.172.0): without it Codex is read-only and refuses `--add-dir` |
+//! | Transcripts | `ide_read_session` and session handoffs read the thread's rollout (`response_item` records; Codex's own context, developer messages and reasoning left out); a handoff starts at the last `compacted` record (its `replacement_history`, else its summary). A start placeholder resolves to the rollout as a resume does; `.jsonl.zst` is not read (v 0.160.1 rollouts) |
 //! | Resume | Codex picks its own id: a fresh start stores the placeholder `started:<unix ms>`; the `SessionStart` hook's `session_id` (with the integration) replaces it. Next start: `codex resume <uuid> ...` (the subcommand first; it takes every option used here, v 0.172.0) when `<CODEX_HOME>/sessions/**/rollout-*-<uuid>.jsonl[.zst]` exists; a placeholder resolves to the earliest rollout of the same cwd written since that start. Codex writes the rollout with the first prompt: an untouched session starts fresh |
 
 use ide_core::{McpServer, Result};
@@ -478,6 +479,38 @@ impl AgentProvider for Codex {
         Some(format!("{STARTED}{}", now_ms()))
     }
 
+    fn transcript(
+        &self,
+        acct: Option<&AccountDir>,
+        id: &str,
+        cwd: &std::path::Path,
+        limit: usize,
+    ) -> Option<std::result::Result<Vec<crate::TranscriptEntry>, String>> {
+        use crate::claude::{TEXT_MAX, TOOL_MAX};
+        Some(read_rollout(acct, id, cwd).map(|text| {
+            let (mut out, _) = parse_rollout(&text, TEXT_MAX, TOOL_MAX, false);
+            let skip = out.len().saturating_sub(limit);
+            out.split_off(skip)
+        }))
+    }
+
+    fn reads_transcripts(&self) -> bool {
+        true
+    }
+
+    fn handoff_transcript(
+        &self,
+        acct: Option<&AccountDir>,
+        id: &str,
+        cwd: &std::path::Path,
+    ) -> Option<std::result::Result<crate::HandoffTranscript, String>> {
+        Some(read_rollout(acct, id, cwd).map(|text| {
+            let (entries, compacted) =
+                parse_rollout(&text, usize::MAX, crate::claude::HANDOFF_TOOL_MAX, true);
+            crate::HandoffTranscript { entries, compacted }
+        }))
+    }
+
     fn resume_conversation(
         &self,
         plan: &mut LaunchPlan,
@@ -632,6 +665,169 @@ fn started_rollout(sessions: &std::path::Path, cwd: &std::path::Path, since_ms: 
         }
     }
     found.map(|(_, id)| id)
+}
+
+// ---------------------------------------------------------------- conversations (rollouts)
+
+/// The text of conversation `id`'s rollout: a thread id, or a placeholder (`started:<ms>`,
+/// no `SessionStart` hook yet) resolved by the session's `cwd` as a resume does.
+fn read_rollout(
+    acct: Option<&AccountDir>,
+    id: &str,
+    cwd: &std::path::Path,
+) -> std::result::Result<String, String> {
+    let sessions = codex_home(acct).ok_or("no Codex home folder")?.join("sessions");
+    let thread = match id.strip_prefix(STARTED) {
+        Some(ms) => {
+            let ms = ms.parse().map_err(|_| format!("`{id}` is not a Codex conversation id"))?;
+            started_rollout(&sessions, cwd, ms)
+                .ok_or("Codex kept no rollout of it yet (it writes one with the first prompt)")?
+        }
+        None if crate::claude::is_session_id(id) => id.to_owned(),
+        None => return Err(format!("`{id}` is not a Codex conversation id")),
+    };
+    let (plain, packed) = (format!("-{thread}.jsonl"), format!("-{thread}.jsonl.zst"));
+    let files = rollouts(&sessions);
+    let name = |p: &std::path::PathBuf| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    if let Some(p) = files.iter().find(|p| name(p).ends_with(&plain)) {
+        return std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+    }
+    if files.iter().any(|p| name(p).ends_with(&packed)) {
+        return Err("its rollout is compressed (.jsonl.zst): ide cannot read it".into());
+    }
+    Err("Codex kept no rollout of it".into())
+}
+
+/// A user message Codex adds itself (`AGENTS.md` instructions, `<environment_context>` and
+/// other tagged context), not typed by anyone.
+fn contextual(text: &str) -> bool {
+    let t = text.trim();
+    if t.starts_with("# AGENTS.md instructions") {
+        return true;
+    }
+    let Some(rest) = t.strip_prefix('<') else {
+        return false;
+    };
+    let tag: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
+        .collect();
+    !tag.is_empty() && t.ends_with(&format!("</{tag}>"))
+}
+
+/// The text of a message's `content` / a tool output: a string, text items, or an object
+/// with `content`.
+fn item_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(o) => o.get("content").map(item_text).unwrap_or_default(),
+        other => crate::claude::result_text(other),
+    }
+}
+
+/// The entries of one `response_item` payload: user and assistant messages (Codex's own
+/// context, developer and system messages left out), tool calls and their outputs;
+/// reasoning and other items are left out.
+fn item_entries(
+    p: &serde_json::Value,
+    at: &str,
+    (text_max, tool_max): (usize, usize),
+    out: &mut Vec<crate::TranscriptEntry>,
+) {
+    use crate::claude::shorten;
+    let mut push = |role: &str, text: String| {
+        if !text.trim().is_empty() {
+            out.push(crate::TranscriptEntry {
+                role: role.to_owned(),
+                text,
+                at: at.to_owned(),
+            });
+        }
+    };
+    let s = |k: &str| p[k].as_str().unwrap_or("").to_owned();
+    match p["type"].as_str().unwrap_or("") {
+        "message" => {
+            let text = item_text(&p["content"]);
+            match p["role"].as_str().unwrap_or("") {
+                "user" if !contextual(&text) => push("user", shorten(&text, text_max)),
+                "assistant" => push("assistant", shorten(&text, text_max)),
+                _ => {}
+            }
+        }
+        "function_call" => push(
+            "tool",
+            format!("call {} {}", s("name"), shorten(&s("arguments"), tool_max)),
+        ),
+        "custom_tool_call" => push(
+            "tool",
+            format!("call {} {}", s("name"), shorten(&s("input"), tool_max)),
+        ),
+        "local_shell_call" => {
+            let cmd: Vec<&str> = p["action"]["command"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            push("tool", format!("call shell {}", shorten(&cmd.join(" "), tool_max)));
+        }
+        "web_search_call" => {
+            let q = p["action"]["query"].as_str().unwrap_or("");
+            push("tool", format!("call web_search {}", shorten(q, tool_max)));
+        }
+        "function_call_output" | "custom_tool_call_output" => push(
+            "tool",
+            format!("result: {}", shorten(&item_text(&p["output"]), tool_max)),
+        ),
+        _ => {}
+    }
+}
+
+/// A rollout (JSONL: `{"timestamp", "type", "payload"}` per line; `response_item` lines are
+/// the conversation, `event_msg` lines repeat it for the UI) as entries. `since_compact`:
+/// start at the last compaction (`{"type":"compacted","payload":{"message",
+/// "replacement_history"?}}`): its replacement history (what the model kept) or, without
+/// one, its summary, then everything after it; else the whole rollout with each compaction's
+/// summary in place. `bool`: a compaction was found (`since_compact` only).
+pub(crate) fn parse_rollout(
+    jsonl: &str,
+    text_max: usize,
+    tool_max: usize,
+    since_compact: bool,
+) -> (Vec<crate::TranscriptEntry>, bool) {
+    let lines: Vec<serde_json::Value> = jsonl
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let last = since_compact
+        .then(|| lines.iter().rposition(|v| v["type"] == "compacted"))
+        .flatten();
+    let max = (text_max, tool_max);
+    let mut out = Vec::new();
+    let summary = |c: &serde_json::Value, at: &str, out: &mut Vec<crate::TranscriptEntry>| {
+        let m = c["message"].as_str().unwrap_or("").trim();
+        if !m.is_empty() {
+            out.push(crate::TranscriptEntry {
+                role: "user".into(),
+                text: crate::claude::shorten(&format!("[conversation compacted; summary]\n{m}"), text_max),
+                at: at.to_owned(),
+            });
+        }
+    };
+    if let Some(i) = last {
+        let c = &lines[i]["payload"];
+        let at = lines[i]["timestamp"].as_str().unwrap_or("");
+        match c["replacement_history"].as_array() {
+            Some(items) => items.iter().for_each(|it| item_entries(it, at, max, &mut out)),
+            None => summary(c, at, &mut out),
+        }
+    }
+    for v in &lines[last.map_or(0, |i| i + 1)..] {
+        let at = v["timestamp"].as_str().unwrap_or("");
+        match v["type"].as_str().unwrap_or("") {
+            "response_item" => item_entries(&v["payload"], at, max, &mut out),
+            "compacted" => summary(&v["payload"], at, &mut out),
+            _ => {}
+        }
+    }
+    (out, last.is_some())
 }
 
 // ---------------------------------------------------------------- hooks (account integration)

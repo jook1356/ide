@@ -140,10 +140,10 @@ pub(crate) fn transcript_title(text: &str) -> Option<String> {
 }
 
 /// Longest text of one entry, and of a tool call / result.
-const TEXT_MAX: usize = 4000;
-const TOOL_MAX: usize = 300;
+pub(crate) const TEXT_MAX: usize = 4000;
+pub(crate) const TOOL_MAX: usize = 300;
 
-fn shorten(s: &str, max: usize) -> String {
+pub(crate) fn shorten(s: &str, max: usize) -> String {
     let s = s.trim();
     if s.chars().count() <= max {
         return s.to_owned();
@@ -154,7 +154,7 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// The text of a `tool_result`'s `content` (a string or text blocks).
-fn result_text(c: &serde_json::Value) -> String {
+pub(crate) fn result_text(c: &serde_json::Value) -> String {
     match c {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(a) => a
@@ -176,7 +176,7 @@ pub(crate) fn parse_transcript(jsonl: &str, limit: usize) -> Vec<crate::Transcri
 }
 
 /// Longest tool call / result in a handoff export (texts are kept whole).
-const HANDOFF_TOOL_MAX: usize = 1000;
+pub(crate) const HANDOFF_TOOL_MAX: usize = 1000;
 
 /// The transcript for a session handoff (`docs/session-handoff.md`): from the last compaction
 /// on (`{"type":"system","subtype":"compact_boundary"}`, followed by the summary as a user
@@ -396,6 +396,7 @@ impl AgentProvider for Claude {
         &self,
         acct: Option<&AccountDir>,
         id: &str,
+        _cwd: &std::path::Path,
         limit: usize,
     ) -> Option<std::result::Result<Vec<crate::TranscriptEntry>, String>> {
         Some((|| {
@@ -417,6 +418,7 @@ impl AgentProvider for Claude {
         &self,
         acct: Option<&AccountDir>,
         id: &str,
+        _cwd: &std::path::Path,
     ) -> Option<std::result::Result<crate::HandoffTranscript, String>> {
         Some((|| {
             if !is_session_id(id) {

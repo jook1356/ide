@@ -41,7 +41,7 @@ does not fall back: the session is left as it was (old conversation still runnin
 error is reported.
 
 `Summarize` / `Transcript` need the old provider's transcript
-(`AgentProvider::handoff_transcript`, Claude Code only for now): otherwise
+(`AgentProvider::handoff_transcript`: Claude Code and Codex): otherwise
 `handoff-no-transcript`.
 
 ### Compaction (컴팩트된 대화)
@@ -55,6 +55,18 @@ itself still had in its context. Earlier records are left out (the summary cover
 no boundary the whole transcript is exported. Subagent (`isSidechain`) and meta records are
 left out, as in `ide_read_session`; texts are kept whole, tool calls and results shortened
 (`HANDOFF_TOOL_MAX`).
+
+Codex keeps one rollout per thread (`<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`)
+and records a compaction as `{"type":"compacted","payload":{"message","replacement_history"?}}`:
+the replacement history is what the model kept (the user's earlier messages and the summary),
+and later records continue after it. The export starts at the last such record: its
+replacement history, or its `message` (the summary) when it has none, then everything after
+it. Only `response_item` records are read (`event_msg` repeats them for the UI); Codex's own
+context (`AGENTS.md` instructions, `<environment_context>` and other tagged user messages,
+developer messages) and reasoning are left out. A session that only has the start placeholder
+(`started:<ms>`, no `SessionStart` hook) finds its rollout as a resume does (the earliest
+rollout of the session folder since the start). A compressed rollout (`.jsonl.zst`) is not
+read (`handoff-transcript-failed`); the rollout of a live thread is plain JSONL.
 
 ## Agent change
 

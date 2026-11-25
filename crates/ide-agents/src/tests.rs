@@ -1356,12 +1356,104 @@ fn claude_transcripts() {
         dir: t.0.clone(),
         created_at: 0,
     };
-    let r = Claude.transcript(Some(&acct), id, 10).unwrap().unwrap();
+    let r = Claude.transcript(Some(&acct), id, Path::new("."), 10).unwrap().unwrap();
     assert_eq!(r.len(), 5);
-    assert!(Claude.transcript(Some(&acct), "nope", 10).unwrap().is_err());
-    assert!(Shell.transcript(None, id, 10).is_none());
+    assert!(Claude.transcript(Some(&acct), "nope", Path::new("."), 10).unwrap().is_err());
+    assert!(Shell.transcript(None, id, Path::new("."), 10).is_none());
     assert_eq!(Claude.interrupt_keys(), Some(&b"\x1b"[..]));
     assert!(Claude.steers() && !Shell.steers());
+}
+
+/// Codex's rollouts (v 0.160 records): user / assistant messages without Codex's own context,
+/// tool calls and outputs, compactions; read by thread id or a placeholder.
+#[test]
+fn codex_transcripts() {
+    use crate::codex::parse_rollout;
+    let lines = [
+        r#"{"timestamp":"t0","type":"session_meta","payload":{"id":"x","cwd":"C:\\w"}}"#,
+        r#"{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>p</permissions instructions>"}]}}"#,
+        r##"{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for C:\\w\n\n<INSTRUCTIONS>x</INSTRUCTIONS>"}]}}"##,
+        r#"{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\w</cwd>\n</environment_context>"}]}}"#,
+        r#"{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]}}"#,
+        r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"user_message","message":"fix the bug"}}"#,
+        r#"{"timestamp":"t3","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"x"}}"#,
+        r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Looking."}],"phase":"commentary"}}"#,
+        r#"{"timestamp":"t4","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\"]}","call_id":"c1"}}"#,
+        r#"{"timestamp":"t4","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"a.rs"}}"#,
+        r#"{"timestamp":"t5","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(1)","call_id":"c2"}}"#,
+        r#"{"timestamp":"t5","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":[{"type":"input_text","text":"done"}]}}"#,
+        r#"{"timestamp":"t6","type":"compacted","payload":{"message":"S1","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>e</environment_context>"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Summary: half done"}]}]}}"#,
+        r#"{"timestamp":"t7","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}}"#,
+        r#"{"timestamp":"t8","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}"#,
+        "not json",
+    ]
+    .join("\n");
+    let got = |e: &[TranscriptEntry]| e.iter().map(|e| (e.role.clone(), e.text.clone())).collect::<Vec<_>>();
+    let pair = |r: &str, t: &str| (r.to_owned(), t.to_owned());
+    let (all, compacted) = parse_rollout(&lines, 4000, 300, false);
+    assert!(!compacted);
+    assert_eq!(
+        got(&all),
+        [
+            pair("user", "fix the bug"),
+            pair("assistant", "Looking."),
+            pair("tool", r#"call shell {"command":["ls"]}"#),
+            pair("tool", "result: a.rs"),
+            pair("tool", "call exec text(1)"),
+            pair("tool", "result: done"),
+            pair("user", "[conversation compacted; summary]\nS1"),
+            pair("user", "go on"),
+            pair("assistant", "Done."),
+        ]
+    );
+    assert_eq!(all[0].at, "t2");
+    // From the last compaction: what the model kept, then what followed.
+    let (tail, compacted) = parse_rollout(&lines, usize::MAX, 1000, true);
+    assert!(compacted);
+    assert_eq!(
+        got(&tail),
+        [pair("user", "fix the bug"), pair("user", "Summary: half done"), pair("user", "go on"), pair("assistant", "Done.")]
+    );
+    // A compaction without its replacement history: its summary.
+    let old = r#"{"timestamp":"t1","type":"compacted","payload":{"message":"S0"}}"#;
+    assert_eq!(got(&parse_rollout(old, 4000, 300, true).0), [pair("user", "[conversation compacted; summary]\nS0")]);
+
+    // Read from the account's sessions folder, by thread id or by the start placeholder.
+    let t = TempDir::new("codex-transcript");
+    let id = "01a10fb8-3fd2-7951-9c38-d8a5f4fdefaa";
+    let cwd = t.0.join("w");
+    let day = t.0.join("sessions").join("2026").join("11").join("25");
+    std::fs::create_dir_all(&day).unwrap();
+    let meta = format!(
+        r#"{{"timestamp":"t0","type":"session_meta","payload":{{"id":"{id}","cwd":{}}}}}"#,
+        serde_json::Value::String(cwd.display().to_string())
+    );
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        - 2000;
+    std::fs::write(day.join(format!("rollout-2026-11-25T10-00-00-{id}.jsonl")), format!("{meta}\n{lines}")).unwrap();
+    let acct = Account {
+        provider: "codex".into(),
+        slug: "a".into(),
+        name: "a".into(),
+        dir: t.0.clone(),
+        created_at: 0,
+    };
+    let codex = crate::codex::Codex;
+    assert!(codex.reads_transcripts());
+    let r = codex.transcript(Some(&acct), id, &cwd, 2).unwrap().unwrap();
+    assert_eq!(got(&r), [pair("user", "go on"), pair("assistant", "Done.")]);
+    let placeholder = format!("started:{since}");
+    let h = codex.handoff_transcript(Some(&acct), &placeholder, &cwd).unwrap().unwrap();
+    assert!(h.compacted && h.entries.len() == 4);
+    assert!(codex.transcript(Some(&acct), &placeholder, &t.0.join("other"), 5).unwrap().is_err());
+    let missing = "01a10fb8-3fd2-7951-9c38-d8a5f4fdefab";
+    std::fs::write(day.join(format!("rollout-2026-11-25T10-00-00-{missing}.jsonl.zst")), b"x").unwrap();
+    let e = codex.transcript(Some(&acct), missing, &cwd, 5).unwrap().unwrap_err();
+    assert!(e.contains("compressed"), "{e}");
+    assert!(codex.transcript(Some(&acct), "nope", &cwd, 5).unwrap().is_err());
 }
 
 #[test]

@@ -317,7 +317,7 @@ impl UserCtx {
                 .ok()
                 .cloned()
         });
-        let t = match p.handoff_transcript(account.as_ref(), &conversation) {
+        let t = match p.handoff_transcript(account.as_ref(), &conversation, &s.root) {
             None => {
                 return Err(
                     ProtoError::new("handoff-no-transcript").arg("provider", p.display_name())

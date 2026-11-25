@@ -776,7 +776,7 @@ impl UserCtx {
                         .ok()
                         .cloned()
                 });
-                match provider.transcript(account.as_ref(), &conversation, limit) {
+                match provider.transcript(account.as_ref(), &conversation, &target.root, limit) {
                     None => err(format!(
                         "ide cannot read {}'s conversations",
                         provider.display_name()
