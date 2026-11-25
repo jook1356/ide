@@ -667,7 +667,7 @@ impl App {
                     .style(style::bg(if active {
                         style::ACCENT
                     } else {
-                        style::HEADER
+                        style::SIDEBAR
                     })),
             ]
             .width(Fill)
@@ -694,7 +694,8 @@ impl App {
             ),
             tab(SideTab::Explore, tr::side_explore(), None),
         ])
-        .style(style::bg(style::HEADER));
+        // The panel's own ground, not HEADER: HEADER is the CLI terminal's background.
+        .style(style::bg(style::SIDEBAR));
         let content: El<'a> = match d.side {
             _ if live.info.repos.is_empty() => column![
                 self.repo_selector(live),
@@ -772,7 +773,7 @@ impl App {
         )
         .padding([5, 8])
         .width(Fill)
-        .style(style::bg(style::HEADER))
+        .style(style::bg(style::SIDEBAR))
         .boxed()
     }
 
