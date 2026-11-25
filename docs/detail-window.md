@@ -62,7 +62,8 @@ also hides the side panel; files opened from it show in the detail window.
 - The caption buttons are drawn by the app (Electron overlays the native ones). The snap layout
   flyout comes from a window subclass (`meninx_web::enable_snap_layout`) that answers `HTMAXBUTTON`
   over the maximise button; Windows then handles that button's click, so it shows no hover tint.
-- 열린 항목 (tab list and popover): right-click menu at the pointer (`item_menu.rs`: copy paths,
+- 열린 항목 (tab list and popover): right-click menu at the pointer (`item_menu.rs`: 입력창에 첨부 (file path / commit
+  reference / page address, not terminals; while the session runs), copy paths,
   Explore / file manager / VS Code (local server only), commit SHA / subject, web reload / copy /
   external browser, terminal command / stop, 닫기 / 다른 항목 닫기 / 작업 중 아닌 항목 닫기 /
   탭 모두 닫기), drag within a group (`meninx_views::Reorder`; the order is the session's item order,
