@@ -3341,10 +3341,20 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
             Step::WaitDeleted(i, ms) => {
                 let sid = sc.id(i);
                 let gone = sid.as_ref().is_some_and(|s| app.live(s).is_none());
-                let err = match &app.modal {
-                    Some(Modal::Delete(f)) => f.error.clone(),
-                    _ => None,
-                };
+                // Deleting runs in the background: a failure ends it as a failed notice.
+                use crate::notices::{NoticeKey, TaskState};
+                let back = sid
+                    .as_ref()
+                    .is_some_and(|s| !app.deleting.contains(s) && app.live(s).is_some());
+                let err = app
+                    .notices
+                    .iter()
+                    .filter(|_| back)
+                    .find(|n| {
+                        n.task == Some(TaskState::Failed)
+                            && matches!(&n.key, Some(NoticeKey::Other(k)) if k.starts_with("delete:"))
+                    })
+                    .map(|n| n.body.as_ref().map(|b| b.get()).unwrap_or_default());
                 if gone {
                     let s = sid.unwrap();
                     sc.gone.push(s.clone());
@@ -3354,7 +3364,6 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                     sc.check(stored, &format!("session #{i} removed from sessions.json"));
                 } else if let Some(e) = err {
                     sc.check(false, &format!("delete failed: {e}"));
-                    tasks.push(app.update(Message::CloseModal));
                 } else if timeout(ms) {
                     sc.check(false, "timeout waiting for delete");
                 } else {

@@ -8,14 +8,13 @@ use std::collections::BTreeSet;
 
 use iced::widget::{Column, button, checkbox, column, container, popover, row, space, text};
 use iced::{Alignment, Element, Fill, Task, Widget as _};
-use ide_client::ProtoError;
 
 use crate::app::{App, Live, Message, Modal};
 use crate::changes_view::check_box;
-use crate::i18n::{self, tr};
+use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::style;
-use crate::view::{error_box, tip};
+use crate::view::tip;
 
 type El<'a> = Element<'a, Message>;
 
@@ -49,15 +48,12 @@ pub enum EditMsg {
     AskDelete,
     DeleteWorktrees(bool),
     DeleteConfirm,
-    Deleted(Vec<(String, Result<(), ProtoError>)>),
 }
 
 /// The bulk delete dialog: the sessions, in the order they are deleted (children first).
 pub struct BulkDeleteForm {
     pub ids: Vec<String>,
     pub remove_worktree: bool,
-    pub error: Option<String>,
-    pub busy: bool,
 }
 
 fn em(m: EditMsg) -> Message {
@@ -242,8 +238,6 @@ impl App {
                 self.modal = Some(Modal::BulkDelete(BulkDeleteForm {
                     ids,
                     remove_worktree: true,
-                    error: None,
-                    busy: false,
                 }));
             }
             EditMsg::DeleteWorktrees(v) => {
@@ -252,66 +246,13 @@ impl App {
                 }
             }
             EditMsg::DeleteConfirm => {
-                let Some(c) = self.online() else {
+                let Some(Modal::BulkDelete(f)) = &self.modal else {
                     return Task::none();
                 };
-                let Some(Modal::BulkDelete(f)) = &mut self.modal else {
-                    return Task::none();
-                };
-                if f.busy {
-                    return Task::none();
-                }
-                f.busy = true;
-                f.error = None;
+                // Children first (`delete_order`), in the background like a single delete.
                 let (ids, remove) = (f.ids.clone(), f.remove_worktree);
-                // One at a time, children first: the server stops each process, waits for it
-                // and removes its worktrees and branches.
-                return Task::perform(
-                    async move {
-                        let mut out = Vec::with_capacity(ids.len());
-                        for id in ids {
-                            let r = c.delete_session(&id, remove).await;
-                            out.push((id, r));
-                        }
-                        out
-                    },
-                    |r| em(EditMsg::Deleted(r)),
-                );
-            }
-            EditMsg::Deleted(results) => {
-                let mut failed = Vec::new();
-                for (id, r) in results {
-                    match r {
-                        Ok(()) => {
-                            crate::script::log(&format!("bulk-deleted session {id}"));
-                            self.forget_session(&id);
-                        }
-                        Err(err) => {
-                            let title = self
-                                .live(&id)
-                                .map(|l| l.info.title.clone())
-                                .unwrap_or_else(|| id.clone());
-                            failed.push((id, format!("{title}: {}", i18n::proto_error(&err))));
-                        }
-                    }
-                }
-                self.save_ui();
-                if failed.is_empty() {
-                    if matches!(self.modal, Some(Modal::BulkDelete(_))) {
-                        self.modal = None;
-                    }
-                } else if let Some(Modal::BulkDelete(f)) = &mut self.modal {
-                    f.busy = false;
-                    f.ids = failed.iter().map(|(id, _)| id.clone()).collect();
-                    f.error = Some(
-                        failed
-                            .into_iter()
-                            .map(|(_, e)| e)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
-                return self.after_select();
+                self.modal = None;
+                return self.start_delete(ids, remove);
             }
         }
         Task::none()
@@ -477,29 +418,17 @@ impl App {
                     .boxed(),
             );
         }
-        if let Some(e) = &f.error {
-            c = c.push(error_box(e));
-        }
         c = c.push(
             row![
                 space().width(Fill),
                 button(text(tr::cancel()).size(13))
                     .padding([6, 14])
                     .style(style::secondary)
-                    .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
-                button(
-                    text(if f.busy {
-                        tr::deleting()
-                    } else {
-                        tr::session_edit_delete_confirm(f.ids.len() as i64)
-                    })
-                    .size(13)
-                )
-                .padding([6, 14])
-                .style(style::danger)
-                .on_press_maybe(
-                    (!f.busy && self.connected()).then_some(em(EditMsg::DeleteConfirm))
-                ),
+                    .on_press(Message::CloseModal),
+                button(text(tr::session_edit_delete_confirm(f.ids.len() as i64)).size(13))
+                    .padding([6, 14])
+                    .style(style::danger)
+                    .on_press_maybe(self.connected().then_some(em(EditMsg::DeleteConfirm))),
             ]
             .spacing(8)
             .boxed(),

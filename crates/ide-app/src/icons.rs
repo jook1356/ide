@@ -63,9 +63,11 @@ pub enum Icon {
     Checks,
     // Widgets (widgets_ui.rs, widgets_page.rs).
     Puzzle,
+    // Running work (notice_view.rs), turned by [`spinner`].
+    Loader,
 }
 
-const SOURCES: [&str; 44] = [
+const SOURCES: [&str; 45] = [
     include_str!("../assets/icons/messages.svg"),
     include_str!("../assets/icons/key.svg"),
     include_str!("../assets/icons/stack-2.svg"),
@@ -110,6 +112,7 @@ const SOURCES: [&str; 44] = [
     include_str!("../assets/icons/x.svg"),
     include_str!("../assets/icons/checks.svg"),
     include_str!("../assets/icons/puzzle.svg"),
+    include_str!("../assets/icons/loader-2.svg"),
 ];
 
 /// Stroke width the icons are drawn with (in the 24-unit view box).
@@ -145,6 +148,26 @@ pub fn icon<'a, M: 'a>(icon: Icon, size: f32, color: Color) -> Element<'a, M> {
         .boxed()
 }
 
+/// Turns per second of [`spinner`].
+const SPIN_HZ: f32 = 1.2;
+
+/// How often a shown spinner is redrawn (the app's subscription while work runs).
+pub const SPIN_FRAME: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// A turning loader at `size` in `color`. Its angle follows the clock, so it moves while
+/// something redraws the view every [`SPIN_FRAME`].
+pub fn spinner<'a, M: 'a>(size: f32, color: Color) -> Element<'a, M> {
+    static START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+    let turns = START.elapsed().as_secs_f32() * SPIN_HZ;
+    let angle = turns.fract() * std::f32::consts::TAU;
+    svg(handle(Icon::Loader))
+        .width(size)
+        .height(size)
+        .rotation(iced::Radians(angle))
+        .style(move |_, _| svg::Style { color: Some(color) })
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +183,6 @@ mod tests {
             assert!(s.contains("stroke=\"currentColor\""));
             assert!(s.contains("stroke-width=\"2\""));
         }
-        assert_eq!(HANDLES.len(), Icon::Puzzle as usize + 1);
+        assert_eq!(HANDLES.len(), Icon::Loader as usize + 1);
     }
 }

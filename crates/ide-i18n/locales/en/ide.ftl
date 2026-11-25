@@ -1456,6 +1456,15 @@ notice-answered = The answer is done
 notice-bell-rang = The terminal rang its bell
 notice-load-failed = A page could not be loaded
 notice-sync-status-failed = Could not check the branch against its remote
+notice-session-deleting = { $count ->
+    [one] Deleting a session…
+   *[other] Deleting { $count } sessions…
+}
+notice-session-deleted = { $count ->
+    [one] Session deleted
+   *[other] { $count } sessions deleted
+}
+notice-session-delete-failed = Could not delete the session
 
 ## Widgets page, launcher and registration (widgets_page.rs, widgets_ui.rs)
 widgets-hide = Hide the widget list

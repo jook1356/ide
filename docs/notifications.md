@@ -20,7 +20,7 @@ A `Notice` has these parts:
 | `session`, `repo` | What the notice is about: a session chip in the list (clicking it shows that session) and the repository name |
 | `key` | `NoticeKey`: a notice that follows one piece of work. Pushing again with the same key replaces the notice in place, keeping its id and position. |
 | `read` | Counted by the bell while unread. `quiet()` pushes the notice already read, as history only. |
-| `task` | `Running`, `Done` or `Failed`. While any notice is running, the bell shows a dot and the list header shows "N running". **Clear** keeps running notices. |
+| `task` | `Running`, `Done` or `Failed`. While any notice is running, the bell shows a turning loader and the list header shows "N running". **Clear** keeps running notices. |
 | `open` | A `Message` sent when the notice or its toast is clicked. Clicking also marks it read and closes the list. |
 | `actions` | Buttons, each with a label, a `Message` and a style. |
 | `toast` | Pops up on the window: success and info for 5 s, warnings for 10 s, errors for 8 s. |
@@ -38,6 +38,7 @@ only; buttons are messages, which mean nothing after a restart.
 | PR job (`RepoFooter::job`) | `sync_state_notices`, key `PrJob{session, repo}`. It changes only when the job's tone, title, text, buttons or running state change. | Progress (running, info) is quiet. Results, and questions to the user (recheck, conflict), are unread and pop up when the title changes. The job's buttons send `FooterMsg::JobAction`. The footer card stays. |
 | `RepoFooter::pr_error` (never shown before) | key `PrInfo{session, repo}`. Removed when the PR status works again. | Warning, quiet |
 | `git.sync_status` failure (only logged before) | key `Other("sync:<session>:<repo>")` | Warning, quiet |
+| Session delete (one session, or the list's edit mode) | `App::start_delete` / `delete_done`, key `Other("delete:<n>")`. The dialog closes on confirm and the sessions leave the list (`App::deleting`, `in_filter`) while the server stops them and removes worktrees and branches; failed ones come back. | Running info (quiet), then a success toast (quiet) or an error toast (unread) naming each failed session and why |
 | Self-update | `self_update.rs` `update_notice`: "ready" with a Restart button, and the result of the run | Info / success / error, toast. The footer line stays. |
 | Server connection | `conn_notice`, key `Conn`: lost (reconnecting), disconnected (Reconnect button), back again | Warning / error / success (quiet) |
 | Agent activity (`Notify::Activity`) | `activity_notice`, key `Attention{session}`: `NeedsInput` gives "Waiting for you", `Working` to `Idle` gives "The answer is done" | Warning / success, unread, toast. Clicking shows the session. |
@@ -65,12 +66,13 @@ taskbar button (`window::request_user_attention`, `Informational`).
 ## UI
 
 - **Bell**: the rail's last button, at the bottom. The unread count is a red pill ("9+" over nine).
-  When nothing is unread but work is running, it shows an accent dot instead. The tooltip reads
+  While work is running, a turning loader (`icons::spinner`, Tabler `loader-2`, redrawn every
+  `SPIN_FRAME`) sits in its lower right corner, beside any unread pill. The tooltip reads
   "Notifications", plus "· N tasks running" while work runs.
 - **List**: a popover right of the bell, 360 px wide and up to 520 px high (window height − 80).
   - Header: "Notifications", a running badge, and buttons for mark all read (checks), clear finished
     (trash) and close.
-  - Items, newest first: tone icon, bold title, time (`HH:MM`), mark read (✓, unread only), remove
+  - Items, newest first: tone icon (a turning loader while running), bold title, time (`HH:MM`), mark read (✓, unread only), remove
     (×, not while running), session chip (and repository), body and action buttons.
   - An unread item has a lighter ground and an accent border. Errors and warnings keep their tone's
     border.

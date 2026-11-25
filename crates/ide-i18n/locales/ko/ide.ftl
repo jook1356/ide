@@ -1223,6 +1223,9 @@ notice-answered = 답변이 끝났어요
 notice-bell-rang = 터미널에서 벨이 울렸어요
 notice-load-failed = 페이지를 불러오지 못했어요
 notice-sync-status-failed = 원격과 브랜치 상태를 비교하지 못했어요
+notice-session-deleting = 세션 { $count }개 삭제 중…
+notice-session-deleted = 세션 { $count }개를 삭제했어요
+notice-session-delete-failed = 세션을 삭제하지 못했어요
 
 ## 위젯 페이지, 런처, 등록 (widgets_page.rs, widgets_ui.rs)
 widgets-hide = 위젯 목록 숨기기

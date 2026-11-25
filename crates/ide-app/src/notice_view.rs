@@ -416,15 +416,19 @@ impl App {
                 })
                 .boxed(),
             );
-        } else if running > 0 {
+        }
+        if running > 0 {
+            // Running work (a session being deleted, a PR job, ...): a turning loader in the
+            // bell's lower corner, beside an unread badge.
             layers.push(
-                container(container(space().width(7).height(7)).style(style::dot(style::ACCENT)))
+                container(icons::spinner(12.0, style::ACCENT))
                     .width(44)
                     .height(44)
                     .align_x(Alignment::End)
+                    .align_y(Alignment::End)
                     .padding(iced::Padding {
-                        top: 8.0,
-                        right: 9.0,
+                        bottom: 4.0,
+                        right: 4.0,
                         ..iced::Padding::ZERO
                     })
                     .boxed(),
@@ -527,7 +531,7 @@ impl App {
         .boxed()
     }
 
-    fn session_name(&self, sid: &str) -> Option<String> {
+    pub(crate) fn session_name(&self, sid: &str) -> Option<String> {
         self.live(sid).map(|l| {
             let t = l.info.title.trim();
             if t.is_empty() { sid.to_owned() } else { t.to_owned() }
@@ -537,7 +541,7 @@ impl App {
     fn notice_item<'a>(&'a self, n: &'a AppNotice) -> El<'a> {
         let c = tone_color(n.tone);
         let icon: El<'_> = if n.task == Some(TaskState::Running) {
-            text("…").size(14).color(style::ACCENT_TEXT).boxed()
+            icons::spinner(16.0, style::ACCENT_TEXT)
         } else {
             icons::icon(tone_icon(n.tone), 16.0, c)
         };

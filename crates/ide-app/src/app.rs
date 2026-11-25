@@ -6,7 +6,7 @@
 //! streams). Only UI state (`ui.json`: selection, split, language, web URLs, ...) and the CEF web
 //! views are local.
 
-use crate::notices::{Notice, NoticeKey, Text};
+use crate::notices::{Notice, NoticeKey, TaskState, Text};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -377,8 +377,6 @@ pub struct CloseDirtyForm {
 pub struct DeleteForm {
     pub id: String,
     pub remove_worktree: bool,
-    pub error: Option<String>,
-    pub busy: bool,
 }
 
 /// State of the accounts, configurations, repos and settings pages.
@@ -739,7 +737,9 @@ pub enum Message {
     AskDelete(String),
     DeleteWorktree(bool),
     DeleteConfirm,
-    DeleteDone(String, Result<(), ProtoError>),
+    /// Background deletion over (`App::start_delete`): its notice key and per session
+    /// (id, name, result).
+    DeleteDone(String, Vec<(String, String, Result<(), ProtoError>)>),
 
     OpenNew,
     /// "워크트리 사용" on / off.
@@ -1186,6 +1186,11 @@ pub struct App {
     /// What notices that mirror other state (PR jobs, self-update) last showed, by key: they
     /// change only when this does (`notice_view.rs` `sync_state_notices`).
     pub notice_sigs: std::collections::HashMap<NoticeKey, String>,
+    /// Sessions being deleted in the background: hidden from the list until the server is
+    /// done (they come back when it fails).
+    pub deleting: std::collections::HashSet<String>,
+    /// Numbers the deletion notices.
+    pub delete_seq: u64,
     /// The app window has the keyboard focus (agent notices also flash the taskbar without).
     pub focused: bool,
     pub script: Option<Script>,
@@ -1351,6 +1356,8 @@ impl App {
             notices: Default::default(),
             notice_open: false,
             notice_sigs: Default::default(),
+            deleting: Default::default(),
+            delete_seq: 0,
             focused: true,
             script: None,
             modal_web_unsafe: false,
@@ -1546,6 +1553,107 @@ impl App {
                 .map(|l| l.info.id.clone());
         }
     }
+    /// Deletes `ids` (in this order, one at a time) in the background: the dialog is already
+    /// closed, the sessions leave the list now and a running notice follows the work (the
+    /// server stops each process, waits for it and removes its worktrees and branches, which
+    /// can take a while).
+    pub(crate) fn start_delete(&mut self, ids: Vec<String>, remove: bool) -> Task<Message> {
+        let Some(c) = self.online() else {
+            return Task::none();
+        };
+        let ids: Vec<(String, String)> = ids
+            .into_iter()
+            .filter(|id| !self.deleting.contains(id))
+            .map(|id| {
+                let name = self.session_name(&id).unwrap_or_else(|| id.clone());
+                (id, name)
+            })
+            .collect();
+        if ids.is_empty() {
+            return Task::none();
+        }
+        self.delete_seq += 1;
+        let key = format!("delete:{}", self.delete_seq);
+        for (id, _) in &ids {
+            self.deleting.insert(id.clone());
+            self.session_edit.checked.remove(id);
+        }
+        if self.selected.as_ref().is_some_and(|s| self.deleting.contains(s)) {
+            self.selected = self
+                .sessions
+                .iter()
+                .find(|l| self.in_filter(&l.info))
+                .map(|l| l.info.id.clone());
+        }
+        let n = ids.len() as i64;
+        let names: Vec<&str> = ids.iter().map(|(_, name)| name.as_str()).collect();
+        self.notify(
+            Notice::info(Text::tr(move || tr::notice_session_deleting(n)))
+                .body(names.join(", "))
+                .key(NoticeKey::Other(key.clone()))
+                .task(TaskState::Running)
+                .quiet(),
+        );
+        crate::script::log(&format!(
+            "deleting sessions {:?} in the background (remove_worktree={remove})",
+            ids.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        ));
+        let work = Task::perform(
+            async move {
+                let mut out = Vec::with_capacity(ids.len());
+                for (id, name) in ids {
+                    let r = c.delete_session(&id, remove).await;
+                    out.push((id, name, r));
+                }
+                out
+            },
+            move |r| Message::DeleteDone(key.clone(), r),
+        );
+        Task::batch([self.after_select(), work])
+    }
+
+    /// A background deletion is over: deleted sessions go, failed ones come back to the list
+    /// and the notice says which failed and why.
+    fn delete_done(
+        &mut self,
+        key: String,
+        results: Vec<(String, String, Result<(), ProtoError>)>,
+    ) -> Task<Message> {
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        for (id, name, r) in results {
+            self.deleting.remove(&id);
+            match r {
+                Ok(()) => {
+                    crate::script::log(&format!("deleted session {id}"));
+                    self.forget_session(&id);
+                    deleted.push(name);
+                }
+                Err(e) => {
+                    crate::script::log(&format!("deleting session {id} failed: {e:?}"));
+                    failed.push(format!("{name}: {}", i18n::proto_error(&e)));
+                }
+            }
+        }
+        self.save_ui();
+        let key = NoticeKey::Other(key);
+        let n = if failed.is_empty() {
+            let count = deleted.len() as i64;
+            Notice::success(Text::tr(move || tr::notice_session_deleted(count)))
+                .body(deleted.join(", "))
+                .task(TaskState::Done)
+                .toast()
+                .quiet()
+        } else {
+            Notice::error(Text::tr(tr::notice_session_delete_failed))
+                .body(failed.join("\n"))
+                .task(TaskState::Failed)
+                .toast()
+        };
+        self.notify(n.key(key));
+        self.after_select()
+    }
+
     pub(crate) fn live_mut(&mut self, id: &str) -> Option<&mut Live> {
         self.sessions.iter_mut().find(|l| l.id() == id)
     }
@@ -1646,9 +1754,10 @@ impl App {
     /// Whether the sidebar lists a session: every session under 전체, else sessions of the
     /// current configuration, and login terminals always.
     pub fn in_filter(&self, info: &SessionInfo) -> bool {
-        self.ui.sessions_all
-            || info.kind == SessionKind::Login
-            || info.configuration == self.current_configuration()
+        !self.deleting.contains(&info.id)
+            && (self.ui.sessions_all
+                || info.kind == SessionKind::Login
+                || info.configuration == self.current_configuration())
     }
 
     /// Sessions using a configuration: (total, running).
@@ -2325,14 +2434,12 @@ impl App {
             }
 
             Message::AskDelete(id) => {
-                if !self.connected() {
+                if !self.connected() || self.deleting.contains(&id) {
                     return Task::none();
                 }
                 self.modal = Some(Modal::Delete(DeleteForm {
                     id,
                     remove_worktree: true,
-                    error: None,
-                    busy: false,
                 }));
                 Task::none()
             }
@@ -2343,55 +2450,14 @@ impl App {
                 Task::none()
             }
             Message::DeleteConfirm => {
-                let Some(c) = self.online() else {
+                let Some(Modal::Delete(f)) = &self.modal else {
                     return Task::none();
                 };
-                let Some(Modal::Delete(f)) = &mut self.modal else {
-                    return Task::none();
-                };
-                f.busy = true;
-                f.error = None;
-                let id = f.id.clone();
-                let remove = f.remove_worktree;
-                // The server stops the process, waits for it and removes worktree + branch.
-                Task::perform(
-                    {
-                        let id = id.clone();
-                        async move { c.delete_session(&id, remove).await }
-                    },
-                    move |r| Message::DeleteDone(id.clone(), r),
-                )
+                let (ids, remove) = (vec![f.id.clone()], f.remove_worktree);
+                self.modal = None;
+                self.start_delete(ids, remove)
             }
-            Message::DeleteDone(id, r) => {
-                let remove = match &self.modal {
-                    Some(Modal::Delete(f)) if f.id == id => f.remove_worktree,
-                    _ => false,
-                };
-                match r {
-                    Ok(()) => {
-                        let root = self
-                            .live(&id)
-                            .map(|l| l.info.root.clone())
-                            .unwrap_or_default();
-                        crate::script::log(&format!(
-                            "deleted session {id} (remove_worktree={remove}, root {root})"
-                        ));
-                        self.forget_session(&id);
-                        if matches!(&self.modal, Some(Modal::Delete(f)) if f.id == id) {
-                            self.modal = None;
-                        }
-                        self.save_ui();
-                        self.after_select()
-                    }
-                    Err(e) => {
-                        if let Some(Modal::Delete(f)) = &mut self.modal {
-                            f.busy = false;
-                            f.error = Some(i18n::proto_error(&e));
-                        }
-                        Task::none()
-                    }
-                }
-            }
+            Message::DeleteDone(key, results) => self.delete_done(key, results),
 
             Message::OpenNew => {
                 if !self.connected() {
@@ -2651,12 +2717,10 @@ impl App {
             Message::CloseModal => {
                 let busy = match &self.modal {
                     Some(Modal::DeleteEntry(f)) => f.busy,
-                    Some(Modal::Delete(f)) => f.busy,
                     Some(Modal::StopServer(f)) => f.busy,
                     Some(Modal::Close(f)) => f.busy,
                     Some(Modal::SessionRepos(f)) => f.busy,
                     Some(Modal::NewChild(f)) => f.busy,
-                    Some(Modal::BulkDelete(f)) => f.busy,
                     Some(Modal::ListDelete(f)) => f.busy,
                     Some(Modal::Changes(f)) => f.busy,
                     Some(Modal::Footer(f)) => f.busy(),
@@ -4592,6 +4656,10 @@ impl App {
         }));
         if self.notices.has_toast() {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Expire));
+        }
+        if self.notices.running() > 0 {
+            // Turns the bell's and the list's loaders (`icons::spinner`).
+            subs.push(iced::time::every(crate::icons::SPIN_FRAME).map(|_| Message::Expire));
         }
         subs.push(self.footer_subscription());
         subs.push(event::listen_with(|e, _, _| match e {

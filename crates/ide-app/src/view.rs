@@ -2938,24 +2938,17 @@ impl App {
                             .boxed(),
                     );
                 }
-                if let Some(e) = &f.error {
-                    c = c.push(error_box(e));
-                }
                 c = c.push(
                     row![
                         space().width(Fill),
                         button(text(tr::cancel()).size(13))
                             .padding([6, 14])
                             .style(style::secondary)
-                            .on_press_maybe((!f.busy).then_some(Message::CloseModal)),
-                        button(text(if f.busy { tr::deleting() } else { tr::delete() }).size(13))
+                            .on_press(Message::CloseModal),
+                        button(text(tr::delete()).size(13))
                             .padding([6, 14])
                             .style(style::danger)
-                            .on_press_maybe(
-                                (!f.busy)
-                                    .then_some(Message::DeleteConfirm)
-                                    .filter(|_| self.connected())
-                            ),
+                            .on_press_maybe(self.connected().then_some(Message::DeleteConfirm)),
                     ]
                     .spacing(8)
                     .boxed(),
