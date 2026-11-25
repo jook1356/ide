@@ -3,7 +3,7 @@
 Status: foundation (protocol 13). Sessions' agents reach the IDE through an MCP server (two
 tools prove both paths, daemon-answered and app-answered); what they are doing comes from CLI
 hooks (Claude Code) and from reading their terminal screen (Claude Code, Codex). Features built on it (child / parent sessions, the shared
-workspace's write lease, task queue, terminals, browser) come next; widgets (Desk's mods) are in `docs/widgets.md`, previews in `docs/previews.md`.
+workspace's write lease, task queue, terminals, browser) come next; widgets (Desk's mods) are in `docs/widgets.md`, previews in `docs/previews.md`, profile edits (`ide_profile_get` / `ide_profile_edit`) in `docs/profile-editing.md`.
 Marks as in `agent-providers.md`: (v) verified, (d) docs, (a) assumption.
 
 ## Why

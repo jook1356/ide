@@ -399,6 +399,8 @@ pub struct SettingsForm {
     /// (`None` = the first) and the armed delete of the title row.
     pub profile_sel: Option<String>,
     pub profile_delete_armed: bool,
+    /// The shown profile's change history (`profile_history_ui.rs`).
+    pub history: crate::profile_history_ui::HistoryState,
     /// The shown profile's editor (follows `profile_sel`; `sync_profile_edit`).
     pub cfg_edit: Option<Box<ConfigEdit>>,
     pub error: Option<String>,
@@ -575,11 +577,15 @@ pub struct ConfigEdit {
     pub mcp: Vec<McpRow>,
     /// Desk's "기본 레포" (`None` = every registered repo).
     pub default_repos: Option<Vec<String>>,
+    /// The saved profile changed elsewhere (e.g. a session's `ide_profile_edit`) while this
+    /// editor had unsaved edits: saving would overwrite that change.
+    pub outdated: bool,
 }
 
 impl ConfigEdit {
     fn new(c: &ConfigurationInfo) -> Self {
         ConfigEdit {
+            outdated: false,
             base: c.clone(),
             name: c.name.clone(),
             instructions: text_editor::Content::with_text(&c.instructions),
@@ -756,8 +762,8 @@ pub enum Message {
     /// Navigation rail click: show the page (clicking the active work page toggles the
     /// session list).
     Page(Page),
-    /// The pointer entered / left the rail's work button.
-    RailHover(bool),
+    /// The pointer entered (`true`) or left (`false`) a rail page button.
+    RailHover(Page, bool),
     /// The pointer entered (`true`) or left (`false`) a session row.
     SessionHover(String, bool),
     AcctProvider(String),
@@ -783,6 +789,7 @@ pub enum Message {
     CfgInstructions(text_editor::Action),
     /// The profile's own skills (`skills_ui.rs`).
     Skill(crate::skills_ui::SkillMsg),
+    ProfileHistory(crate::profile_history_ui::HistoryMsg),
     CfgMcp(usize, McpField, String),
     CfgMcpAdd,
     CfgMcpRemove(usize),
@@ -1150,8 +1157,8 @@ pub struct App {
     pub font_pickers: [iced::widget::combo_box::State<String>; 3],
     /// The UI font in effect (read at start; a change applies after a restart).
     pub boot_ui_font: String,
-    /// The pointer is over the rail's work button (shows the session-list toggle icon).
-    pub rail_hover: bool,
+    /// The rail page button under the pointer (on its own page it shows the list toggle icon).
+    pub rail_hover: Option<Page>,
     /// The session row under the pointer (shows its pin / delete buttons).
     pub session_hover: Option<String>,
     /// Self-update (`self_update.rs`): possible here, the last run's status, the run this app
@@ -1326,7 +1333,7 @@ impl App {
             settings,
             font_pickers,
             boot_ui_font,
-            rail_hover: false,
+            rail_hover: None,
             session_hover: None,
             new_answers: Default::default(),
             resumed: Default::default(),
@@ -2022,6 +2029,12 @@ impl App {
             Notify::SessionsChanged | Notify::AccountsChanged | Notify::ConfigurationsChanged => {
                 self.refresh()
             }
+            Notify::ConfigurationEdited {
+                name,
+                session_title,
+                summary,
+                ..
+            } => self.profile_edited_notice(name, session_title, summary),
             Notify::SessionPrepared {
                 session,
                 failures,
@@ -2151,7 +2164,7 @@ impl App {
                     Ok(lists) => {
                         self.lists_applied = seq;
                         let t = self.apply_lists(lists);
-                        Task::batch([t, self.integration_checks()])
+                        Task::batch([t, self.integration_checks(), self.load_profile_history()])
                     }
                     Err(e) => {
                         if e.id != "disconnected" {
@@ -2694,7 +2707,7 @@ impl App {
                 crate::script::log(&format!("page {page:?}"));
                 self.ui.page = page;
                 self.open_items = false;
-                self.rail_hover = false;
+                self.rail_hover = None;
                 self.settings.error = None;
                 self.save_ui();
                 if page == Page::Configurations {
@@ -2711,6 +2724,7 @@ impl App {
                         let load = match page {
                             Page::Repos => self.load_repos(),
                             Page::Widgets => self.load_widgets(),
+                            Page::Configurations => self.load_profile_history(),
                             Page::Settings => {
                                 self.settings.reset_server(&self.ui.server);
                                 self.load_approvals()
@@ -2721,8 +2735,12 @@ impl App {
                     }
                 }
             }
-            Message::RailHover(v) => {
-                self.rail_hover = v;
+            Message::RailHover(page, entered) => {
+                if entered {
+                    self.rail_hover = Some(page);
+                } else if self.rail_hover == Some(page) {
+                    self.rail_hover = None;
+                }
                 Task::none()
             }
             Message::SessionHover(id, entered) => {
@@ -3357,11 +3375,12 @@ impl App {
                     f.cfg_edit = None;
                 }
                 self.sync_profile_edit();
-                Task::none()
+                self.load_profile_history()
             }
             Message::CfgEditName(v) => self.with_cfg(|e| e.name = v),
             Message::CfgInstructions(a) => self.with_cfg(|e| e.instructions.perform(a)),
             Message::Skill(m) => self.on_skill(m),
+            Message::ProfileHistory(m) => self.on_profile_history(m),
             Message::CfgMcp(i, field, v) => self.with_cfg(|e| {
                 if let Some(m) = e.mcp.get_mut(i) {
                     match field {
@@ -4023,8 +4042,22 @@ impl App {
         let f = &mut self.settings;
         match &mut f.cfg_edit {
             Some(e) if e.base.slug == shown.slug => {
-                // Skills change outside the editor (applied at once): follow the list.
-                e.base.skills = shown.skills;
+                let b = &e.base;
+                let changed = b.name != shown.name
+                    || b.instructions != shown.instructions
+                    || b.mcp_servers != shown.mcp_servers
+                    || b.default_repos != shown.default_repos;
+                if changed && !e.dirty() {
+                    // Changed elsewhere (a session, another window) and nothing edited here:
+                    // show the new version.
+                    let skills = std::mem::take(&mut e.skills);
+                    **e = ConfigEdit::new(&shown);
+                    e.skills = skills;
+                } else {
+                    // Skills change outside the editor (applied at once): follow the list.
+                    e.base.skills = shown.skills;
+                    e.outdated |= changed;
+                }
             }
             _ => f.cfg_edit = Some(Box::new(ConfigEdit::new(&shown))),
         }

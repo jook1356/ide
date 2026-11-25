@@ -52,6 +52,7 @@ mod session_menu;
 mod session_sort;
 mod side_popover;
 mod profiles_view;
+mod profile_history_ui;
 mod skills_ui;
 mod repo_cache;
 mod style;

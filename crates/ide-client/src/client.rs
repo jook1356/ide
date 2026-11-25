@@ -461,6 +461,40 @@ impl Client {
         expect_configuration(self.call(Request::ConfigurationUpdate(c)).await)
     }
 
+    /// `configuration.history`: the last `limit` changes, newest first.
+    pub async fn configuration_history(
+        &self,
+        slug: &str,
+        limit: u32,
+    ) -> Result<Vec<ide_proto::ConfigurationChange>, ProtoError> {
+        expect(
+            self.call(Request::ConfigurationHistory {
+                slug: slug.into(),
+                limit,
+            })
+            .await,
+            |r| match r {
+                Response::ConfigurationHistory(h) => Some(h),
+                _ => None,
+            },
+        )
+    }
+
+    /// `configuration.restore`: back to what it was after change `id`.
+    pub async fn restore_configuration(
+        &self,
+        slug: &str,
+        id: &str,
+    ) -> Result<ConfigurationInfo, ProtoError> {
+        expect_configuration(
+            self.call(Request::ConfigurationRestore {
+                slug: slug.into(),
+                id: id.into(),
+            })
+            .await,
+        )
+    }
+
     /// `attach.put`: store `data` as an attachment of `session` (in pieces of
     /// [`ide_proto::ATTACH_CHUNK`]); returns its absolute path on the server.
     pub async fn attach_file(

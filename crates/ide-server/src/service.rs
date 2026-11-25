@@ -41,6 +41,7 @@ mod widget_host;
 mod widgets;
 mod write_guard;
 mod previews;
+mod profile;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an agent CLI must wait at its input (and no dialog of it be auto-answered)
@@ -975,6 +976,9 @@ impl UserCtx {
     /// asks the connected apps).
     pub async fn agent_call(self: &Arc<Self>, session: &str, tool: &str, args: &str) -> ide_proto::AgentToolResult {
         if let Some(r) = self.terminal_tool(session, tool, args).await {
+            return r;
+        }
+        if let Some(r) = self.profile_tool(session, tool, args).await {
             return r;
         }
         if ide_proto::browser::TOOLS.contains(&tool) {
@@ -2388,6 +2392,12 @@ impl UserCtx {
                 self.configuration_changed(&slug);
                 Ok(Response::Configuration(c))
             }
+            Request::ConfigurationHistory { slug, limit } => self
+                .configuration_history(&slug, limit)
+                .map(Response::ConfigurationHistory),
+            Request::ConfigurationRestore { slug, id } => self
+                .configuration_restore(&slug, &id)
+                .map(Response::Configuration),
             Request::ConfigurationDelete { slug } => {
                 let sessions = self.sessions.lock().unwrap();
                 let mut configs = self.configs.lock().unwrap();

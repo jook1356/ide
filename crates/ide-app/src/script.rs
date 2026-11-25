@@ -191,7 +191,7 @@ enum Step {
     /// repo) and one MCP server like a user would.
     CfgFill(&'static str),
     CfgSave,
-    /// The saved configuration has the filled values (server list and `configurations.json`).
+    /// The saved configuration has the filled values (server list and its folder's files).
     WaitConfigSaved(&'static str, u64),
     CfgDelete(&'static str),
     /// Accounts page: add an account (provider, name): creates it and opens its login terminal.
@@ -728,11 +728,15 @@ fn steps(claude: bool) -> Vec<Step> {
         ExpectPage(Page::Work),
         ExpectSessionsOpen(true),
         ExpectWorkToggle(true, false),
-        App(Message::RailHover(true)),
+        // Hovering another page's button leaves the work button's icon alone.
+        App(Message::RailHover(Page::Repos, true)),
+        ExpectWorkToggle(true, false),
+        App(Message::RailHover(Page::Repos, false)),
+        App(Message::RailHover(Page::Work, true)),
         ExpectWorkToggle(true, true),
         Wait(300),
         Shot("rail_01_work_hovered"),
-        App(Message::RailHover(false)),
+        App(Message::RailHover(Page::Work, false)),
         ExpectServerTooltip("Server: Local · connected · "),
         GoPage(Page::Settings),
         ExpectPage(Page::Settings),
@@ -751,9 +755,9 @@ fn steps(claude: bool) -> Vec<Step> {
         ExpectPage(Page::Work),
         ExpectSessionsOpen(false),
         ExpectWorkToggle(false, false),
-        App(Message::RailHover(true)),
+        App(Message::RailHover(Page::Work, true)),
         ExpectWorkToggle(false, true),
-        App(Message::RailHover(false)),
+        App(Message::RailHover(Page::Work, false)),
         ExpectSavedRail(Page::Work, false),
         Wait(500),
         Shot("rail_04_sessions_hidden"),
@@ -888,12 +892,12 @@ fn steps(claude: bool) -> Vec<Step> {
         Pause("ko_rail_1_work"),
         App(Message::Page(Page::Work)),
         ExpectWorkToggle(false, false),
-        App(Message::RailHover(true)),
+        App(Message::RailHover(Page::Work, true)),
         ExpectWorkToggle(false, true),
         Wait(300),
         Shot("ko_rail_2_sessions_hidden"),
         Pause("ko_rail_2_sessions_hidden"),
-        App(Message::RailHover(false)),
+        App(Message::RailHover(Page::Work, false)),
         App(Message::Page(Page::Work)),
         ExpectSessionsOpen(true),
         GoPage(Page::Accounts),
@@ -2028,8 +2032,10 @@ fn step_p2(sc: &mut Script, app: &mut App, st: Step, el: Duration) -> (bool, Tas
                 .iter()
                 .find(|c| c.slug == slug)
                 .and_then(|c| c.default_repos.clone());
-            let stored = std::fs::read_to_string(sc.data.join("configurations.json"))
-                .map(|t| ids.iter().all(|i| t.contains(i.as_str())))
+            let stored = std::fs::read_to_string(
+                sc.data.join("configurations").join(slug).join("profile.json"),
+            )
+            .map(|t| ids.iter().all(|i| t.contains(i.as_str())))
                 .unwrap_or(false);
             wait!(
                 got.as_ref().is_some_and(|g| g.len() == 2) && stored,
@@ -3575,8 +3581,10 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                         && c.mcp_servers[0].args == ["server.js", "--port", "3"]
                         && c.mcp_servers[0].env == [("TOKEN".to_owned(), "abc".to_owned())]
                 });
-                let stored = std::fs::read_to_string(sc.data.join("configurations.json"))
-                    .is_ok_and(|t| t.contains("Be brief.") && t.contains("\"docs\""));
+                let folder = sc.data.join("configurations").join(slug);
+                let stored = std::fs::read_to_string(folder.join("instructions.md"))
+                    .is_ok_and(|t| t.contains("Be brief."))
+                    && folder.join("mcp").join("docs.json").is_file();
                 if ok && stored {
                     sc.check(true, &format!("configuration {slug:?} saved: {c:?}"));
                 } else if timeout(ms) {
