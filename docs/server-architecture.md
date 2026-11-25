@@ -1,42 +1,42 @@
 # Client/server split and multi-user foundation
 
-Status: agreed design. Phase 1 implemented, including the app migration (`ide-app` is a pure
+Status: agreed design. Phase 1 implemented, including the app migration (`meninx-app` is a pure
 client) — see "Phase 1 implementation" and "App integration". Phase 2 backend (files, watch,
 browse, search, git, go-to-definition) implemented in proto/server/client — see "Phase 2
-backend" at the end; the UI widgets (`ide-views`) are integrated separately.
+backend" at the end; the UI widgets (`meninx-views`) are integrated separately.
 
 ## Goals
-- The app (`ide`) only draws: terminal rendering, IME, editor views, CEF display, layout, theme, language.
-- A backend daemon (`ide-server`) does all work: agent CLIs (claude, codex, shells) in PTYs, git
+- The app (`meninx`) only draws: terminal rendering, IME, editor views, CEF display, layout, theme, language.
+- A backend daemon (`meninx-server`) does all work: agent CLIs (claude, codex, shells) in PTYs, git
   worktrees, files, search, diffs, go-to-definition, preview bundling/serving, mods, dev servers.
 - The same server binary runs locally (child of the app) or on a company server (over SSH).
 - Transport-agnostic protocol: stdio, SSH, WebSocket and in-memory pipes carry the same frames.
 
 ## Topology: one server per user
 ```
-app ──stdio (child process)──────────────► ide-server   (local, my account)
-app ──ssh host ide-server --stdio─────────► ide-server   (remote, my account on the server)
-phone/browser ─WebSocket+SSO─► gateway ──► ide-server   (later; gateway connects as the user)
+app ──stdio (child process)──────────────► meninx-server   (local, my account)
+app ──ssh host meninx-server --stdio─────────► meninx-server   (remote, my account on the server)
+phone/browser ─WebSocket+SSO─► gateway ──► meninx-server   (later; gateway connects as the user)
 ```
 - Each user's server runs under that user's OS account. Authentication is done by the transport
   (local: none needed; SSH: the user's key/agent; gateway: SSO). OS accounts isolate users' files,
   logins and agent processes, so one user's agent cannot read another's data.
 - A server stays alive after the client disconnects (agents keep running) and is re-attached by the
-  next client. `ide-server --stdio` connects to the already-running per-user daemon through a local
+  next client. `meninx-server --stdio` connects to the already-running per-user daemon through a local
   socket (Unix socket / Windows named pipe) and relays bytes; it starts the daemon if none is running.
 
 ## Crates
 | Crate | Side | Role |
 |---|---|---|
-| `ide-proto` | shared | Frame codec, message types (serde), RPC enum, stream mux + per-stream flow control, resume state, error ids for i18n. Transport-agnostic (`AsyncRead + AsyncWrite`). |
-| `ide-core` | server | Accounts, configurations (+ profile migration), sessions, worktrees, session ops. |
-| `ide-agents` | server | Agent providers (Claude, Codex, shell, declarative TOML): detection, account env, login, configuration -> launch spec. See `docs/agent-providers.md`. |
-| `ide-server` | server | Daemon: local socket listener, `--stdio` relay mode, services (providers, accounts, configurations, sessions, PTY host), `Runner`, path jail, audit hook. |
-| `ide-client` | client | Starts/attaches a server through a `Transport` (local child, `ssh` command, later WebSocket), RPC calls, stream subscriptions as iced `Subscription`s, automatic reconnect + resume. |
-| `ide-term` | client | Terminal widget + client-side VT model fed by bytes (no PTY code). |
-| `ide-web` | client | CEF. Preview/mod HTTP arrives over protocol streams and is served to CEF by a client-local proxy (phase 3). |
-| `ide-i18n` | client | UI strings. The server sends error ids + args, never localized text. |
-| `ide-app` | client | UI only; talks to `ide-client`; never spawns processes or touches project files. |
+| `meninx-proto` | shared | Frame codec, message types (serde), RPC enum, stream mux + per-stream flow control, resume state, error ids for i18n. Transport-agnostic (`AsyncRead + AsyncWrite`). |
+| `meninx-core` | server | Accounts, configurations (+ profile migration), sessions, worktrees, session ops. |
+| `meninx-agents` | server | Agent providers (Claude, Codex, shell, declarative TOML): detection, account env, login, configuration -> launch spec. See `docs/agent-providers.md`. |
+| `meninx-server` | server | Daemon: local socket listener, `--stdio` relay mode, services (providers, accounts, configurations, sessions, PTY host), `Runner`, path jail, audit hook. |
+| `meninx-client` | client | Starts/attaches a server through a `Transport` (local child, `ssh` command, later WebSocket), RPC calls, stream subscriptions as iced `Subscription`s, automatic reconnect + resume. |
+| `meninx-term` | client | Terminal widget + client-side VT model fed by bytes (no PTY code). |
+| `meninx-web` | client | CEF. Preview/mod HTTP arrives over protocol streams and is served to CEF by a client-local proxy (phase 3). |
+| `meninx-i18n` | client | UI strings. The server sends error ids + args, never localized text. |
+| `meninx-app` | client | UI only; talks to `meninx-client`; never spawns processes or touches project files. |
 
 ## Framing
 Every transport carries a sequence of frames:
@@ -99,9 +99,9 @@ account must not be shared by several people; check the Claude/Codex terms for s
 deploying to a company server.
 
 ## Phases
-1. **Local split**: `ide-proto`, `ide-server`, `ide-client`; sessions/accounts/worktrees and PTYs behind
+1. **Local split**: `meninx-proto`, `meninx-server`, `meninx-client`; sessions/accounts/worktrees and PTYs behind
    RPC; app starts a local server over stdio; detach/re-attach with replay; in-memory transport tests.
-   SSH transport = running `ssh <host> ide-server --stdio` with the system OpenSSH client.
+   SSH transport = running `ssh <host> meninx-server --stdio` with the system OpenSSH client.
 2. **Files**: tree, read/write, watch, search, git status/diff, go-to-definition (port Hermes Desk logic).
 3. **Previews/mods**: server-side bundling and dev servers; HTTP over protocol streams to a
    client-local proxy for CEF.
@@ -109,22 +109,22 @@ deploying to a company server.
 5. **Gateway** (optional): WebSocket + SSO for phone/browser, connecting to per-user servers.
 
 ## Phase 1 implementation
-Implemented in `crates/ide-proto`, `crates/ide-server` (lib + bin `ide-server`) and
-`crates/ide-client`; `ide-app` uses them (see "App integration").
+Implemented in `crates/meninx-proto`, `crates/meninx-server` (lib + bin `meninx-server`) and
+`crates/meninx-client`; `meninx-app` uses them (see "App integration").
 
 | Piece | State |
 |---|---|
-| Frame codec, 1 MiB max, kinds Rpc/Data/Window/Open/Close | done (`ide_proto::frame`) |
-| MessagePack RPC (`rmp-serde`, named fields), typed `Request`/`Response`/`Notify`, `PROTO_VERSION` | done (`ide_proto::rpc`) |
-| Errors as stable id + named args (`ProtoError`); `ide-core` errors keep their `ErrorMessage` ids | done |
-| Mux over `AsyncRead + AsyncWrite`, per-stream credit window (256 KiB), control frames before data | done (`ide_proto::Mux`) |
+| Frame codec, 1 MiB max, kinds Rpc/Data/Window/Open/Close | done (`meninx_proto::frame`) |
+| MessagePack RPC (`rmp-serde`, named fields), typed `Request`/`Response`/`Notify`, `PROTO_VERSION` | done (`meninx_proto::rpc`) |
+| Errors as stable id + named args (`ProtoError`); `meninx-core` errors keep their `ErrorMessage` ids | done |
+| Mux over `AsyncRead + AsyncWrite`, per-stream credit window (256 KiB), control frames before data | done (`meninx_proto::Mux`) |
 | Hello/Welcome with resume token | done |
-| `ide-server --stdio` (relay to the daemon, starts it detached), `--daemon`, `--stdio --no-daemon` | done |
-| Providers, accounts (incl. login sessions), configurations; sessions (create via `ide-core` incl. worktree, start/stop/restart/delete/rename) | done |
+| `meninx-server --stdio` (relay to the daemon, starts it detached), `--daemon`, `--stdio --no-daemon` | done |
+| Providers, accounts (incl. login sessions), configurations; sessions (create via `meninx-core` incl. worktree, start/stop/restart/delete/rename) | done |
 | Server-side Term answering queries; 8 MiB ring with byte offsets; attach/resume; title/bell/state notifications | done |
 | `UserInfo` from the transport, authorization (`Server::authorize` + `UserCtx::resolve_session`), `Runner`/`SameUserRunner`, file audit, per-user data dir | done |
-| Path jail | module + tests (`ide_server::PathJail`); used by every phase 2 RPC and `session.create` |
-| Client transports: local child, SSH (`ssh <host> ide-server --stdio`), memory; reconnect + exact resume; iced `Subscription` (feature `iced`) | done; SSH not tested against a real host |
+| Path jail | module + tests (`meninx_server::PathJail`); used by every phase 2 RPC and `session.create` |
+| Client transports: local child, SSH (`ssh <host> meninx-server --stdio`), memory; reconnect + exact resume; iced `Subscription` (feature `iced`) | done; SSH not tested against a real host |
 
 Deviations and details fixed during implementation:
 - **Handshake** is ordinary RPC on stream 0: the first message must be `Request::Hello`, answered
@@ -133,7 +133,7 @@ Deviations and details fixed during implementation:
   offsets are only valid within one instance, so after a server restart the client re-attaches
   without an offset (full replay starting with a reset).
 - **Output log across server restarts**: the ring lives in memory, so each session terminal also
-  appends its output to `sessions/<id>/output.log` (`ide-server/src/outlog.rs`; the last 8 MiB,
+  appends its output to `sessions/<id>/output.log` (`meninx-server/src/outlog.rs`; the last 8 MiB,
   compacted at 12 MiB to a line start; removed with the session folder). A new server seeds the
   session's ring with it when it first makes the host (the server-side `Term` does not parse it:
   its queries, titles and bells belong to a gone process), so the replay after the restart puts
@@ -155,14 +155,14 @@ Deviations and details fixed during implementation:
   client emits right after an attach that could not resume.
 - **Attach** is per connection and session: attaching again replaces the previous stream.
   `term.attach` without an offset always replays from the ring start with `reset`.
-- **Local socket name**: `\\.\pipe\ide-server-<user>`; with `IDE_DATA_DIR` set, a hash of the data
-  dir is appended so separate data dirs get separate daemons; `IDE_SERVER_SOCKET` overrides it.
-  Unix: `<data>/ide-server.sock` (data dir chmod 700).
+- **Local socket name**: `\\.\pipe\meninx-server-<user>`; with `MENINX_DATA_DIR` set, a hash of the data
+  dir is appended so separate data dirs get separate daemons; `MENINX_SERVER_SOCKET` overrides it.
+  Unix: `<data>/meninx-server.sock` (data dir chmod 700).
 - **Daemon lifetime**: runs until killed, `server.shutdown` (stops every session, replies, exits),
   or until idle (no connections, no running sessions) for `--idle-exit SECS` /
-  `IDE_SERVER_IDLE_EXIT_SECS` (default 600; 0 = never). Writes `<data>/ide-server.pid`; logs to
-  `<data>/logs/ide-server.log` (`IDE_SERVER_LOG` filter); audit to `<data>/audit.log` (JSON lines).
-- **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `ide-core`
+  `MENINX_SERVER_IDLE_EXIT_SECS` (default 600; 0 = never). Writes `<data>/meninx-server.pid`; logs to
+  `<data>/logs/meninx-server.log` (`MENINX_SERVER_LOG` filter); audit to `<data>/audit.log` (JSON lines).
+- **Wire types** are the protocol's own (`SessionInfo` with string paths, `Agent`), not `meninx-core`
   structs, so a Unix server can serve a Windows client.
 - **PTY size**: the most recent `term.resize` wins (no separate activity tracking).
 - **Locks**: `term.write` / `term.resize` / `term.attach` run on the connection's request loop
@@ -182,23 +182,23 @@ Deviations and details fixed during implementation:
   on the server Term directly.
 
 Known gaps (phase 1):
-- `ide-core` runs `git` itself, so git processes do not go through `Runner`.
+- `meninx-core` runs `git` itself, so git processes do not go through `Runner`.
 - The Windows pipe uses the default DACL (remote clients rejected); restricting it explicitly to
   the owner is still to do. No `Authenticator` trait yet (gateway phase).
 - The resume token only reports `resumed`; there is no other per-client server state.
 - Stopping a session kills the PTY's direct child; descendants end when the pseudoconsole closes.
 
 ## App integration (phase 1 completion)
-- `ide-app` depends on `ide-client` (+ `ide-proto`, `ide-term`, `ide-web`, `ide-i18n`), not on
-  `ide-core`/`portable-pty`. It never spawns agents, runs git or touches project files. Local state
+- `meninx-app` depends on `meninx-client` (+ `meninx-proto`, `meninx-term`, `meninx-web`, `meninx-i18n`), not on
+  `meninx-core`/`portable-pty`. It never spawns agents, runs git or touches project files. Local state
   only: `<data>/ui.json` (selection, split, detail collapsed, language, per-session web URL, last
   repo folder, server choice, close behaviour) and the CEF profile (`<data>/web`).
-- **Server choice**: settings page (navigation rail) -> Server: Local (default: `ide-server --stdio` next to `ide.exe`,
-  `IDE_DATA_DIR` passed through; the relay attaches to the running daemon or starts it detached
+- **Server choice**: settings page (navigation rail) -> Server: Local (default: `meninx-server --stdio` next to `meninx.exe`,
+  `MENINX_DATA_DIR` passed through; the relay attaches to the running daemon or starts it detached
   without a console) or SSH (`ssh <host> [command]`, `Ssh::new`; no local server is started).
   Switching asks first and reconnects; sessions on the previous server keep running there.
-  `IDE_REMOTE=ssh:<host>` overrides the setting. SSH is verified only for the UI/persistence path
-  and "unreachable host -> disconnected, no local `ide-server` child"; not against a real host.
+  `MENINX_REMOTE=ssh:<host>` overrides the setting. SSH is verified only for the UI/persistence path
+  and "unreachable host -> disconnected, no local `meninx-server` child"; not against a real host.
 - **Terminals**: one `TermModel` per session. A session is attached (`client.attach(id,
   last_offset or None)`) once per client when it is shown, running or has output; attachments stay
   open, so background sessions stay current and switching is instant. `ClientEvent::Term` chunks
@@ -208,8 +208,8 @@ Known gaps (phase 1):
 - **Connection UX**: sidebar footer = server (Local / `ssh host`) + state: connecting, connected
   (server version), reconnecting, disconnected (translated reason) with a retry button. While not
   connected the terminal stays visible read-only (banner) and server actions are disabled.
-- **Errors**: every `ProtoError` id (ide-core, protocol, client) maps to a `tr::err_*` message in
-  `ide-app/src/i18n.rs`; unknown ids show `err-unknown` with the id and args.
+- **Errors**: every `ProtoError` id (meninx-core, protocol, client) maps to a `tr::err_*` message in
+  `meninx-app/src/i18n.rs`; unknown ids show `err-unknown` with the id and args.
 - **Closing the window** never stops agents by itself: with a local server and running sessions
   the app asks "keep running in the background" (default) / "stop all agents and the server" /
   cancel, with "don't ask again" (stored as `on_close` in `ui.json`, changeable in Settings). With
@@ -217,12 +217,12 @@ Known gaps (phase 1):
   Reopening re-attaches and replays the scrollback. Settings also has "Stop server…" (confirm).
 - **Modal z-order**: while a modal is open the web view's GPU primitive is not drawn (the detail
   area shows a plain panel under the backdrop), so nothing can draw above the backdrop or the
-  dialog. Captured before/after in `IDE_APP_SCRIPT` (`08a`/`08b`). Note: on this machine the
+  dialog. Captured before/after in `MENINX_APP_SCRIPT` (`08a`/`08b`). Note: on this machine the
   unfixed build also showed the backdrop over the page (pixel check: page 109 -> 74, linear-space
   blending, so a bright page still looks bright); the fix holds whatever the cause.
 
 ## App integration (phase 2)
-`ide-app/src/detail.rs` (state + logic) and `detail_view.rs` (drawing), mirroring Hermes Desk's
+`meninx-app/src/detail.rs` (state + logic) and `detail_view.rs` (drawing), mirroring Hermes Desk's
 `DetailTabs` + `ChangesPanel`:
 - **Layout**: sidebar | terminal | divider | detail pane | side panel (290 px by default, resized
   by dragging its left edge, `ui.json` `side_width`, min 220 px; outside the split; the divider
@@ -267,8 +267,8 @@ Known gaps (phase 1):
   when registering a repo on the repos page (see `repos-and-workspaces.md`).
 
 ## Phase 2 backend (files, search, git, definitions)
-Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify` variants),
-`ide-server` (`jail`, `fsops`, `watch`, `search`, `git`, `def/`) and `ide-client` (typed methods,
+Implemented in `meninx-proto` (`files.rs` wire types + `Request`/`Response`/`Notify` variants),
+`meninx-server` (`jail`, `fsops`, `watch`, `search`, `git`, `def/`) and `meninx-client` (typed methods,
 `SearchStream`). Capabilities in `Welcome`: `files`, `repos`, `browse-pick`, `search`, `git`, `def`.
 
 | Piece | Rule / state |
@@ -280,23 +280,23 @@ Implemented in `ide-proto` (`files.rs` wire types + `Request`/`Response`/`Notify
 | Watch | `fs.watch{session, repo}` per connection (idempotent); one `notify` watcher per `(session, repo)` worktree shared by all watching connections, dropped with the last unwatch/disconnect/session delete. Debounce: 80 ms quiet, ≤ 400 ms delay; > 1000 paths -> `FsChanged{rescan: true}`; events under `.git` and the linked worktree's git dir -> `GitChanged`. Notifications go only to watching connections. The client re-watches after a reconnect (no replay of the gap). |
 | Search | `search.text`: client-chosen `search` id, reply `Unit` first, then `Notify::SearchHits` batches (100 lines / 100 ms) and one `SearchDone` to that connection only; `search.cancel` or disconnect stops it. `ignore` walker (gitignore unless `include_ignored`, hidden files included, `.git` skipped, files > 8 MiB skipped, binary files skipped), `grep-regex` (literal unless `regex`, case, whole word), override globs. Default cap 2000 lines. `search.files`: `nucleo-matcher` path matching over non-ignored files (≤ 300k), smart case. |
 | Paths (protocol 7) | `search.paths{session, repo, query, max_results, include_ignored}` -> `PathMatches{matches: [{repo, path, dir}], total}`: Explore's 파일 찾기 (Desk): files and folders whose root-relative path contains the query (any case), by path; with `include_ignored` the gitignored files are listed and an ignored folder once (not entered). |
-| User terminals (protocol 7) | `uterm.open{session, repo?, folder?, command?, title?, shell?, cwd?}` (a shell, or `command` run by it, in the worktree / a folder of it / the session folder; empty session = 공용: `cwd` or the home folder, id `g:t<n>`), `uterm.shells` (Windows: PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, WSL when found; else `$SHELL` and `/etc/shells`), `uterm.ports{session}` (listening TCP ports whose process descends from the session's agent / user terminal processes, `listeners` + `sysinfo`: VS Code's `autoForwardPortsSource: process`), `uterm.list`, `uterm.stop`, `uterm.rerun`, `uterm.remove`; `Notify::UTermsChanged{session}`. Id `<session>:t<n>`; output, input and size go through `term.attach/write/resize` with that id (same `TermHost` and ring as sessions); on exit `[exited: code N]` is appended. Kept while the server runs; removed with their session; killed on shutdown. The server-side `Term` of a user terminal keeps 2000 rows of scrollback for the agent's `ide_terminal_read` (`docs/terminals.md`). `scripts.list{session, repo}` -> one `ScriptGroup{file, folder, kind, scripts: [{name, run, detail}]}` per script file (port of Desk's `scripts.ts`). |
-| Skills (protocol 8) | A configuration owns its skills (`ide-core/src/skill.rs`; Hermes Desk keeps an agent's skills in its profile home). `ConfigurationInfo.skills` is `[{name (folder), title, description, enabled}]`; `configuration.update` ignores it. `skill.create{configuration, name, description}` (a `SKILL.md` with that front matter; folder = slug of the name, `skill-exists`), `skill.import{configuration, path}` (copies a server folder with a `SKILL.md`, `.git` and links skipped; `skill-invalid`), `skill.read` -> `SkillText`, `skill.write{.., text}`, `skill.delete`, `skill.enable{.., enabled}` (`skill-not-found` for an unknown name); each change answers with the configuration, regenerates the root files of its workspace sessions and sends `ConfigurationsChanged`. A launch rescans the folder first (edits on disk count). |
+| User terminals (protocol 7) | `uterm.open{session, repo?, folder?, command?, title?, shell?, cwd?}` (a shell, or `command` run by it, in the worktree / a folder of it / the session folder; empty session = 공용: `cwd` or the home folder, id `g:t<n>`), `uterm.shells` (Windows: PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, WSL when found; else `$SHELL` and `/etc/shells`), `uterm.ports{session}` (listening TCP ports whose process descends from the session's agent / user terminal processes, `listeners` + `sysinfo`: VS Code's `autoForwardPortsSource: process`), `uterm.list`, `uterm.stop`, `uterm.rerun`, `uterm.remove`; `Notify::UTermsChanged{session}`. Id `<session>:t<n>`; output, input and size go through `term.attach/write/resize` with that id (same `TermHost` and ring as sessions); on exit `[exited: code N]` is appended. Kept while the server runs; removed with their session; killed on shutdown. The server-side `Term` of a user terminal keeps 2000 rows of scrollback for the agent's `meninx_terminal_read` (`docs/terminals.md`). `scripts.list{session, repo}` -> one `ScriptGroup{file, folder, kind, scripts: [{name, run, detail}]}` per script file (port of Desk's `scripts.ts`). |
+| Skills (protocol 8) | A configuration owns its skills (`meninx-core/src/skill.rs`; Hermes Desk keeps an agent's skills in its profile home). `ConfigurationInfo.skills` is `[{name (folder), title, description, enabled}]`; `configuration.update` ignores it. `skill.create{configuration, name, description}` (a `SKILL.md` with that front matter; folder = slug of the name, `skill-exists`), `skill.import{configuration, path}` (copies a server folder with a `SKILL.md`, `.git` and links skipped; `skill-invalid`), `skill.read` -> `SkillText`, `skill.write{.., text}`, `skill.delete`, `skill.enable{.., enabled}` (`skill-not-found` for an unknown name); each change answers with the configuration, regenerates the root files of its workspace sessions and sends `ConfigurationsChanged`. A launch rescans the folder first (edits on disk count). |
 | Attachments (protocol 9) | `attach.put{session, name, upload?, data}` -> `AttachPath{name, path}`: a file for an agent's prompt (a pasted screenshot; a dropped / pasted file when the server is remote; a local server gets the file's own path instead) stored in `<data>/sessions/<id>/attachments/`, sent in pieces of at most `ATTACH_CHUNK` (512 KiB; frames are capped at 1 MiB): the first piece creates the file (`name` reduced to a safe file name, made unique), the next ones append to it (`upload` = the stored name), at most `ATTACH_MAX` (50 MiB; `attach-too-large`, `attach-not-found`). Removed with the session's data folder. |
 | Explore file ops (protocol 10) | `fs.copy{session, repo, from, external, to_dir}` -> `FsCopied(path)` (a file or folder, links skipped; `external` = an absolute path outside the worktree, e.g. pasted from the file manager; a taken name gets ` copy` / ` copy N`; not into itself); `fs.delete{trash: true}` moves the entry to the OS recycle bin (`trash` crate); `git.remote_url{session, repo, path}` -> `Url` (`<origin web>/blob/<branch>/<path>`). |
 | Pin / archive (protocol 11) | `session.set_flags{id, pinned?, archived?}` -> `Session` (Desk's session PATCH `{pinned}` / `{archived}`; archiving unpins, an archived session stays unpinned); `SessionInfo.pinned` / `.archived`, kept in `sessions.json` only when set. |
-| Widgets (protocol 17) | `widget.list` / `file` / `register` / `delete` / `set_open` / `call` / `data`, `Notify::WidgetsChanged`; bridge tool `ide_widget`. See `docs/widgets.md`. |
-| Previews | `preview.file{session, preview, path}` -> `WidgetFile`; bridge tool `ide_preview`. See `docs/previews.md`. |
-| Approvals (protocol 18) | `approval.list` / `revoke`; the daemon asks apps with `Notify::AgentRequest` `ide.approval`. See `docs/approvals.md`. |
+| Widgets (protocol 17) | `widget.list` / `file` / `register` / `delete` / `set_open` / `call` / `data`, `Notify::WidgetsChanged`; bridge tool `meninx_widget`. See `docs/widgets.md`. |
+| Previews | `preview.file{session, preview, path}` -> `WidgetFile`; bridge tool `meninx_preview`. See `docs/previews.md`. |
+| Approvals (protocol 18) | `approval.list` / `revoke`; the daemon asks apps with `Notify::AgentRequest` `meninx.approval`. See `docs/approvals.md`. |
 | Auto answers (protocol 19) | `ProviderInfo.answers`, `provider.set_auto_answer`. See `docs/auto-answers.md`. |
-| Browser control (protocol 19) | `AgentToolResult.image {data, mime_type}` (optional); the daemon asks apps `Notify::AgentRequest` `ide.browser.site` and the `ide_browser_*` tools. See `docs/browser-control.md`. |
+| Browser control (protocol 19) | `AgentToolResult.image {data, mime_type}` (optional); the daemon asks apps `Notify::AgentRequest` `meninx.browser.site` and the `meninx_browser_*` tools. See `docs/browser-control.md`. |
 | Approval wait (protocol 20) | `approval.wait` / `set_wait`; `Notify::AgentRequestEnded {request, timed_out}` when the daemon stops waiting for an app. See `docs/approvals.md`. |
 | Account integration (protocol 15) | `account.integration{provider, slug, action}` -> `Integration{state, approve_with}`; `ProviderCaps.integration`. See `docs/agent-bridge.md`. |
 | Session handoff (protocol 23) | `session.handoff {id, method, agent?}` / `handoff_cancel`, `SessionInfo.handoff`, `Notify::Handoff`; `Session.previous_conversations`. See `docs/session-handoff.md`. |
-| Session families (protocol 14) | `session.create_child` / `merge_child` / `sync_parent`, `SessionInfo.parent` / `.shared`; bridge tools `ide_list_related_sessions`, `ide_create_child_session`, `ide_send_to_session`, `ide_merge_child`, `ide_sync_from_parent`. See `docs/session-family.md`. |
-| Agent hooks (protocol 13) | `agent.hook{event}` from `ide-server hook` -> `AgentHookDecision`; `SessionInfo.activity` / `Notify::Activity` (Unknown / Idle / Working / NeedsInput). See `docs/agent-bridge.md`. |
-| Agent bridge (protocol 12) | `Hello.agent{session, token}` opens an agent connection (only `agent.tools`, `agent.call`); `Notify::AgentRequest` / `agent.reply` let an app carry out a tool; `ide-server mcp` is the MCP server every agent session gets. See `docs/agent-bridge.md`. |
-| Git | `git.status`: porcelain v2 (`--find-renames`, untracked files listed individually), upstream ahead/behind, base = request `base` or the branch checked out in the session's repo (else `main`/`master`), ahead/behind + merge base. `git.diff`: `WorkingTree` (index->worktree), `Index` (HEAD->index), `Head` (HEAD->worktree), `Base` (merge base->worktree); structured hunks with old/new line numbers, `no_newline`, binary flag, renames (the old path is added to the pathspec when asking for one renamed file), untracked files as all-added (`--no-index`). `git.file_at`: `Head`, `Index`, `Base`, `Rev(commit-ish)` -> `Option<FileContent>`. Revisions starting with `-` or containing `:`/`..`/whitespace -> `git-bad-rev`. All via `ide_core::git_raw` (`-c core.quotepath=false`, `GIT_TERMINAL_PROMPT=0`, stdin closed, `GIT_OPTIONAL_LOCKS=0`, no console window) — **not through `Runner` yet**; move it there when runners isolate users (containers). History tab (`git.log`, `git.unpushed`, `git.commit_files`, `git.commit_diff`, protocol 5): see `git-history.md`. Local git actions of the Changes / History tabs (discard, stash, commit actions, sync / push / pull, branch picker, 새 브랜치로 이어가기; protocol 6): see `changes-actions.md`. |
+| Session families (protocol 14) | `session.create_child` / `merge_child` / `sync_parent`, `SessionInfo.parent` / `.shared`; bridge tools `meninx_list_related_sessions`, `meninx_create_child_session`, `meninx_send_to_session`, `meninx_merge_child`, `meninx_sync_from_parent`. See `docs/session-family.md`. |
+| Agent hooks (protocol 13) | `agent.hook{event}` from `meninx-server hook` -> `AgentHookDecision`; `SessionInfo.activity` / `Notify::Activity` (Unknown / Idle / Working / NeedsInput). See `docs/agent-bridge.md`. |
+| Agent bridge (protocol 12) | `Hello.agent{session, token}` opens an agent connection (only `agent.tools`, `agent.call`); `Notify::AgentRequest` / `agent.reply` let an app carry out a tool; `meninx-server mcp` is the MCP server every agent session gets. See `docs/agent-bridge.md`. |
+| Git | `git.status`: porcelain v2 (`--find-renames`, untracked files listed individually), upstream ahead/behind, base = request `base` or the branch checked out in the session's repo (else `main`/`master`), ahead/behind + merge base. `git.diff`: `WorkingTree` (index->worktree), `Index` (HEAD->index), `Head` (HEAD->worktree), `Base` (merge base->worktree); structured hunks with old/new line numbers, `no_newline`, binary flag, renames (the old path is added to the pathspec when asking for one renamed file), untracked files as all-added (`--no-index`). `git.file_at`: `Head`, `Index`, `Base`, `Rev(commit-ish)` -> `Option<FileContent>`. Revisions starting with `-` or containing `:`/`..`/whitespace -> `git-bad-rev`. All via `meninx_core::git_raw` (`-c core.quotepath=false`, `GIT_TERMINAL_PROMPT=0`, stdin closed, `GIT_OPTIONAL_LOCKS=0`, no console window) — **not through `Runner` yet**; move it there when runners isolate users (containers). History tab (`git.log`, `git.unpushed`, `git.commit_files`, `git.commit_diff`, protocol 5): see `git-history.md`. Local git actions of the Changes / History tabs (discard, stash, commit actions, sync / push / pull, branch picker, 새 브랜치로 이어가기; protocol 6): see `changes-actions.md`. |
 | Definitions | `def.lookup{session, path, line, col, text?}`: port of Hermes Desk `definitions.ts` + langpacks (JS, TS + tsconfig `paths`/`baseUrl`/`extends`/solution `references`, Python, Vue SFC): import specifier -> module file; `ns.member` of a module import; parameters of the enclosing function win; nearest same-file declaration above; import bindings followed through re-exports (`export {a as b} from`, `export *`, `export default x`, Python `__init__` re-exports) up to 3 hops; external modules -> the import binding; finally `git grep -w --untracked` over the pack's globs, top-level declarations preferred, same directory first, ≤ 50 targets. Reads are jailed and ≤ 2 MiB. The TS unit tests are ported (`def/tests.rs`, `def/{js,py,ts,vue}.rs`). Deviation: identifiers may contain non-ASCII characters (Hermes Desk treated them as separators). |
 
 Error ids added (args): `path-invalid` (`path`), `fs-not-found` / `fs-exists` / `fs-permission` /

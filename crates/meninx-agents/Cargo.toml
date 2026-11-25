@@ -1,0 +1,15 @@
+[package]
+name = "meninx-agents"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Agent providers (Claude Code, Codex, shell, declarative TOML): accounts, configurations -> launch specs. Server side, UI-free."
+
+[dependencies]
+meninx-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+toml = "1"
+# Screen rules (screen.rs).
+regex = "1"

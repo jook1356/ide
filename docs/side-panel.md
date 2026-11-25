@@ -4,9 +4,9 @@ The side panel right of the detail pane follows Hermes Desk's `ChangesPanel`
 (`powered_ide/src/renderer/src/components/ChangesPanel.tsx`), its History list and its Explore
 tab (`ExploreTree.tsx`).
 
-## Hermes Desk behaviour -> ide file
+## Hermes Desk behaviour -> Meninx file
 
-| Hermes Desk | ide |
+| Hermes Desk | Meninx |
 |---|---|
 | Tabs `Changes \| History \| Explore` (`ChangesPanel.tsx`, `Tabs.List grow`), Changes with a count badge, History with the unpushed count (`500+` at the cap, tooltip `원격에 올라가지 않은 커밋 {n}개`) | `detail_view.rs::side_panel` builds the tab row with `tab(SideTab, label, badge)` (badge = text + tooltip); tabs are `detail.rs::SideTab` (order = Desk order); History's badge is `HistoryState::badge`. |
 | Selected tab remembered | `DetailUi.side` in `ui.json` (`SideTab::code` / `SideTab::parse`); the old value `"search"` opens Explore. |
@@ -18,7 +18,7 @@ tab (`ExploreTree.tsx`).
 | Revealing a file in the tree clears the filter | `App::tree_reveal` clears `SearchState` |
 | (no content search in Desk's Explore) | Text search of every repo below the file names under the `내용` / `Contents` label, with the status (`검색 중…`, counts, errors) next to it; starts 250 ms after the last keystroke (`DetailMsg::SearchTyped`) or at once on Enter (`SearchSubmit`); results grouped by repo and file as before |
 | Ctrl+Shift+F (none in Desk) | `Message::FindInFiles` -> `App::open_search`: shows Explore and focuses its input (`SEARCH_ID`) |
-| Tree selection: click, Ctrl+click toggles, Shift+click a range (`ExploreTree.tsx` multi-select) | `ide_views::FileTree` (`selection`, `set_modifiers` fed from `App::modifiers` before each `TreeMessage`); actions act on the topmost selected entries (`selected_paths`) |
+| Tree selection: click, Ctrl+click toggles, Shift+click a range (`ExploreTree.tsx` multi-select) | `meninx_views::FileTree` (`selection`, `set_modifiers` fed from `App::modifiers` before each `TreeMessage`); actions act on the topmost selected entries (`selected_paths`) |
 | Row context menu (Desk order): 새 파일 / 새 폴더, 입력창에 첨부(N개), 잘라내기 / 복사 / 붙여넣기 (Ctrl+X/C/V), OS 탐색기에서 보기, 경로 / 상대 경로 / 원격 파일 URL 복사 (one entry), 이름 변경 (F2), 삭제 (Del) | `tree.rs::MenuAction` -> `TreeEvent`s handled in `explore_actions.rs` (create / rename / delete stay in `detail.rs`); right-click on an unselected row selects only it |
 | Cut / copy / paste | `ExploreClip` in the app (session, repo, paths, cut); with a local server the files also go on the OS clipboard. Paste reads the OS clipboard first: files that are not ours are copied in (`fs.copy external`, local server only); else cut = `fs.rename` per entry (once), copy = `fs.copy` (a taken name becomes `name copy.ext`, `name copy 2.ext`) |
 | Delete to the recycle bin, several at once (`삭제` with `항목 N개를 삭제할까요?`) | `DeleteEntryForm.more`; `fs.delete{trash: true}` per entry (server `trash` crate) |
@@ -28,7 +28,7 @@ tab (`ExploreTree.tsx`).
 
 ## History (Desk `ChangesPanel` History, `CommitRow`, `CommitFileRow`)
 
-| Hermes Desk | ide |
+| Hermes Desk | Meninx |
 |---|---|
 | `loadRepositoryHistory`: `changes:log(dir, 0, max(200, shown))` + `github:historyLocal`, again whenever the repo's version changes (watcher / after git actions), also while another tab is shown (badge) | `App::load_history` (`git.log` + `git.unpushed`, `HistoryState::refresh_limit`) from `sync_detail` (first show of the repo, stale after a reconnect, a kept view marked outdated), `after_git_change` (`GitChanged` of the shown repo: commits, checkouts, pushes) and opening the History tab; answers of older refreshes are dropped (`seq`) |
 | Picking another repo shows its history | `Detail::set_repo` keeps the old repo's view and shows the picked one's kept view at once (see "Per-repo cache" below), else an empty one that `sync_detail` loads |
@@ -50,12 +50,12 @@ tab (`ExploreTree.tsx`).
 - Explore also holds the text search (the former Search tab) under a section label.
 - Matched characters are not highlighted in file-name rows (Desk does not either); text matches are
   highlighted as before.
-- History: commit diffs open as normal items (the ide has no preview tab that the next diff
+- History: commit diffs open as normal items (Meninx has no preview tab that the next diff
   replaces, same as Changes); the list shows `불러오는 중…` until the first page arrived (Desk shows
   `커밋이 없습니다.` meanwhile); a failed `git.log` shows `커밋 목록을 불러오지 못했습니다: …` as a toast
   (Desk: notification); the full date is `YYYY-MM-DD HH:MM` (Desk: the browser's `toLocaleString`).
 - History omits (not ported): dragging a commit into the chat and the commit menu's 채팅에 첨부
-  (the ide has no chat composer). Desk's merge commits list nothing; ide shows them against the
+  (Meninx has no chat composer). Desk's merge commits list nothing; Meninx shows them against the
   first parent (`docs/git-history.md`). The commit menu, the reveal buttons and the stash section
   are described under "Changes / History actions" below; the AI commit / sync / PR footer is
   the footer's (`footer.rs`).
@@ -66,11 +66,11 @@ State `changes_actions.rs` (`ChangesActs` in `Detail::acts`, messages `ActMsg` v
 `DetailMsg::Acts`, dialogs `ChangesModal` in `Modal::Changes`), drawing `changes_view.rs`,
 backend calls as listed in `docs/changes-actions.md` ("What the UI does per Desk control").
 
-| Hermes Desk | ide |
+| Hermes Desk | Meninx |
 |---|---|
 | `snapshot.files` (one row per path) and `unchecked` (every file starts checked) | `ChangesActs::files` from `git.status` (`snapshot_files`: one entry per path, kind against HEAD: conflict > staged > unstaged > untracked), `ChangesActs::unchecked` (paths no longer changed are forgotten) |
 | Select-all `Checkbox` (checked / indeterminate) + `N changed files` / the status error | `changes_view.rs::changes_head`: `check_box(Some(true) / None / Some(false))`, `ActMsg::CheckAll`; text `changes-count` |
-| Row `Checkbox` | `change_row` (drawn through `ChangesList::view_with`, which keeps the group headers and virtual scrolling of `ide-views`), `ActMsg::Check` |
+| Row `Checkbox` | `change_row` (drawn through `ChangesList::view_with`, which keeps the group headers and virtual scrolling of `meninx-views`), `ActMsg::Check` |
 | 임시 보관 `ActionIcon` (`IconArchive`, tooltip 변경 임시 보관 / 체크한 N개 임시 보관, disabled with nothing checked) + popover (text, 메모 input, `새 파일(추적 안 됨)도 함께 보관돼요`, 취소 / 임시 보관; Enter submits) | `changes_head` (popover under the button, memo focused on open); `ActMsg::StashSubmit` -> `git_stash_push(memo.trim(), None` when all checked, else checked paths + rename sources`)`; toast `변경 N개를 임시 보관했어요` / `임시 보관 실패: …` |
 | `StashSection` (only with stashes; this branch's, `다른 브랜치 임시 보관 N개 보기` / `이 브랜치 것만 보기`; row: chevron, title, `N개 · time (· branch)`, pop / apply / drop buttons; unfolds into the files; drop asks 임시 보관 버리기) | `changes_view.rs::stash_section` (docked under the rows, scrolls past 220 px); `git_stash_list` after every `git.status` answer; `ActMsg::StashAct` / `StashDone` (conflicts -> Desk's warning, stash kept); drop -> `ModalKind::StashDrop` |
 | Row right-click `Menu` at the pointer: 변경 취소, 체크한 파일 모두 변경 취소 (n개) (more than one checked), Explore에서 보기 | `mouse_area::on_right_press` -> `ActMsg::Menu`; popover **under the row** (iced has no pointer-anchored menu); 탐색기에서 보기 |
@@ -91,8 +91,8 @@ Option<&GitStatus>`, `App::refresh_repo(sid) -> Task<Message>`.
 ### Deviations
 
 - Context menus open at the pointer: the row reports where it was right-clicked
-  (`ide_views::Interact::absolute`) and the menu is drawn over the app window.
-- The list keeps the ide's staged / changes / untracked groups (Desk: one flat list); a path in
+  (`meninx_views::Interact::absolute`) and the menu is drawn over the app window.
+- The list keeps Meninx's staged / changes / untracked groups (Desk: one flat list); a path in
   two groups has one checkbox state, and the tab badge / `N changed files` count paths.
 - The checkbox is drawn (iced's checkbox has no indeterminate state).
 - Desk's notifications are notices of the notification centre (`docs/notifications.md`), shown
@@ -110,8 +110,8 @@ Option<&GitStatus>`, `App::refresh_repo(sid) -> Task<Message>`.
 
 ### Omissions
 
-- 채팅에 첨부 in the commit menu and dragging commits (no chat composer in the ide).
-- Ctrl / middle / double click "keep the tab" variants of rows (the ide has no preview tab).
+- 채팅에 첨부 in the commit menu and dragging commits (no chat composer in Meninx).
+- Ctrl / middle / double click "keep the tab" variants of rows (Meninx has no preview tab).
 
 ### Tests
 

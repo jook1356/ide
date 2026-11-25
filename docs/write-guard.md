@@ -1,14 +1,14 @@
 # Write guard
 
 Status: implemented. An agent writes freely only inside its own session; writing anywhere else
-needs the user's approval, per folder, through ide's approval system (`docs/approvals.md`).
-Code: `ide-core/src/write_guard.rs` (what a tool call writes, what leaves the session),
-`ide-server/src/service/write_guard.rs` (scope, asking), hooks in `ide-agents` (Claude, Codex).
+needs the user's approval, per folder, through Meninx's approval system (`docs/approvals.md`).
+Code: `meninx-core/src/write_guard.rs` (what a tool call writes, what leaves the session),
+`meninx-server/src/service/write_guard.rs` (scope, asking), hooks in `meninx-agents` (Claude, Codex).
 
 ## Why
 
 Sessions used to read *and write* anything: an agent asked to "merge into main" would `cd` into
-the registered repository's own checkout, merge there and push. ide then could not follow the
+the registered repository's own checkout, merge there and push. Meninx then could not follow the
 session's work (its branch badge went from 커밋 있음 to 변경 없음 instead of 머지됨, the merge
 happened outside every session). Reading stays free; writing outside the session goes through
 the user.
@@ -17,7 +17,7 @@ the user.
 
 - The session folder (`Session::root`: the workspace folder; original-repo sessions: the
   repository) and legacy worktrees outside it.
-- Git writes in the session's worktrees **on the session's branch** (`ide/<id>`); an
+- Git writes in the session's worktrees **on the session's branch** (`meninx/<id>`); an
   original-repo session on the repository's **current** branch.
 - The session's data folder (`<data>/sessions/<id>`: scratch files, attachments), the agents'
   account folders (`<data>/accounts`; without an account, the CLI's default config home that
@@ -43,7 +43,7 @@ folder as target.
 
 ## How
 
-1. The CLI's `PreToolUse` hook (`ide-server hook`) sends edits (`PreEdit { paths }`) and shell
+1. The CLI's `PreToolUse` hook (`meninx-server hook`) sends edits (`PreEdit { paths }`) and shell
    commands (`PreShell { command, cwd }`) to the daemon. Claude: every tool (Bash and PowerShell
    are shells); Codex: `apply_patch|Edit|Write|Bash|exec_command|shell|PowerShell`.
 2. The daemon (`UserCtx::write_refusal`, off the connection loop) turns the call into writes
@@ -52,7 +52,7 @@ folder as target.
    `/c/...` to `C:/...`), keeps those outside the scope (`write_guard::needs`, one per folder),
    and checks the grants (`Grants::allows_folder`: a grant on the folder or one above).
 3. Not granted: the user is asked (`folder.write`, target = the folder). Refused, closed, timed
-   out or no ide window open: the hook denies the tool call with a reason telling the agent not
+   out or no Meninx window open: the hook denies the tool call with a reason telling the agent not
    to work around it and to ask the user instead.
 4. The hook waits as long as the question can take: the wait the user chose
    (`docs/approvals.md`); `PreToolUse` hook timeout 1 day, the hook program a day less a minute
@@ -63,9 +63,9 @@ folder as target.
 A guard, not a sandbox: a shell can always write in ways a command line does not show
 (variables, scripts, programs writing files themselves, `git` aliases). Unknown paths (a
 variable, a relative path without a cwd) are not asked for. Sessions without hooks (the plain
-shell provider, a Codex account without ide's hooks installed) are not guarded. A provider
+shell provider, a Codex account without Meninx's hooks installed) are not guarded. A provider
 whose hooks come from an account integration (`AgentProvider::integration_status`) marks its
 sessions `SessionInfo::unguarded` while that integration is missing or outdated (or the session
 has no account): the session list shows a warning mark after the title, pointing to the
-account's settings; installing or removing an integration refreshes the list. ide's own git
+account's settings; installing or removing an integration refreshes the list. Meninx's own git
 actions (footer commit / PR / merge, child merges) run in the daemon and are not affected.

@@ -1,4 +1,4 @@
-# ide
+# Meninx
 
 A native Rust desktop IDE for coding agents. Each session runs an agent CLI (Claude Code, Codex, or a
 shell) in its own terminal and git worktree; web content (previews, mods, browser tabs) runs in an

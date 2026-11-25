@@ -10,10 +10,10 @@ Port of the backend behind Hermes Desk's Changes panel footer and History contex
 
 Every RPC names `(session, repo)` like `git.status` and runs in that repo's worktree of the
 session (`session-not-found`, `repo-not-attached` as usual); paths are worktree-relative and
-jailed (`path-invalid`, `path-denied`). Server code: `ide-server/src/git_actions.rs` (pure
+jailed (`path-invalid`, `path-denied`). Server code: `meninx-server/src/git_actions.rs` (pure
 functions on the worktree root + `UserCtx::handle_git_actions`); wire types:
-`ide-proto/src/git_actions.rs`; client methods `Client::git_*` (re-exported types in
-`ide-client`). Git runs through `ide_core::git_raw` / an own timed runner with Desk's
+`meninx-proto/src/git_actions.rs`; client methods `Client::git_*` (re-exported types in
+`meninx-client`). Git runs through `meninx_core::git_raw` / an own timed runner with Desk's
 `NO_PROMPT` (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`), `core.quotepath=false`; network
 commands are killed after Desk's timeouts (`git-timeout`). Mutations are audited
 (`git.discard`, `git.stash_push`, `git.stash_action`, `git.commit_action`, `git.push`,
@@ -21,9 +21,9 @@ commands are killed after Desk's timeouts (`git-timeout`). Mutations are audited
 `<session> <repo> <detail>`). The worktree watcher reports the resulting `FsChanged` /
 `GitChanged`; `git.refresh_branch` also sends `SessionsChanged` (the worktree's recorded branch).
 
-### Hermes Desk handler/component -> ide RPC/file
+### Hermes Desk handler/component -> Meninx RPC/file
 
-| Hermes Desk | ide |
+| Hermes Desk | Meninx |
 |---|---|
 | `changes:discard` -> `discardChange(dir, file)`; ChangesPanel 변경 취소 modal (loops over the checked files) | `git.discard {session, repo, file: GitChange}` -> `Unit` (`Client::git_discard`). `Untracked` deleted (link removed, not followed; already gone is fine), `Added`/`Copied` `git rm -f`, `Renamed` `restore --source=HEAD --staged --worktree <orig>` + `rm -f <path>`, anything else restored from HEAD. One file per call like Desk. |
 | `git:listStashes` -> `listStashes` (`useStashes`, StashSection) | `git.stash_list` -> `Response::GitStashes(Vec<StashEntry>)` (`git_stash_list`): `stash list --format=%H%x1f%ct%x1f%s`, subject parsed (`On <b>: msg` / `WIP on <b>: …`), `auto` = message starts with `hermes-desk:` (message then empty), files from `stash show --name-status --include-untracked -z` with the 3rd parent's paths as `Untracked`. Git failure = empty list. |
@@ -61,7 +61,7 @@ commands are killed after Desk's timeouts (`git-timeout`). Mutations are audited
 
 ### Error ids
 
-New (server-side `ProtoError`, no `ide-core` variants): `git-bad-branch` (`name`),
+New (server-side `ProtoError`, no `meninx-core` variants): `git-bad-branch` (`name`),
 `git-detached`, `git-no-upstream`, `git-push-changed`, `git-busy`, `git-in-progress`,
 `git-dirty`, `git-merge-commit`, `git-branch-checked-out` (`branch`, `path`),
 `git-unknown-remote` (`remote`), `git-branch-exists` (`name`), `git-stash-empty`,
@@ -98,7 +98,7 @@ git older than 2.40). Reused: `git-bad-rev` (`rev`), `git-no-base` (`base`), `gi
 
 ### Tests
 
-`ide-server/src/git_actions.rs` unit tests (scratch repos under `IDE_TEST_TMP`, local bare
+`meninx-server/src/git_actions.rs` unit tests (scratch repos under `MENINX_TEST_TMP`, local bare
 `origin`s): `discard_each_kind`, `stash_list_push_actions` (partial / all / untracked, apply,
 pop by sha, conflicting pop, gone / bad ids), `stash_subjects`, `commit_actions` (validation,
 dirty, revert, cherry-pick, branch, detached checkout, merge commit, in-progress, busy slot
@@ -109,9 +109,9 @@ throttled fetch shared by worktrees, carry / stash switches, refused switch keep
 remote branch checkout and cleanup, create from remote / local base), `suggest_names`,
 `branch_refresh` (in-base detection, dry runs with commit and file conflicts, refused runs,
 moved / skipped / left commits with carried changes, conflicting changes left in the stash,
-detached). `ide-server/tests/git_actions_e2e.rs` (memory and real child transports): the whole
-flow through `ide_client::Client`, including the session's recorded branch after
-`git.refresh_branch`. `ide-proto` round trip covers the new messages.
+detached). `meninx-server/tests/git_actions_e2e.rs` (memory and real child transports): the whole
+flow through `meninx_client::Client`, including the session's recorded branch after
+`git.refresh_branch`. `meninx-proto` round trip covers the new messages.
 
 ## Pull requests and agent prompts
 
@@ -122,13 +122,13 @@ Port of Desk's PR backend (`src/main/github.ts`: `pullRequestStatus`, `pullReque
 `github:*` in `src/main/index.ts`), of the prompt texts (`renderer/src/lib/taskPrompts.ts`) and
 of the renderer's PR decisions (`lib/prStatus.ts` `mergeBlocker`, `lib/prRecheck.ts`
 `driftChange`, `lib/pullRequestFlow.ts` `mergeAfterCreateStep`, `lib/prTarget.ts`,
-`lib/prPending.ts`). Server: `ide-server/src/pr.rs` (+ `pr/tests.rs`), dispatched from
-`UserCtx::handle_files`; wire types and pure helpers: `ide-proto/src/pr.rs`; prompt texts and
-the PR file path: `ide-core/src/prompts.rs`; prompt delivery: `ide-agents/src/prompt.rs`
+`lib/prPending.ts`). Server: `meninx-server/src/pr.rs` (+ `pr/tests.rs`), dispatched from
+`UserCtx::handle_files`; wire types and pure helpers: `meninx-proto/src/pr.rs`; prompt texts and
+the PR file path: `meninx-core/src/prompts.rs`; prompt delivery: `meninx-agents/src/prompt.rs`
 (`AgentProvider::prompt_input`); client: `Client::pr_*`, `prompt_*`, `send_prompt`.
 Capabilities `pr`, `send-prompt`.
 
-**GitHub transport: Desk's way first, `gh` as the fallback** (`ide-server/src/pr/github.rs`,
+**GitHub transport: Desk's way first, `gh` as the fallback** (`meninx-server/src/pr/github.rs`,
 `GithubTransport`, behind the `GhApi` seam the PR functions use).
 
 - **Primary (Desk `credentialToken` / `fillCredential` / `githubApi` / `githubHeaders`).** The
@@ -147,7 +147,7 @@ Capabilities `pr`, `send-prompt`.
   -> `github-auth` (`host`).
 - **Fallback (`gh`), only when git yields no token** (no credential, helper failed, timeout):
   `gh api --hostname <host> --include -X <METHOD> <path>` (GET parameters as `-f k=v`, JSON
-  bodies on stdin with `--input -`). `gh` is `IDE_GH` / `ServerConfig::gh` if set (missing file
+  bodies on stdin with `--input -`). `gh` is `MENINX_GH` / `ServerConfig::gh` if set (missing file
   -> not found), else `gh` on the server's `PATH`, else `%ProgramFiles%\GitHub CLI\gh.exe`,
   `%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe` (`/opt/homebrew/bin`, `/usr/local/bin`,
   `/usr/bin` elsewhere). No token and no `gh` -> `github-no-credentials` (`host`); `gh` exit 4
@@ -157,7 +157,7 @@ Capabilities `pr`, `send-prompt`.
   retry (Desk: the `fetch` error).
 - `pr.create` treats `gh-auth`, `gh-missing`, `github-auth` and `github-no-credentials` as "no
   API" and returns the prefilled page (Desk: no token -> page).
-- Test hooks: `IDE_GITHUB_API` / `ServerConfig::github_api` replaces the API root of every host
+- Test hooks: `MENINX_GITHUB_API` / `ServerConfig::github_api` replaces the API root of every host
   (and disables proxies), `ServerConfig::git_credential_env` adds environment to
   `git credential fill` (tests pass `GIT_CONFIG_GLOBAL=<scratch config with a test
   credential.helper>`, `GIT_CONFIG_NOSYSTEM=1`). `origin` is parsed like Desk (`git remote get-url origin`, https/ssh, credentials
@@ -165,9 +165,9 @@ dropped); when that URL is not a web URL (an `insteadOf` rewrite) the configured
 `remote.origin.url` is parsed instead. GitLab: lookups/merge/close refused (`pr-gitlab`), create
 returns the prefilled merge-request page.
 
-### Hermes Desk handler -> ide RPC
+### Hermes Desk handler -> Meninx RPC
 
-| Hermes Desk | ide (`Request` -> `Response`, client method) |
+| Hermes Desk | Meninx (`Request` -> `Response`, client method) |
 |---|---|
 | `github:prStatus` -> `pullRequestStatus` | `pr.status {session, repo}` -> `PrStatus(Option<PrStatus>)`, `pr_status`. List `pulls?state=all&head=<owner>:<branch>&per_page=20&sort=created&direction=desc`, same-repo heads only, open first; detail GET (one retry after 1.5 s while `mergeable` is null); latest review per reviewer. Detached -> `pr-detached`. |
 | `github:prGate` -> `pullRequestGate` | `pr.gate {number}` -> `PrGate(PrGate{head_sha, review_decision, merge_state, checks})`, `pr_gate`. Desk's GraphQL query and `checkState` mapping. |
@@ -175,7 +175,7 @@ returns the prefilled merge-request page.
 | `github:remoteBranches` | `pr.remote_branches` -> `PrTargets(PrTargets{branches, default_branch, current})` (`ls-remote --symref origin HEAD refs/heads/*`, 60 s), `pr_remote_branches`. |
 | `github:pendingWork` | `pr.pending_work` -> `PrPendingWork(PendingWork{branch, commits (≤30), commit_count, files, published})`, `pr_pending_work`. |
 | `github:prLeftover` | `pr.leftover {base: Option}` -> `PrLeftover(PrLeftover{head, file: Option<PrLeftoverFile{path, title, body, written_at, used_for, reason, matches, new_commits}>, changes, commits})`, `pr_leftover`. |
-| `github:prFilePath` + `github:resetPrFile` | `pr.reset_file` -> `PrFile{path}`, `pr_reset_file`: removes `<file>` and `<file>.meta.json`, creates the folder. PR file = `<session folder>/.ide/pr-<repo name, [^A-Za-z0-9_.-]+ -> _>.md` (Desk: `.hermes-desk/`). Workspace sessions only (`pr-needs-workspace`). |
+| `github:prFilePath` + `github:resetPrFile` | `pr.reset_file` -> `PrFile{path}`, `pr_reset_file`: removes `<file>` and `<file>.meta.json`, creates the folder. PR file = `<session folder>/.meninx/pr-<repo name, [^A-Za-z0-9_.-]+ -> _>.md` (Desk: `.hermes-desk/`). Workspace sessions only (`pr-needs-workspace`). |
 | `github:prDrift` | `pr.drift {since: Option, allowed}` -> `PrDrift(PrDrift{head, rewritten, commits: Vec<DriftCommit{sha, subject, full, expected}>, files})`, `pr_drift`. |
 | `github:unmerged` -> `unmergedWork` | `pr.unmerged` -> `PrUnmerged(Option<UnmergedWork{commits, conflict}>)` against the session's base (`Session::base_of`), `pr_unmerged`. Not cached. |
 | `github:commitPrPreview` | `pr.commit_preview {base, push}` -> `PrCommitPreview(CommitPrPreview{title, body, commits, head, source_head, base_head, branch})`, `pr_commit_preview` (fetches `origin/<base>`, and `origin/<branch>` when `push` is false). |
@@ -188,7 +188,7 @@ returns the prefilled merge-request page.
 | `taskPrompts.renderPrPrompt` (`requestPullRequest`) | `prompt.pr {target, exclude: PrExclusions}` -> `Prompt(String)`, `prompt_pr`: Desk's PR template with the PR file path and `exclusionLines` (branch = the worktree's branch). `target` checked like a branch (`pr-bad-branch`). Workspace sessions only. |
 | `askAgent` / `sendPromptTracked` (chat send) | `session.send_prompt {session, text}` -> `Unit`, `send_prompt`. See below. |
 
-Pure helpers (ide-proto, re-exported by ide-client): `merge_blocker(&PrStatus) ->
+Pure helpers (meninx-proto, re-exported by meninx-client): `merge_blocker(&PrStatus) ->
 Option<MergeBlocker>`, `merge_after_create_step(pr, number, gate, blocked_for_secs, target) ->
 MergeStep` (+ `MERGE_POLL_SECS`, `MERGE_MAX_WAIT_SECS`, `UNEXPLAINED_BLOCK_SECS`),
 `drift_change(&PrDrift, before_head, before_files, files_included) -> Option<PrRecheckChange>`,
@@ -198,7 +198,7 @@ MergeStep` (+ `MERGE_POLL_SECS`, `MERGE_MAX_WAIT_SECS`, `UNEXPLAINED_BLOCK_SECS`
 ### Delivering a prompt (`session.send_prompt`)
 
 The provider says how its CLI takes input (`AgentProvider::prompt_input() -> PromptInput`,
-`ide_agents::prompt_writes`); the server writes to the running PTY (`session-not-running`
+`meninx_agents::prompt_writes`); the server writes to the running PTY (`session-not-running`
 otherwise). The text is cleaned first: CRLF/CR -> LF, every control character except LF and
 tab removed (so it can neither end a paste nor start an escape sequence), trimmed; nothing left
 -> `prompt-empty`. Audited (`session.send_prompt`, length only).
@@ -261,14 +261,14 @@ with), `github-failed` (`detail`; no HTTP answer with the credential token), `gh
 
 - **`gh` fallback** (Desk has none): hosts git has no token for still work when `gh` is logged
   in, and a token GitHub refuses (401) is retried once through `gh` (Desk only forgets it).
-- **`User-Agent: ide-server`** (Desk: `hermes-desk`).
+- **`User-Agent: meninx-server`** (Desk: `hermes-desk`).
 - **Server-chosen PR file**: `pr.create` / `pr.commit_text` take no path (Desk passes the path
-  from the renderer); folder `.ide/` instead of `.hermes-desk/`.
+  from the renderer); folder `.meninx/` instead of `.hermes-desk/`.
 - **Meta `reason` is a `ProtoError`** (translatable) instead of Desk's Korean sentence;
   `written_at` / `attemptAt` in seconds.
-- **Commit-based PR body** ends with `_커밋 기록으로 작성했어요 (ide)._` (Desk: `(Hermes Desk)`).
+- **Commit-based PR body** ends with `_커밋 기록으로 작성했어요 (Meninx)._` (Desk: `(Hermes Desk)`).
 - **No PR records / events** (`github:prEvents`, `prSighting`, `mergedPrHead`, focus recheck):
-  ide has no chat to show "PR #N이 올라왔어요"; `pending_work` therefore does not subtract a
+  Meninx has no chat to show "PR #N이 올라왔어요"; `pending_work` therefore does not subtract a
   merged PR's commits (pass the merged head to the sibling's `git.sync_status` from `pr_status`).
 - **No per-repo prompt templates** (`repo.taskPrompts` / the global customization): Desk's
   defaults only.
@@ -283,7 +283,7 @@ with), `github-failed` (`detail`; no HTTP answer with the credential token), `gh
 
 ### Tests
 
-`ide-server/src/pr/tests.rs` (local bare `origin` behind an `insteadOf` GitHub URL, in-process
+`meninx-server/src/pr/tests.rs` (local bare `origin` behind an `insteadOf` GitHub URL, in-process
 fake `GhApi` recording calls; the transport tests run `git credential fill` against a scratch
 config only — `GIT_CONFIG_GLOBAL` with a test `credential.helper`, `GIT_CONFIG_NOSYSTEM=1` —
 and a local fake GitHub over HTTP; never the user's credential store or real GitHub):
@@ -292,35 +292,35 @@ encoding, GraphQL body, gh untouched, cache), `transport_falls_back_to_gh_withou
 (gh called, HTTP untouched; no `gh` -> `github-no-credentials`),
 `transport_forgets_a_refused_token` (401 -> forgotten + one `gh` retry; no `gh` ->
 `github-auth`; no answer -> `github-failed`), `origins_urls_and_gh_output` (origin parsing, compare URLs,
-`gh --include` parsing, argument lists, `IDE_GH` resolution, porcelain), `pr_file_reading`,
+`gh --include` parsing, argument lists, `MENINX_GH` resolution, porcelain), `pr_file_reading`,
 `status_gate_and_open_lookup` (filtering, reviews, gate mapping, session base, 401 / gh missing
 / refusal / retry / detached), `create_pushes_then_opens_the_pr` (no text, push + upstream,
 POST body, existing PR, same branch, no remote branch), `create_without_api_or_refused_leaves_the_text`
 (`Page` for gh-auth / gh-missing / github-no-credentials, `Failed` + reconciling lookup + meta reason, leftover
 same/ahead/diverged), `commit_based_pr_is_pinned`, `merge_close_update`,
-`pending_drift_unmerged_targets`. `ide-server/tests/pr_e2e.rs`: a fake `gh` script (`.cmd` /
+`pending_drift_unmerged_targets`. `meninx-server/tests/pr_e2e.rs`: a fake `gh` script (`.cmd` /
 `sh`; records arguments and stdin, prints canned `--include` output) through the client over
 memory with a no-token credential config (prompts, PR file, local state, status / close / refused merge, `send_prompt` into a
 shell, `prompt-not-ready` for a paste-mode provider, original-repo session) and a real server
-child with `IDE_GH`, `IDE_GITHUB_API` and a scratch `GIT_CONFIG_GLOBAL`
+child with `MENINX_GH`, `MENINX_GITHUB_API` and a scratch `GIT_CONFIG_GLOBAL`
 (`credential_token_first_in_a_server_child`: token -> fake GitHub over HTTP with
-`Bearer`, gh not run; no token -> fake `gh`; neither -> `github-no-credentials`). `ide-core` `prompts` tests compare the full commit
-prompt with Desk's output; `ide-agents` `prompt` tests the byte sequences and the declarative
-`[prompt]` table; `ide-proto` `pr` tests the pure helpers and `pr_messages_round_trip`.
+`Bearer`, gh not run; no token -> fake `gh`; neither -> `github-no-credentials`). `meninx-core` `prompts` tests compare the full commit
+prompt with Desk's output; `meninx-agents` `prompt` tests the byte sequences and the declarative
+`[prompt]` table; `meninx-proto` `pr` tests the pure helpers and `pr_messages_round_trip`.
 
-### Footer UI (ide-app `footer.rs`, `footer_view.rs`)
+### Footer UI (meninx-app `footer.rs`, `footer_view.rs`)
 
 The Changes / History footer is a port of Desk's `AiActionBar` + `SyncButton` +
 `PullRequestModal` / `MergePrModal` / close confirm / `BranchRefreshModal` / `PrRecheckModal`
 and the `pr-leftover-strip` strips, using the calls in the tables above.
 
-| Desk | ide |
+| Desk | Meninx |
 |---|---|
 | `AiActionBar` under Changes and History, hidden on Explore, kept mounted | `footer::shown_on(side)`; drawn by `detail_view.rs` under the tab content; state per session (`Detail::footer`) and per repo (`RepoFooter`), so it survives tab switches |
 | 커밋 맡기기 (violet round button, sparkles, count badge when only some rows are checked; tooltip) | `FooterMsg::Commit`: `Detail::checked_changes()` (sibling API) -> `prompt_commit(files, all)` + `send_prompt(selected session)`; `prompt-not-ready` / `session-not-running` shown as a toast |
 | `SyncButton` (primary op with ↑/↓ counts, publish / push / pull / fetch; menu: 가져오기 (fetch), 풀 (병합), 풀 (리베이스), 브랜치 게시 / 푸시, 주의가 필요한 작업: 강제 푸시, 원격 상태로 덮어쓰기 with confirms; 원격 없음 when `no_remote`; periodic fetch `FETCH_EVERY_MS`, `FRESH_ON_OPEN_MS`) | `sync_button` / `sync_menu`; `git_sync_status` (fetch on open when older than 60 s and every 5 min while shown), `git_push` / `git_pull`; force push and reset go through `SyncConfirmForm`; merged-PR hints from `pr_status` |
 | `…` round icon menu with item descriptions: PR 올리기, 머지하기 · #N, PR 보기, PR 닫기 · #N, PR 확인 필요, 새 브랜치로 이어가기 | `App::footer_more(sid) -> Vec<MoreEntry>` (kind, enabled, hint; the script checks it per state); 머지하기 disabled with Desk's hint while changes / unpushed commits exist |
-| PR 보기 / opening a created PR | `footer_open_url`: the session's web detail tab (the ide's in-app browser; Desk uses the OS browser via `openExternal`) |
+| PR 보기 / opening a created PR | `footer_open_url`: the session's web detail tab (Meninx's in-app browser; Desk uses the OS browser via `openExternal`) |
 | `PullRequestModal` (PR 올리기 전에 확인 step, 머지 대상 브랜치, 커밋 기록으로 작성 + body preview, PR 제목, leftover file, 초안, PR을 올린 뒤 바로 머지, 기존 PR 확인) | `Modal::Footer(FooterModal::Pr)`; PR job notice card above the footer (AI mode: waits for the PR file by polling `pr_leftover` every 2 s, or 'Create PR' / 'Ask again' / 'Cancel') |
 | `MergePrModal` (method, 머지 후 원격 브랜치 삭제), close confirm | `FooterModal::Merge` / `FooterModal::ClosePr` |
 | `BranchRefreshModal` (새 브랜치 이름, 가져갈 커밋 picks, 변경 옮기기, 열린 PR #N 닫기, pre-check, result lines) | `FooterModal::Continue`: `git_branch_refresh_info` / `_check` / `_run`, then `pr_close` when the box is on |
@@ -331,7 +331,7 @@ Deviations / omissions:
 
 - **No "agent busy" signal**: Desk's `ai.blocked` hints (에이전트가 답변 중) are omitted; the
   buttons only need a connection and checked files.
-- **AI PR job end**: Desk resumes on the chat turn's end; the ide polls for the PR file and offers
+- **AI PR job end**: Desk resumes on the chat turn's end; Meninx polls for the PR file and offers
   'Create PR' on the notice.
 - **PR pages open in the in-app web tab**, not the OS browser.
 - **Job notice texts** are formatted when the event happens (they do not re-translate on a
@@ -344,12 +344,12 @@ Deviations / omissions:
   while a client is connected, kept across restarts).
 - **Closing the old PR on 새 브랜치로 이어가기** uses `pr_close` without Desk's comment.
 
-Script (`script_footer.rs`, spliced after the base-branch pass; run with `IDE_GH` = the fake `gh`
-`crates/ide-app/tests/fake-gh/gh.cmd` (Node `gh.js`: `pulls` list / create / get / close / merge,
-reviews, GraphQL gate, ref delete; PRs in `$IDE_FAKE_GH_STATE/state.json`, commits from and squash
-merges into the bare origin `$IDE_FAKE_GH_ORIGIN`), `IDE_GITHUB_API` = an unreachable local address, `GIT_CONFIG_GLOBAL` = a scratch config
+Script (`script_footer.rs`, spliced after the base-branch pass; run with `MENINX_GH` = the fake `gh`
+`crates/meninx-app/tests/fake-gh/gh.cmd` (Node `gh.js`: `pulls` list / create / get / close / merge,
+reviews, GraphQL gate, ref delete; PRs in `$MENINX_FAKE_GH_STATE/state.json`, commits from and squash
+merges into the bare origin `$MENINX_FAKE_GH_ORIGIN`), `MENINX_GITHUB_API` = an unreachable local address, `GIT_CONFIG_GLOBAL` = a scratch config
 whose credential helper answers `quit=1`, `GIT_CONFIG_NOSYSTEM=1`; the test repo's origin is
-`https://github.com/ide-test/footer.git` rewritten by `url.<bare origin>.insteadOf`, so git
+`https://github.com/meninx-test/footer.git` rewritten by `url.<bare origin>.insteadOf`, so git
 pushes to a local bare repo and the PR backend falls back to the fake `gh`): footer shown on
 Changes / History, hidden on Explore; 커밋 맡기기 into a shell session (prompt line in the
 terminal); publish, push (↑1), fetch + pull (↓1) counts; `…` entries per state (no PR, open PR,

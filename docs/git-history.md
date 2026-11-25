@@ -7,14 +7,14 @@ Port of the backend behind Hermes Desk's Changes panel **History** tab (`powered
 
 Every RPC names `(session, repo)` like the other git RPCs and runs in that repo's worktree of
 the session (`repo-not-attached`, `session-not-found` as usual). All git calls go through
-`ide_core::git_raw` (`core.quotepath=false`, no prompts, `GIT_OPTIONAL_LOCKS=0`).
+`meninx_core::git_raw` (`core.quotepath=false`, no prompts, `GIT_OPTIONAL_LOCKS=0`).
 
-## Hermes Desk behaviour -> ide crate/file
+## Hermes Desk behaviour -> Meninx crate/file
 
-| Hermes Desk | ide |
+| Hermes Desk | Meninx |
 |---|---|
-| `changes:log` -> `commitLog(dir, skip, limit=200)`: `git log --format=%H%x1f%h%x1f%s%x1f%an%x1f%at%x1f%ae%x1e --skip=N -n L HEAD` | `git.log` (`Request::GitLog{session, repo, skip, limit}` -> `Response::GitLog(GitLog)`), `ide-server/src/git.rs::log` / `parse_log`; same format string. `limit` 0 = `GIT_LOG_PAGE` (200, Desk's `LOG_PAGE`). |
-| Renderer `CommitInfo {sha, short, subject, author, email, date}` (`date` ms) | `ide_proto::CommitInfo` (`files.rs`), `date` = unix **seconds** (`%at`). |
+| `changes:log` -> `commitLog(dir, skip, limit=200)`: `git log --format=%H%x1f%h%x1f%s%x1f%an%x1f%at%x1f%ae%x1e --skip=N -n L HEAD` | `git.log` (`Request::GitLog{session, repo, skip, limit}` -> `Response::GitLog(GitLog)`), `meninx-server/src/git.rs::log` / `parse_log`; same format string. `limit` 0 = `GIT_LOG_PAGE` (200, Desk's `LOG_PAGE`). |
+| Renderer `CommitInfo {sha, short, subject, author, email, date}` (`date` ms) | `meninx_proto::CommitInfo` (`files.rs`), `date` = unix **seconds** (`%at`). |
 | "more" row: `hasMore = page.length === LOG_PAGE` | `GitLog.has_more`: the server asks for `limit + 1` commits and reports whether the extra one exists (exact, no empty last page). |
 | `github:historyLocal` -> `historyLocalCommits`: upstream -> `rev-list upstream..HEAD`; upstream gone -> none; no upstream / detached -> `rev-list HEAD --not --remotes`; `--max-count=500` | `git.unpushed` (`Request::GitUnpushed` -> `Response::GitUnpushed(Vec<String>)`), `git.rs::unpushed`; same branch / `for-each-ref %(upstream)|%(upstream:track)` logic, cap `GIT_UNPUSHED_MAX` = 500 (UI badge shows `500+` at the cap, ↑ mark per commit). |
 | `changes:commitFiles` -> `commitFiles`: `git diff-tree --no-commit-id -r -M --root --name-status -z <sha>` | `git.commit_files` (`Request::GitCommitFiles` -> `Response::GitChanges(Vec<GitChange>)`), `git.rs::commit_files` / `parse_name_status`; `diff-tree -r -M --name-status -z <first parent> <sha>`, root commit `--root <sha>`. |
@@ -23,7 +23,7 @@ the session (`repo-not-attached`, `session-not-found` as usual). All git calls g
 | `commitDetail` sha check `/^[0-9a-f]{4,64}$/i` | `sha` of `git.commit_files` / `git.commit_diff` must be 4-64 hex digits naming an existing commit, else `git-bad-rev` (`rev`). |
 | `changes:commitDetail` (full message, committer, parents for the diff header) | Not ported (not part of this contract). |
 
-Client (`ide-client`): `git_log`, `git_unpushed`, `git_commit_files`, `git_commit_diff`;
+Client (`meninx-client`): `git_log`, `git_unpushed`, `git_commit_files`, `git_commit_diff`;
 `CommitInfo`, `GitLog`, `GIT_LOG_PAGE`, `GIT_UNPUSHED_MAX` are re-exported.
 
 ## Deviations (with reasons)
@@ -48,7 +48,7 @@ Client (`ide-client`): `git_log`, `git_unpushed`, `git_commit_files`, `git_commi
 - **`path` of `git.commit_diff`** is only syntax-checked (`normalize_rel`), not resolved in the
   worktree: the file may no longer exist there.
 
-## UI (ide-app)
+## UI (meninx-app)
 
 The History tab itself (rows, refresh triggers, commit items, deviations) is described in
 `docs/side-panel.md`, "History". In short: `detail.rs` loads `git.log` (refresh: every shown
@@ -65,9 +65,9 @@ No new error ids: `git-bad-rev` (`rev`) for a malformed or unknown commit id, `p
 
 ## Tests
 
-`ide-server/src/git.rs` (`history_log_files_diff_unpushed`, `log_and_name_status_parsing`):
+`meninx-server/src/git.rs` (`history_log_files_diff_unpushed`, `log_and_name_status_parsing`):
 paging and `has_more`, root commit files, rename in commit files and diff (by new and old path),
 merge vs first parent, one-path and whole-commit diffs, invalid ids, unpushed with a local bare
 `origin` (upstream, untracked branch, gone upstream, no remote), empty repo.
-`ide-server/tests/files_e2e.rs` (`files_scenario`, memory and child transports): the four RPCs
-through `ide_client::Client`. `ide-proto` round-trip test covers the new messages.
+`meninx-server/tests/files_e2e.rs` (`files_scenario`, memory and child transports): the four RPCs
+through `meninx_client::Client`. `meninx-proto` round-trip test covers the new messages.

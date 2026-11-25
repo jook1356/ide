@@ -1,12 +1,12 @@
 # Notification centre
 
-Hermes Desk's notice centre (`lib/notices.ts`, `components/NoticeCenter.tsx`) in the ide:
+Hermes Desk's notice centre (`lib/notices.ts`, `components/NoticeCenter.tsx`) in Meninx:
 outcomes that are not questions go to one list. The navigation rail's bell shows the unread count
 and opens the list, and a notice can also pop up as a toast.
 
-- Store: `crates/ide-app/src/notices.rs`. It has no widgets and is generic over the app's
+- Store: `crates/meninx-app/src/notices.rs`. It has no widgets and is generic over the app's
   `Message`, so it can be unit-tested.
-- UI: `crates/ide-app/src/notice_view.rs`. This covers the bell, the list panel, the toasts and
+- UI: `crates/meninx-app/src/notice_view.rs`. This covers the bell, the list panel, the toasts and
   the producers that mirror other state.
 
 ## Model
@@ -33,7 +33,7 @@ only; buttons are messages, which mean nothing after a restart.
 | Source | How | Tone, read state, toast |
 |---|---|---|
 | Detail-pane toasts (Changes, History, Explore, footer sync / merge / close, item and session menus, user terminals, attachments, go to definition, file operations) | `Detail::toast(tone, text)` puts the toast in an outbox. `App::update` moves it to the centre after each message (`take_detail_toasts`) with the session as the notice's session. | Success and info are toasts and history only (read). Warnings and errors are toasts and unread. |
-| Agent `ide_show_message` | `agent_bridge.rs` | Info, unread, toast. Clicking selects the session. |
+| Agent `meninx_show_message` | `agent_bridge.rs` | Info, unread, toast. Clicking selects the session. |
 | Lists refresh failed, pin / archive failed, some worktrees not created, base branches changed by a rule, family merge / sync result | Former sidebar banner (`App::banner` is gone) | Error / info / mixed (a merge with conflicts is a warning, one with a failure is an error) |
 | PR job (`RepoFooter::job`) | `sync_state_notices`, key `PrJob{session, repo}`. It changes only when the job's tone, title, text, buttons or running state change. | Progress (running, info) is quiet. Results, and questions to the user (recheck, conflict), are unread and pop up when the title changes. The job's buttons send `FooterMsg::JobAction`. The footer card stays. |
 | `RepoFooter::pr_error` (never shown before) | key `PrInfo{session, repo}`. Removed when the PR status works again. | Warning, quiet |

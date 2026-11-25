@@ -1,0 +1,254 @@
+//! Location of the app data directory and the files inside it.
+//!
+//! Layout (relative to the data root):
+//! ```text
+//! accounts.json
+//! configurations.json                  (the configurations' slugs, in order)
+//! configurations/<slug>/               (one configuration: profile.json, instructions.md,
+//!                                       mcp/<name>.json, skills/; a git repository of its own)
+//! sessions.json
+//! accounts/<provider>/<slug>/          (a CLI's own config home for one login)
+//! providers/*.toml                     (declarative agent providers)
+//! repos.json                           (registered repositories)
+//! sessions/<session-id>/agent/         (generated per-session files: MCP JSON, plugin, ...)
+//! workspaces/<session-id>/<repo-name>/ (session folder = agent cwd, one worktree per repo)
+//! worktrees/<repo-slug>/<session-id>/  (legacy single-repo worktrees, kept where they are)
+//! profiles.json, profiles/<slug>/{claude,codex}/   (legacy; migrated to accounts)
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use crate::error::{Error, IoAction, Result};
+
+/// Environment variable overriding the app data root.
+pub const DATA_DIR_ENV: &str = "MENINX_DATA_DIR";
+
+/// Resolved app data directory. Cheap to clone; all stores take one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paths {
+    root: PathBuf,
+}
+
+impl Paths {
+    /// Resolve the data root: `MENINX_DATA_DIR` if set and non-empty, otherwise the platform
+    /// data dir from `directories::ProjectDirs::from("dev", "meninx", "meninx")`.
+    pub fn from_env() -> Result<Self> {
+        if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
+            return Ok(Self::new(PathBuf::from(dir)));
+        }
+        let dirs = directories::ProjectDirs::from("dev", "meninx", "meninx").ok_or(Error::NoDataDir)?;
+        Ok(Self::new(dirs.data_dir().to_path_buf()))
+    }
+
+    /// Use an explicit data root (tests, custom setups). Nothing is created on disk.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The data root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `profiles.json`.
+    pub fn profiles_file(&self) -> PathBuf {
+        self.root.join("profiles.json")
+    }
+
+    /// `sessions.json`.
+    pub fn sessions_file(&self) -> PathBuf {
+        self.root.join("sessions.json")
+    }
+
+    /// `profiles/<slug>` (legacy profiles; their dirs become accounts).
+    pub fn profile_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("profiles").join(slug)
+    }
+
+    /// `accounts.json`.
+    pub fn accounts_file(&self) -> PathBuf {
+        self.root.join("accounts.json")
+    }
+
+    /// `configurations.json`.
+    pub fn configurations_file(&self) -> PathBuf {
+        self.root.join("configurations.json")
+    }
+
+    /// `configurations/<slug>/skills`: the skills of a configuration.
+    pub fn configuration_skills_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("configurations").join(slug).join("skills")
+    }
+
+    /// `configurations/<slug>`: the files of a configuration.
+    pub fn configuration_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("configurations").join(slug)
+    }
+
+    /// `accounts/<provider>/<slug>`: the config home of a new account.
+    pub fn account_dir(&self, provider: &str, slug: &str) -> PathBuf {
+        self.root.join("accounts").join(provider).join(slug)
+    }
+
+    /// `providers/`: declarative provider files (`*.toml`).
+    pub fn providers_dir(&self) -> PathBuf {
+        self.root.join("providers")
+    }
+
+    /// `sessions/<id>`: per-session server files (outside the worktree).
+    pub fn session_dir(&self, id: &str) -> PathBuf {
+        self.root.join("sessions").join(id)
+    }
+
+    /// `sessions/<id>/agent`: files generated for a session's agent (scratch dir).
+    pub fn session_agent_dir(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("agent")
+    }
+
+    /// `sessions/<id>/output.log`: the tail of the session terminal's output, kept so a
+    /// restarted server can replay it (removed with the session's folder).
+    pub fn session_output_log(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("output.log")
+    }
+
+    /// `repos.json`.
+    pub fn repos_file(&self) -> PathBuf {
+        self.root.join("repos.json")
+    }
+
+    /// `workspaces/`: session folders.
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.root.join("workspaces")
+    }
+
+    /// `workspaces/<session-id>` (absolute): a session's folder and agent cwd.
+    pub fn workspace_dir(&self, session_id: &str) -> PathBuf {
+        let p = self.workspaces_dir().join(session_id);
+        std::path::absolute(&p).unwrap_or(p)
+    }
+
+    /// `worktrees/`.
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
+    /// `worktrees/<repo-slug>/<session-id>`.
+    pub fn worktree_dir(&self, repo_slug: &str, session_id: &str) -> PathBuf {
+        self.worktrees_dir().join(repo_slug).join(session_id)
+    }
+}
+
+/// `create_dir_all` with a contextual error.
+pub fn ensure_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|e| Error::io(IoAction::CreatingDirectory, path, e))
+}
+
+/// Read a JSON file; `Ok(None)` if it does not exist.
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(IoAction::Reading, path, e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| Error::Json {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Write JSON atomically (temp file in the same dir, then rename over the target).
+pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).map_err(|e| Error::io(IoAction::Writing, &tmp, e))?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::io(IoAction::Replacing, path, e))
+}
+
+/// Current time as Unix seconds.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    pub use super::TempDir;
+}
+
+/// A fresh, empty directory for one test (also used by other crates' tests). Base dir:
+/// `MENINX_TEST_TMP` if set, else the system temp dir. Removed on drop.
+#[doc(hidden)]
+pub use tmp::TempDir;
+
+mod tmp {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// See [`super::TempDir`].
+    pub struct TempDir(pub PathBuf);
+
+    impl TempDir {
+        pub fn new(tag: &str) -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let base = std::env::var_os("MENINX_TEST_TMP")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let dir = base.join(format!(
+                "meninx-core-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout() {
+        let p = Paths::new("/data");
+        assert_eq!(p.profiles_file(), Path::new("/data").join("profiles.json"));
+        assert_eq!(p.sessions_file(), Path::new("/data").join("sessions.json"));
+        assert_eq!(
+            p.profile_dir("a"),
+            Path::new("/data").join("profiles").join("a")
+        );
+        assert_eq!(
+            p.worktree_dir("r", "s"),
+            Path::new("/data").join("worktrees").join("r").join("s")
+        );
+    }
+
+    #[test]
+    fn json_round_trip_and_missing() {
+        let t = test_util::TempDir::new("json");
+        let f = t.0.join("sub").join("x.json");
+        assert_eq!(read_json::<Vec<u32>>(&f).unwrap(), None);
+        write_json(&f, &vec![1u32, 2]).unwrap();
+        write_json(&f, &vec![3u32]).unwrap();
+        assert_eq!(read_json::<Vec<u32>>(&f).unwrap(), Some(vec![3]));
+    }
+}

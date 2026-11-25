@@ -1,6 +1,6 @@
 # Sample declarative agent provider. Copy to `<data dir>/providers/<id>.toml` and restart the
-# server (`ide-server` reads `providers/*.toml` when it opens a user's data). Format reference:
-# crates/ide-agents/src/declarative.rs. Unknown keys are rejected.
+# server (`meninx-server` reads `providers/*.toml` when it opens a user's data). Format reference:
+# crates/meninx-agents/src/declarative.rs. Unknown keys are rejected.
 #
 # This example describes a hypothetical CLI "mycli" that reads its login/config home from
 # MYCLI_HOME, logs in with `mycli auth login` and accepts a system prompt file via a flag.

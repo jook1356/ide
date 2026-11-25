@@ -1,4 +1,4 @@
 [alias]
-# The app (`ide.exe`) starts `ide-server.exe` from its own folder: always build both.
-app = "build --release -p ide-app -p ide-server"
-app-debug = "build -p ide-app -p ide-server"
+# The app (`meninx.exe`) starts `meninx-server.exe` from its own folder: always build both.
+app = "build --release -p meninx-app -p meninx-server"
+app-debug = "build -p meninx-app -p meninx-server"
