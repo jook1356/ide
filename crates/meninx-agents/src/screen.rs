@@ -117,16 +117,20 @@ fn choose_keys(lines: &[String], choose: &str) -> Option<Vec<String>> {
     Some(vec![step.to_owned(); hi - lo])
 }
 
-/// The first non-blank line after the last line containing `needle` (case-insensitive),
-/// trimmed (the last: a redraw may leave an earlier copy of the dialog's title above).
+/// The first paragraph after the last line containing `needle` (case-insensitive): its lines
+/// trimmed and joined up to the next blank line (the last title: a redraw may leave an earlier
+/// copy of the dialog's title above). A long folder wraps onto several rows (seen 2026-11-25,
+/// classic renderer: `...\workspaces\0mww7zl` / `8ck`); the first row alone named another folder.
 fn path_after(lines: &[String], needle: &str) -> Option<String> {
     let needle = needle.to_lowercase();
     let at = lines.iter().rposition(|l| l.to_lowercase().contains(&needle))?;
-    lines[at + 1..]
+    let path: String = lines[at + 1..]
         .iter()
         .map(|l| l.trim())
-        .find(|l| !l.is_empty())
-        .map(str::to_owned)
+        .skip_while(|l| l.is_empty())
+        .take_while(|l| !l.is_empty())
+        .collect();
+    (!path.is_empty()).then_some(path)
 }
 
 /// One rule.
@@ -577,6 +581,22 @@ regex=['(']").is_err());
         assert_eq!(got.path.as_deref(), Some("C:/Users/jook1/AppData/Roaming/meninx/meninx/data/workspaces/0mwudwwxbug"));
         assert_eq!(got.keys, ["\x1b[B"], "Down to Yes only: Enter once the screen shows it there");
         assert!(got.answer.default);
+        // Seen 2026-11-25 (classic renderer): the folder wraps onto a second row.
+        let wrapped = screen(&[
+            " Accessing workspace:",
+            "",
+            " C:\\Users\\사용자\\AppData\\Roaming\\meninx\\meninx\\data\\workspaces\\0mww7zl",
+            " 8ck",
+            "",
+            " Quick safety check: Is this a project you created or one you trust?",
+            "",
+            " ❯ No, exit",
+            "   Yes, I trust this folder",
+            "",
+            " Enter to confirm · Esc to cancel",
+        ]);
+        let got = ans(&wrapped).expect("wrapped folder");
+        assert_eq!(got.path.as_deref(), Some("C:\\Users\\사용자\\AppData\\Roaming\\meninx\\meninx\\data\\workspaces\\0mww7zl8ck"));
         let dir = screen(&[
             " Adding a new directory:",
             "",
@@ -632,7 +652,8 @@ regex=['(']").is_err());
         let perm = screen(&[" Do you want to run this command?", " ❯ 1. Yes", " Enter to confirm · Esc to cancel"]);
         assert!(ans(&perm).is_none());
         let cut = screen(&[" Accessing workspace:", "", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm"]);
-        assert_eq!(ans(&cut).map(|g| g.path), Some(Some("❯ No, exit".into())), "the server checks the folder");
+        let cut_path = ans(&cut).and_then(|g| g.path).expect("matched");
+        assert!(cut_path.starts_with("❯ No, exit"), "no folder line: the server's folder check refuses {cut_path:?}");
         // No cursor next to the entry: nothing typed.
         let no_cursor = screen(&[" Adding a new directory:", "", " C:/x/.git", "   No, exit", "   Yes, add it", " then Enter"]);
         assert!(ans(&no_cursor).is_none());
