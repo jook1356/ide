@@ -285,8 +285,11 @@ pub fn family_guidance(s: &Session, parent: Option<&Session>, kids: &[&Session])
             ));
         }
         t.push_str(
-            "Merge a finished child with `meninx_merge_child`; on conflicts, read both sides \
-             (`git diff`, the child's commits) and ask the child before resolving.\n",
+            "Wait for children to finish with `meninx_wait_session` (not by checking \
+             `meninx_list_related_sessions` again and again), then read what they did with \
+             `meninx_read_session`. Merge a finished child with `meninx_merge_child`; on \
+             conflicts, read both sides (`git diff`, the child's commits) and ask the child \
+             before resolving.\n",
         );
         if kids.iter().any(|c| c.shared) {
             t.push_str(

@@ -403,6 +403,70 @@ async fn send_modes_and_approvals() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `meninx_wait_session`: arguments, a shell nobody can read, a turn that ends during the wait
+/// (done only after it held), a time limit, a stopped session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_for_children() {
+    use meninx_proto::AgentHookEvent;
+
+    let dir = tmp_dir("family-wait");
+    let r1 = dir.join("r1");
+    init_repo(&r1);
+    let server = bridged(&dir.join("data"));
+    let c = Client::connect(memory(&server), opts()).await.unwrap();
+    let id1 = c.register_repo(&r1.display().to_string()).await.unwrap().id;
+    let (p, _) = c.create_session(shell_session(vec![id1.clone()], true)).await.unwrap();
+    let (s, _) = c.create_child_session(&p.id, true, Vec::new(), "S", None, true, 80, 24).await.unwrap();
+    let (other, _) = c.create_session(shell_session(vec![id1.clone()], false)).await.unwrap();
+    let ctx = server.authorize(server.user()).unwrap();
+    let (mux, mut rx) = agent(&server, &p.id).await;
+
+    let (bad, v) = tool(&mux, &mut rx, 10, "meninx_wait_session", serde_json::json!({"sessions": []})).await;
+    assert!(bad && v.as_str().unwrap().contains("required"), "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 11, "meninx_wait_session", serde_json::json!({"sessions": [other.id]})).await;
+    assert!(bad && v.as_str().unwrap().contains("not a related session"), "{v}");
+    let (bad, v) = tool(&mux, &mut rx, 12, "meninx_wait_session", serde_json::json!({"sessions": [s.id], "mode": "some"})).await;
+    assert!(bad && v.as_str().unwrap().contains("unknown mode"), "{v}");
+
+    // A shell reports nothing: done at once, as unreadable.
+    let (bad, v) = tool(&mux, &mut rx, 13, "meninx_wait_session", serde_json::json!({"sessions": [s.id]})).await;
+    assert!(!bad && v["done"] == true, "{v}");
+    assert_eq!(v["sessions"][0]["state"], "unreadable", "{v}");
+
+    // Working: the time limit ends the wait.
+    ctx.agent_hook(&s.id, AgentHookEvent::PromptSubmitted { prompt: None });
+    let (bad, v) = tool(&mux, &mut rx, 14, "meninx_wait_session", serde_json::json!({"sessions": [s.id], "timeout": 1})).await;
+    assert!(!bad && v["timed_out"] == true && v["done"] == false, "{v}");
+    assert_eq!(v["sessions"][0]["state"], "working", "{v}");
+
+    // The turn ends during the wait: done once idle held for a while.
+    let (ctx2, sid) = (ctx.clone(), s.id.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ctx2.agent_hook(&sid, AgentHookEvent::Stopped);
+    });
+    let started = std::time::Instant::now();
+    let (bad, v) = tool(&mux, &mut rx, 15, "meninx_wait_session", serde_json::json!({"sessions": [s.id], "timeout": 30})).await;
+    assert!(!bad && v["done"] == true && v["timed_out"] == false, "{v}");
+    assert_eq!(v["sessions"][0]["state"], "idle", "{v}");
+    assert!(started.elapsed() >= Duration::from_secs(2), "idle must hold before it counts");
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    // Stopped: done at once.
+    ctx.agent_hook(&s.id, AgentHookEvent::PromptSubmitted { prompt: None });
+    c.stop_session(&s.id).await.unwrap();
+    let (bad, v) = tool(&mux, &mut rx, 16, "meninx_wait_session", serde_json::json!({"sessions": [s.id, s.id]})).await;
+    assert!(!bad && v["done"] == true, "{v}");
+    assert_eq!(v["sessions"].as_array().unwrap().len(), 1, "ids are taken once");
+    assert_eq!(v["sessions"][0]["state"], "not_running", "{v}");
+
+    c.delete_session(&s.id, true).await.unwrap();
+    c.delete_session(&p.id, true).await.unwrap();
+    c.delete_session(&other.id, true).await.unwrap();
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A child with another agent than its parent's: through the app's request and the bridge tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn child_with_another_agent() {
