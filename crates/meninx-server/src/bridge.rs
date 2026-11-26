@@ -56,6 +56,9 @@ pub const TOOL_REQUEST_WRITE: &str = "meninx_request_write_access";
 pub const TOOL_RELEASE_WRITE: &str = "meninx_release_write_access";
 pub const TOOL_READ_SESSION: &str = "meninx_read_session";
 pub const TOOL_SENT_MESSAGES: &str = "meninx_sent_messages";
+/// `meninx_wait_session`: wait until related sessions are done with their turn
+/// (`service/wait.rs`; async, so not one of the blocking family tools).
+pub const TOOL_WAIT: &str = "meninx_wait_session";
 
 /// Terminal tools (`docs/terminals.md`), answered by the daemon (`service/terminals.rs`).
 pub const TOOL_TERMINAL_LIST: &str = "meninx_terminal_list";
@@ -131,11 +134,18 @@ pub struct BridgeState {
     /// Write access of shared folders: folder owner's session id -> the holder's (missing =
     /// the owner).
     leases: Mutex<HashMap<String, String>>,
+    /// Sessions given a prompt their CLI starts on by itself (a first prompt on its command
+    /// line), since when, until it works: `meninx_wait_session` does not take them for done.
+    expecting: Mutex<HashMap<String, std::time::Instant>>,
     /// Messages waiting to be typed into a session (`meninx_send_to_session`, first prompts).
     queue: Mutex<HashMap<String, std::collections::VecDeque<Queued>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     seq: AtomicU64,
 }
+
+/// How long a prompt on a CLI's command line counts as not started yet
+/// ([`BridgeState::expecting`]): start dialogs and a slow start take a while.
+pub const EXPECT_LIMIT: Duration = Duration::from_secs(120);
 
 /// A message waiting to be typed into a session.
 #[derive(Debug, Clone)]
@@ -217,6 +227,7 @@ impl BridgeState {
     /// A new process of `session`: nothing reported yet.
     pub fn reset(&self, session: &str) {
         self.activity.lock().unwrap().remove(session);
+        self.expecting.lock().unwrap().remove(session);
         self.hooked.lock().unwrap().remove(session);
         self.background.lock().unwrap().remove(session);
     }
@@ -380,8 +391,39 @@ impl BridgeState {
         Some(seen)
     }
 
+    /// `session`'s CLI was given a prompt it starts on by itself (its command line): until it
+    /// works (or [`EXPECT_LIMIT`] passed) its turn is not over.
+    pub fn expect_turn(&self, session: &str) {
+        self.expecting
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), std::time::Instant::now());
+    }
+
+    /// `session` was given a prompt it has not started on yet. Forgotten after
+    /// [`EXPECT_LIMIT`]: a CLI that never reports working must not hold a wait for good.
+    pub fn expecting(&self, session: &str) -> bool {
+        let mut m = self.expecting.lock().unwrap();
+        match m.get(session) {
+            Some(t) if t.elapsed() < EXPECT_LIMIT => true,
+            Some(_) => {
+                m.remove(session);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// A hook of `session`'s CLI arrived since its process started.
+    pub fn is_hooked(&self, session: &str) -> bool {
+        self.hooked.lock().unwrap().contains(session)
+    }
+
     /// Set a session's agent activity; `true` when it changed.
     pub fn set_activity(&self, session: &str, a: AgentActivity) -> bool {
+        if a == AgentActivity::Working {
+            self.expecting.lock().unwrap().remove(session);
+        }
         let mut m = self.activity.lock().unwrap();
         let old = m.insert(session.to_owned(), a).unwrap_or_default();
         old != a
@@ -493,7 +535,8 @@ fn core_tools() -> Vec<AgentTool> {
                           worktrees of `repos` (default: all of this session's), each branched \
                           from this session's branch, to work in parallel; merge it back later \
                           with meninx_merge_child. `prompt` is typed into the child when its agent \
-                          is ready. Children go at most two levels below the first session."
+                          is ready; wait for it to finish with meninx_wait_session. Children go \
+                          at most two levels below the first session."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"title":{"type":"string"},"shared":{"type":"boolean"},"repos":{"type":"array","items":{"type":"string"},"description":"Repository names of this session."},"prompt":{"type":"string","description":"The child's first task."},"agent":{"type":"string","description":"Provider id; default: this session's."},"account":{"type":"string","description":"Account of that agent; default: this session's (same agent) or its first account."},"profile":{"type":"string","description":"Profile (configuration) name; default: this session's."}},"additionalProperties":false}"#
                 .into(),
@@ -529,6 +572,23 @@ fn core_tools() -> Vec<AgentTool> {
                           {id})."
                 .into(),
             input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["list","cancel"]},"id":{"type":"integer","description":"The message id, for cancel."}},"additionalProperties":false}"#
+                .into(),
+        },
+        AgentTool {
+            name: TOOL_WAIT.into(),
+            description: "Wait until related sessions (e.g. the children you gave work) are done \
+                          with their turn, instead of checking meninx_list_related_sessions \
+                          again and again. A session is done when its agent is idle with no \
+                          message of yours still waiting to be typed in, waits for the user \
+                          (a permission or a question: `needs_input`; the user answers it in \
+                          Meninx), or is not running. A prompt just sent or given at creation \
+                          counts as work until the agent finishes it. `mode`: `all` (default) \
+                          returns when every session is done, `any` when the first one is. \
+                          `timeout` in seconds (default 600, at most 1800; shorter when your \
+                          CLI ends tool calls sooner): on `timed_out` call again to keep \
+                          waiting. Then read the result with meninx_read_session."
+                .into(),
+            input_schema: r#"{"type":"object","properties":{"sessions":{"type":"array","minItems":1,"items":{"type":"string"},"description":"Related session ids (meninx_list_related_sessions)."},"mode":{"type":"string","enum":["all","any"],"description":"Default all."},"timeout":{"type":"integer","description":"Seconds, default 600, at most 1800."}},"required":["sessions"],"additionalProperties":false}"#
                 .into(),
         },
         AgentTool {
@@ -944,9 +1004,9 @@ const MCP_PROTOCOL: &str = "2025-06-18";
 /// [`SESSION_ENV`], connected to the daemon at [`SOCKET_ENV`] with [`TOKEN_ENV`]. Returns when
 /// stdin closes.
 pub async fn run_mcp_stdio() -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::BufReader;
 
-    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let var =|k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let (session, token, socket) = match (var(SESSION_ENV), var(TOKEN_ENV), var(SOCKET_ENV)) {
         (Some(s), Some(t), Some(k)) => (s, t, k),
         _ => anyhow::bail!(
@@ -954,24 +1014,101 @@ pub async fn run_mcp_stdio() -> anyhow::Result<()> {
         ),
     };
     let link = AgentLink::connect(&socket, &session, &token).await;
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
+    let link = &link;
+    serve_mcp(
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+        move |msg| handle_mcp(link, msg),
+    )
+    .await
+}
+
+/// The MCP message loop: one message handled at a time (the daemon link pairs one request
+/// with one answer), but while a call runs (a wait, a question to the user) stdin is still
+/// read: `ping` is answered at once, `notifications/cancelled` for the running call drops it
+/// (no answer, as MCP asks), other messages wait their turn. Returns when stdin closes.
+async fn serve_mcp<R, W, F, Fut>(input: R, mut out: W, handle: F) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+    F: Fn(serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = Option<serde_json::Value>>,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    async fn send<W: tokio::io::AsyncWrite + Unpin>(out: &mut W, v: &serde_json::Value) -> std::io::Result<()> {
+        let mut text = v.to_string();
+        text.push('\n');
+        out.write_all(text.as_bytes()).await?;
+        out.flush().await
+    }
+    /// A line as a message; `Err`: the parse error's answer; `Ok(None)`: a blank line.
+    fn parse(line: &str) -> Result<Option<serde_json::Value>, serde_json::Value> {
         if line.trim().is_empty() {
-            continue;
+            return Ok(None);
         }
-        let answer = match serde_json::from_str::<serde_json::Value>(&line) {
-            Ok(msg) => handle_mcp(&link, msg).await,
-            Err(e) => Some(rpc_error(serde_json::Value::Null, -32700, &e.to_string())),
+        serde_json::from_str(line)
+            .map(Some)
+            .map_err(|e| rpc_error(serde_json::Value::Null, -32700, &e.to_string()))
+    }
+
+    let mut lines = input.lines();
+    let mut waiting = std::collections::VecDeque::new();
+    loop {
+        let msg = match waiting.pop_front() {
+            Some(m) => m,
+            None => match lines.next_line().await? {
+                None => return Ok(()),
+                Some(line) => match parse(&line) {
+                    Ok(Some(m)) => m,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        send(&mut out, &e).await?;
+                        continue;
+                    }
+                },
+            },
+        };
+        let id = msg.get("id").cloned();
+        let call = handle(msg);
+        tokio::pin!(call);
+        let answer = loop {
+            tokio::select! {
+                a = &mut call => break a,
+                // `Lines::next_line` is cancel safe: no line is lost when the call ends first.
+                line = lines.next_line() => {
+                    let Some(line) = line? else {
+                        // The client went away: nobody wants the answer.
+                        return Ok(());
+                    };
+                    let m = match parse(&line) {
+                        Ok(Some(m)) => m,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            send(&mut out, &e).await?;
+                            continue;
+                        }
+                    };
+                    match m.get("method").and_then(|v| v.as_str()) {
+                        Some("notifications/cancelled")
+                            if id.is_some()
+                                && m.pointer("/params/requestId") == id.as_ref() =>
+                        {
+                            break None;
+                        }
+                        Some("ping") if m.get("id").is_some() => {
+                            let pong = serde_json::json!({"jsonrpc": "2.0", "id": m["id"], "result": {}});
+                            send(&mut out, &pong).await?;
+                        }
+                        _ => waiting.push_back(m),
+                    }
+                }
+            }
         };
         if let Some(a) = answer {
-            let mut text = a.to_string();
-            text.push('\n');
-            out.write_all(text.as_bytes()).await?;
-            out.flush().await?;
+            send(&mut out, &a).await?;
         }
     }
-    Ok(())
 }
 
 /// A tool result as MCP `tools/call` content: the text, then the image if there is one
@@ -1152,6 +1289,41 @@ mod tests {
     /// the providers' screen rules.
     /// A question to the apps ends (and the apps are told) when its time is up or when the
     /// last app went, even without a time limit.
+    /// While a call runs, `ping` is answered at once, a cancel drops the call (no answer) and
+    /// other messages wait their turn.
+    #[tokio::test]
+    async fn mcp_loop_pings_and_cancels() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (mut client_in, server_in) = tokio::io::duplex(4096);
+        let (server_out, client_out) = tokio::io::duplex(4096);
+        let handle = |m: serde_json::Value| async move {
+            let id = m.get("id").cloned()?;
+            if m.pointer("/params/name").and_then(|v| v.as_str()) == Some("slow") {
+                std::future::pending::<()>().await;
+            }
+            Some(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": "done"}))
+        };
+        let server = tokio::spawn(serve_mcp(BufReader::new(server_in), server_out, handle));
+        let mut answers = BufReader::new(client_out).lines();
+        let mut say = async |v: serde_json::Value| {
+            client_in.write_all(format!("{v}\n").as_bytes()).await.unwrap();
+        };
+        say(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "slow"}})).await;
+        say(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "fast"}})).await;
+        say(serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"})).await;
+        let next = async |a: &mut tokio::io::Lines<_>| -> serde_json::Value {
+            let line = tokio::time::timeout(Duration::from_secs(5), a.next_line()).await.unwrap().unwrap().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+        assert_eq!(next(&mut answers).await["id"], 3, "ping answered during the call");
+        say(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}})).await;
+        let a = next(&mut answers).await;
+        assert_eq!((a["id"].clone(), a["result"].clone()), (serde_json::json!(2), serde_json::json!("done")), "the waiting call ran; none for the cancelled one");
+        drop(say);
+        drop(client_in);
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn questions_end() {
         let state = BridgeState::default();

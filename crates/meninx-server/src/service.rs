@@ -43,6 +43,7 @@ mod write_guard;
 mod previews;
 mod handoff;
 mod profile;
+mod wait;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an agent CLI must wait at its input (and no dialog of it be auto-answered)
@@ -1014,6 +1015,9 @@ impl UserCtx {
                     image: None,
                 },
             };
+        }
+        if tool == crate::bridge::TOOL_WAIT {
+            return self.wait_tool(session, args).await;
         }
         if tool == crate::bridge::TOOL_PREVIEW {
             return match serde_json::from_str::<serde_json::Value>(if args.trim().is_empty() { "{}" } else { args }) {
@@ -3462,6 +3466,8 @@ impl UserCtx {
         if built.prompt_in_args {
             let bytes = first_prompt.map_or(0, str::len);
             self.audit("session.first_prompt_arg", &format!("{} {bytes} bytes", s.id));
+            // Its CLI starts on it after its start dialogs: not done before (`meninx_wait_session`).
+            self.bridge.expect_turn(s.id.as_str());
         }
         Ok(built.prompt_in_args)
     }

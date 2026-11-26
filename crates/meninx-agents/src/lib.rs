@@ -380,6 +380,12 @@ pub trait AgentProvider: Send + Sync {
     fn steers(&self) -> bool {
         false
     }
+    /// How long the CLI lets an MCP tool call run before it gives up on it (a tool that waits,
+    /// `meninx_wait_session`, returns before that). `None`: no limit worth minding.
+    /// Default: `None`.
+    fn mcp_call_limit(&self) -> Option<std::time::Duration> {
+        None
+    }
 
     // ---- Session assembly ----
 

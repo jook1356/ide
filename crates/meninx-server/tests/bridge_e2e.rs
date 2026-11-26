@@ -275,6 +275,7 @@ async fn agent_connection_tools_and_app_round_trip() {
             "meninx_send_to_session",
             "meninx_read_session",
             "meninx_sent_messages",
+            "meninx_wait_session",
             "meninx_terminal_list",
             "meninx_terminal_read",
             "meninx_terminal_input",

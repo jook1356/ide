@@ -59,11 +59,35 @@ its own worktrees branched from the parent's, and the parent merges them back.
 | `meninx_send_to_session` | related | `{session, message, mode?}`, prefixed with the sender. `queue` (default): at once when the target is idle, else when its turn ends. `steer`: typed in now, also during its turn (providers that steer: Claude Code, Codex (a)). `interrupt`: the provider's interrupt keys (Esc), then queued. `steer` / `interrupt` of a busy target ask the user (`docs/approvals.md`); of an idle one they act like `queue`. A target waiting to be resumed after a server restart (`SessionInfo::resume_on_open`, `docs/agent-providers.md`) is started by the message (`session.wake` audit record) and gets it queued until its CLI is ready; so is a stopped child of the sender; another target that is not running stays an error |
 | `meninx_sent_messages` | any | `{action: list / cancel, id?}`: this session's messages still waiting (id, target, text), or drop one |
 | `meninx_read_session` | related | `{session, limit?}`: the last N entries (default 30, at most 200) of its stored conversation: user prompts, answers, tool calls and results (shortened). Claude Code: `<config home>/projects/*/<conversation>.jsonl` (subagent and meta records left out); Codex: `<CODEX_HOME>/sessions/**/rollout-*-<thread>.jsonl` (`response_item` records; Codex's own context and reasoning left out; a start placeholder is resolved as a resume does); other CLIs: not supported yet |
+| `meninx_wait_session` | related | `{sessions, mode?, timeout?}`: wait until the sessions are done with their turn (below) -> `{done, timed_out, waited_seconds, sessions: [{id, title, state, done, queued_messages}], note?}` |
 | `meninx_merge_child` | parent | `{child, squash?}` -> per repo result |
 | `meninx_sync_from_parent` | separate child | per repo result |
 
 Related = parent, children and siblings. Messages go through the target's terminal (its
 provider's prompt input), never through tests (no prompts to real CLIs).
+
+### Waiting (`meninx_wait_session`, `service/wait.rs`)
+
+Herdr's `agent wait --until`, for a parent that gave its children work: one tool call instead
+of polling `meninx_list_related_sessions`. Daemon-answered, async (not one of the blocking
+family tools); checks every 0.5 s.
+
+- **States**: `working`; `prompt_pending` (a queued message, or a first prompt on the CLI's
+  command line it has not started on: `BridgeState::expect_turn`, cleared when the session
+  reports working, forgotten after 120 s); `starting` (running, nothing reported yet);
+  `handing_off` (`docs/session-handoff.md`); done: `idle`, `needs_input` (a permission or a
+  question for the user: it wins over queued messages, which wait for it too), `not_running`,
+  `unreadable` (no hooks reported and no screen rules: its activity is never known).
+- **Settle**: `idle` / `needs_input` count only after they held for 2 s (a turn can look idle
+  between steps); `not_running` / `unreadable` count at once.
+- `mode`: `all` (default) or `any`. `timeout`: seconds, default 600, 1-1800. The caller's CLI
+  may end tool calls sooner (`AgentProvider::mcp_call_limit`: Codex's `tool_timeout_sec`,
+  60 s by default (d)): the wait then ends 5 s before that, with a `note` to call again.
+- Ids are taken once; every one must be related (else an error, nothing waited).
+- The bridge's MCP loop keeps reading during a call (`bridge.rs::serve_mcp`): `ping` is
+  answered at once, `notifications/cancelled` (the user stopped the agent's turn) drops the
+  call, so a long wait never holds back the next tool call. The daemon's side runs on until
+  its own time limit (nothing is held).
 
 ## App
 

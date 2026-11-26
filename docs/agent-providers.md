@@ -124,6 +124,7 @@ is the profile migration in `meninx-core::migrate` (the legacy format had exactl
 | Resume | fresh `--session-id <uuid>`, next start `--resume <uuid>` when `<config home>/projects/*/<uuid>.jsonl` exists; `SessionStart` hook `session_id` (a) | fresh: placeholder `started:<ms>` (Codex picks its id), `SessionStart` hook `session_id` (d); next start `codex resume <uuid> ...` when `<CODEX_HOME>/sessions/**/rollout-*-<uuid>.jsonl` exists (placeholder: earliest rollout of the cwd since the start) (v 0.172.0 help) | — | — |
 | Inherited env | removed: `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, ... (v 2.1.330, see below) | — | — | — |
 | Daemon | — | (v) `--no-daemon` always | — | — |
+| MCP call limit (`mcp_call_limit`, `meninx_wait_session` ends before it) | none | (d) 60 s (`tool_timeout_sec` default, not set by Meninx) | — | none |
 
 Notes:
 - Codex skills: Codex discovers skills only in `$CWD/.agents/skills` (up to the repo root),

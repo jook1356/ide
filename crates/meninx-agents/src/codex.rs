@@ -213,6 +213,11 @@ impl AgentProvider for Codex {
     fn steers(&self) -> bool {
         true
     }
+
+    /// An MCP server's `tool_timeout_sec` defaults to 60 seconds (d); Meninx does not set it.
+    fn mcp_call_limit(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(60))
+    }
     fn capabilities(&self) -> Caps {
         Caps {
             accounts: true,
