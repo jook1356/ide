@@ -18,7 +18,7 @@
 //! - Frameless like Desk's region window (`frame.rs`): the app draws the title bar, with the pin
 //!   and 앱으로 합치기 beside the caption buttons.
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, space, text};
 use iced::{Alignment, Element, Fill, Point, Size, Task, Widget as _, window};
 
 use crate::app::{App, Message};
@@ -107,7 +107,9 @@ impl App {
     /// Open or close the detail window so it matches the state: open while detached and shown
     /// (once there is a session to show; it then stays open without one), closed otherwise.
     pub(crate) fn sync_detail_window(&mut self) -> Task<Message> {
-        let want = self.ui.detail_detached
+        // Only the shown server has it (`shell.rs`).
+        let want = self.shown
+            && self.ui.detail_detached
             && !self.ui.detail_collapsed
             && self.window.is_some()
             && (self.detail_window.is_some() || self.selected.is_some());
@@ -270,7 +272,7 @@ impl App {
             self.ui.detail_window = Some(g);
             // Not `save_ui`: this can arrive after `close_for_reopen` reloaded the state, whose
             // `selected` is still unset until the session list loads.
-            self.ui.save(&self.data_dir);
+            self.ui.save_to(&self.ui_file);
         }
     }
 
@@ -430,7 +432,7 @@ impl App {
                 .boxed(),
         };
         let content = container(column![
-            frame::title_bar(id, self.detail_window_label(), actions.boxed(), maximized),
+            frame::title_bar(id, self.detail_window_label(), space().boxed(), actions.boxed(), maximized),
             body,
         ])
         .width(Fill)

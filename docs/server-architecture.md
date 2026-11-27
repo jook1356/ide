@@ -193,11 +193,11 @@ Known gaps (phase 1):
   `meninx-core`/`portable-pty`. It never spawns agents, runs git or touches project files. Local state
   only: `<data>/ui.json` (selection, split, detail collapsed, language, per-session web URL, last
   repo folder, server choice, close behaviour) and the CEF profile (`<data>/web`).
-- **Server choice**: settings page (navigation rail) -> Server: Local (default: `meninx-server --stdio` next to `meninx.exe`,
+- **Servers** (`docs/multi-server.md`): Local (`meninx-server --stdio` next to `meninx.exe`,
   `MENINX_DATA_DIR` passed through; the relay attaches to the running daemon or starts it detached
-  without a console) or SSH (`ssh <host> [command]`, `Ssh::new`; no local server is started).
-  Switching asks first and reconnects; sessions on the previous server keep running there.
-  `MENINX_REMOTE=ssh:<host>` overrides the setting. SSH is verified only for the UI/persistence path
+  without a console) and any number of SSH servers (`ssh <host> [command]`, `Ssh::new`), listed on
+  the settings page; one `App` per server, all connected, the shown one picked in the title bar.
+  `MENINX_REMOTE=ssh:<host>` replaces the list with that server. SSH is verified only for the UI/persistence path
   and "unreachable host -> disconnected, no local `meninx-server` child"; not against a real host.
 - **Terminals**: one `TermModel` per session. A session is attached (`client.attach(id,
   last_offset or None)`) once per client when it is shown, running or has output; attachments stay

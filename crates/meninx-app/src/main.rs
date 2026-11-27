@@ -51,6 +51,8 @@ mod session_edit;
 mod list_edit;
 mod new_session_repos;
 mod session_menu;
+mod server_menu;
+mod shell;
 mod session_sort;
 mod side_popover;
 mod profiles_view;
@@ -108,13 +110,13 @@ fn main() -> anyhow::Result<()> {
     // A daemon (several windows): the app window is opened by `App::boot`, the detail area's
     // own window by `detail_window.rs`. Closing the app window ends the daemon (`App::exit_app`).
     let result = iced::daemon(
-        move || app::App::boot(boot_data.clone(), rt.clone(), remote.clone()),
-        app::App::update,
-        app::App::view_window,
+        move || shell::Shell::boot(boot_data.clone(), rt.clone(), remote.clone()),
+        shell::Shell::update,
+        shell::Shell::view,
     )
-    .title(app::App::title)
-    .theme(app::App::theme)
-    .subscription(app::App::subscription)
+    .title(shell::Shell::title)
+    .theme(shell::Shell::theme)
+    .subscription(shell::Shell::subscription)
     .settings(iced::Settings {
         backend: meninx_web::backend(),
         font: meninx_views::theme::ui(),

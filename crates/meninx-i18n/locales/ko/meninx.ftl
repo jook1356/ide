@@ -259,15 +259,20 @@ stop-server-body = 모든 세션(에이전트와 셸)을 중지하고 백그라�
 stopping = 중지하는 중…
 
 conn-target = 서버: { $target }
-server-ssh = SSH
 ssh-host-placeholder = user@host
 ssh-command-placeholder = 서버 명령 (기본값: meninx-server --stdio)
-server-apply = 적용
-server-env-override = MENINX_REMOTE={ $value } 환경 변수가 이 설정보다 우선해요.
+server-env-override = MENINX_REMOTE={ $value } 환경 변수가 서버 목록을 대신해요.
+conn-off = 연결 안 됨 (자동 연결 꺼짐)
+server-state-off = 연결 안 됨
+server-counts = 작업 { $working } · 대기 { $waiting } · 새 답변 { $fresh }
+server-manage = 서버 관리…
+server-add = 서버 추가
+server-edit = 편집
+server-auto-connect = 자동 연결
+server-name-placeholder = 이름 (비우면 호스트)
+server-local-detail = 이 컴퓨터
+server-list-note = 서버마다 세션, 레포, 계정, 프로필이 따로 있어요. 보여 줄 서버는 제목 표시줄에서 골라요. 자동 연결을 켠 서버는 다른 서버를 보는 동안에도 연결돼 있어요.
 err-ssh-host = user@host 형식으로 SSH 호스트를 입력하세요.
-switch-server-title = 서버를 바꿀까요?
-switch-server-body = { $target } 서버에 다시 연결해요. 지금 서버의 세션은 그 서버에서 계속 실행돼요.
-switch-server = 바꾸기
 font-label = 글꼴
 font-ui = UI
 font-code = 코드

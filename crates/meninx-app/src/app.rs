@@ -391,8 +391,9 @@ pub struct SettingsForm {
     pub cfg_edit: Option<Box<ConfigEdit>>,
     pub error: Option<String>,
     pub busy: bool,
-    /// Server choice being edited (applied with a confirm).
-    pub ssh: bool,
+    /// Settings -> servers: the entry being edited (`Some("")` = a new one) and its fields.
+    pub server_edit: Option<String>,
+    pub ssh_name: String,
     pub ssh_host: String,
     pub ssh_command: String,
     pub server_error: Option<String>,
@@ -466,26 +467,20 @@ pub struct InitRepoForm {
 }
 
 impl SettingsForm {
-    fn new(pref: &ServerPref) -> Self {
-        let mut f = Self::default();
-        f.reset_server(pref);
-        f
-    }
-
-    /// Show the saved server choice again (entering the settings page).
-    fn reset_server(&mut self, pref: &ServerPref) {
-        (self.ssh, self.ssh_host, self.ssh_command) = match pref {
-            ServerPref::Local => (false, String::new(), String::new()),
-            ServerPref::Ssh { host, command } => (true, host.clone(), command.clone()),
+    /// Edit server entry `id` (`""` = a new one; its fields from `entry`), or stop editing.
+    pub(crate) fn edit_server(&mut self, id: Option<String>, entry: Option<&crate::ui_state::ServerEntry>) {
+        (self.ssh_name, self.ssh_host, self.ssh_command) = match entry.map(|e| (&e.name, &e.pref)) {
+            Some((name, ServerPref::Ssh { host, command })) => {
+                (name.clone(), host.clone(), command.clone())
+            }
+            _ => Default::default(),
         };
+        self.server_edit = id;
         self.server_error = None;
     }
 
-    /// The edited server choice (`Err` = localized validation message).
-    fn server_pref(&self) -> Result<ServerPref, String> {
-        if !self.ssh {
-            return Ok(ServerPref::Local);
-        }
+    /// The edited server (`Err` = localized validation message).
+    pub(crate) fn server_pref(&self) -> Result<ServerPref, String> {
         let host = self.ssh_host.trim();
         if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
             return Err(tr::err_ssh_host());
@@ -518,8 +513,6 @@ pub enum Modal {
     StopServer(StopServerForm),
     /// End an incompatible local server and start this app's (`old_server.rs`).
     RestartOldServer(StopServerForm),
-    /// Confirm switching to another server.
-    SwitchServer(ServerPref),
     Close(CloseForm),
     QuickOpen(QuickForm),
     DefPicker(DefPickerForm),
@@ -802,11 +795,22 @@ pub enum Message {
     ServerStopped(Result<(), ProtoError>),
     /// Reconnect now (or start a new client after the server was stopped).
     Retry,
-    SettingsServerSsh(bool),
+    /// The title bar's server menu opened / closed.
+    ServerMenu(bool),
+    /// Show server `id` (the shell switches; `shell.rs`).
+    PickServer(String),
+    /// Reconnect server `id` from the server menu (the shell routes it to that server).
+    ServerRetry(String),
+    /// The server menu's 서버 관리: the settings page.
+    ServerManage,
+    /// Settings -> servers: add (`Some("")`), edit (`Some(id)`) or stop editing (`None`).
+    ServerEdit(Option<String>),
+    SettingsSshName(String),
     SettingsSshHost(String),
     SettingsSshCommand(String),
     SettingsApplyServer,
-    SwitchServerConfirm,
+    ServerRemove(String),
+    ServerAutoConnect(String, bool),
     SetOnClose(CloseAction),
     /// Settings page: a font picked (blank = the default).
     SetFont(FontSlot, String),
@@ -1098,8 +1102,17 @@ pub fn build_target(pref: &ServerPref, remote_override: Option<&str>) -> Target 
 pub struct App {
     pub data_dir: PathBuf,
     pub runtime: WebRuntime,
-    /// `MENINX_REMOTE` (overrides `ui.server`).
-    pub remote_override: Option<String>,
+    /// This server's id in the list (`ui_state::LOCAL_SERVER` for Local) and its name.
+    pub server_id: String,
+    pub server_name: String,
+    /// This server's UI state file (`UiState::server_file`).
+    pub ui_file: PathBuf,
+    /// Every server for the title bar's menu (the shell sets it; `shell.rs`).
+    pub servers_brief: Vec<crate::shell::ServerBrief>,
+    /// The title bar's server menu is open.
+    pub server_menu: bool,
+    /// This server is the shown one (another server's `App` keeps no detail window).
+    pub shown: bool,
     pub target: Target,
     pub link: Option<Link>,
     /// Incremented per new [`Link`]; results of older links are ignored.
@@ -1256,35 +1269,38 @@ pub struct App {
 }
 
 impl App {
-    pub fn boot(
+    /// The `App` of one server (`shell.rs` keeps one per server): Local's runs the test script
+    /// (`MENINX_APP_SCRIPT`); connected now unless `connect` is false.
+    pub fn start(
         data_dir: PathBuf,
         runtime: WebRuntime,
-        remote_override: Option<String>,
-    ) -> (Self, Task<Message>) {
-        let mut app = Self::load(data_dir, runtime, remote_override);
-        crate::widgets_ui::install();
-        crate::previews_ui::install();
-        app.script = Script::from_env(&app.data_dir);
-        // Self-update: a run that started this app learns it came up.
+        server: (String, String),
+        target: Target,
+        connect: bool,
+    ) -> Self {
+        let mut app = Self::load(data_dir, runtime, server, target);
+        if app.server_id == crate::ui_state::LOCAL_SERVER {
+            app.script = Script::from_env(&app.data_dir);
+        }
         app.update_available = crate::self_update::available();
-        crate::self_update::confirm_started(&app.data_dir);
         app.update_status = crate::self_update::read_status(&app.data_dir);
-        app.connect();
-        // The app window (a daemon opens none by itself, frameless like the detail window);
-        // closing it is handled by the app.
-        let (_, open) = window::open(crate::frame::frameless(window::Settings {
-            size: Size::new(1440.0, 880.0),
-            min_size: Some(Size::new(640.0, 400.0)),
-            exit_on_close_request: false,
-            ..window::Settings::default()
-        }));
-        let task = open.map(|id| Message::WindowOpened(Some(id)));
-        (app, task)
+        if connect {
+            app.connect();
+        } else if app.target.transport.is_ok() {
+            app.conn = Conn::Disconnected(tr::conn_off());
+        }
+        app
     }
 
-    /// App state from `ui.json` (no connection yet).
-    pub fn load(data_dir: PathBuf, runtime: WebRuntime, remote_override: Option<String>) -> Self {
-        let ui = UiState::load(&data_dir);
+    /// App state of server `(id, name)` from its UI state file, with the PC-wide fields from
+    /// `ui.json` (no connection yet).
+    pub fn load(data_dir: PathBuf, runtime: WebRuntime, server: (String, String), target: Target) -> Self {
+        let (server_id, server_name) = server;
+        let ui_file = UiState::server_file(&data_dir, &server_id);
+        let mut ui = UiState::load_from(&ui_file);
+        if server_id != crate::ui_state::LOCAL_SERVER {
+            ui.copy_globals(&UiState::load(&data_dir));
+        }
         meninx_i18n::apply(ui.language);
         meninx_views::theme::set_code_font(&ui.fonts.code);
         let mut term_config = TermConfig::default();
@@ -1294,8 +1310,7 @@ impl App {
         let fonts = installed_font_families();
         let font_pickers = [(); 3].map(|_| iced::widget::combo_box::State::new(fonts.clone()));
         let boot_ui_font = ui.fonts.ui.clone();
-        let target = build_target(&ui.server, remote_override.as_deref());
-        let settings = SettingsForm::new(&ui.server);
+        let settings = SettingsForm::default();
         let conn = match &target.transport {
             Ok(_) => Conn::Connecting,
             Err(e) => Conn::Disconnected(tr::err_server_missing(e)),
@@ -1303,7 +1318,12 @@ impl App {
         Self {
             data_dir,
             runtime,
-            remote_override,
+            server_id,
+            server_name,
+            ui_file,
+            servers_brief: Vec::new(),
+            server_menu: false,
+            shown: true,
             target,
             link: None,
             link_gen: 0,
@@ -1786,7 +1806,7 @@ impl App {
 
     pub(crate) fn save_ui(&mut self) {
         self.ui.selected = self.selected.clone();
-        self.ui.save(&self.data_dir);
+        self.ui.save_to(&self.ui_file);
     }
 
     // ------------------------------------------------------------------ server state
@@ -2734,7 +2754,7 @@ impl App {
                             Page::Widgets => self.load_widgets(),
                             Page::Configurations => self.load_profile_history(),
                             Page::Settings => {
-                                self.settings.reset_server(&self.ui.server);
+                                self.settings.edit_server(None, None);
                                 self.load_approvals()
                             }
                             _ => Task::none(),
@@ -3995,32 +4015,17 @@ impl App {
                 self.save_ui();
                 Task::none()
             }
-            Message::SettingsServerSsh(v) => self.with_settings(|f| {
-                f.ssh = v;
-                f.server_error = None;
-            }),
-            Message::SettingsSshHost(v) => self.with_settings(|f| f.ssh_host = v),
-            Message::SettingsSshCommand(v) => self.with_settings(|f| f.ssh_command = v),
-            Message::SettingsApplyServer => {
-                let f = &mut self.settings;
-                match f.server_pref() {
-                    Err(e) => f.server_error = Some(e),
-                    Ok(pref) if pref == self.ui.server => f.server_error = None,
-                    Ok(pref) => self.modal = Some(Modal::SwitchServer(pref)),
-                }
-                Task::none()
-            }
-            Message::SwitchServerConfirm => {
-                let Some(Modal::SwitchServer(pref)) = self.modal.take() else {
-                    return Task::none();
-                };
-                crate::script::log(&format!("switch server to {pref:?}"));
-                // Sessions on the previous server keep running there.
-                self.ui.server = pref;
-                let closed = self.close_for_reopen();
-                self.connect();
-                closed
-            }
+            Message::ServerMenu(_)
+            | Message::PickServer(_)
+            | Message::ServerRetry(_)
+            | Message::ServerManage
+            | Message::ServerEdit(_)
+            | Message::SettingsSshName(_)
+            | Message::SettingsSshHost(_)
+            | Message::SettingsSshCommand(_)
+            | Message::SettingsApplyServer
+            | Message::ServerRemove(_)
+            | Message::ServerAutoConnect(..) => self.on_server_msg(message),
 
             Message::Tick => crate::script::tick(self),
             Message::Shot(name, shot) => {
@@ -4400,15 +4405,37 @@ impl App {
 
     // ------------------------------------------------------------------ subscriptions
 
-    pub fn subscription(&self) -> Subscription<Message> {
-        let mut subs = vec![
-            meninx_web::events().map(Message::Web),
-            crate::widgets_ui::subscription(),
-            crate::previews_ui::subscription(),
+    /// This server's subscriptions: its connection, footer and update polls and the test
+    /// script always; window, keyboard and pointer events only while it is shown
+    /// (`foreground`). Web view events and widget / preview requests come through the shell,
+    /// which subscribes to them once (`shell.rs`).
+    pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        let mut background = vec![self.footer_subscription()];
+        if let Some(l) = &self.link {
+            background.push(
+                meninx_client::iced_support::subscription(&l.client)
+                    .with(self.link_gen)
+                    .map(|(generation, e)| Message::Client(generation, e)),
+            );
+        }
+        if self.update_polling() {
+            background.push(
+                iced::time::every(crate::self_update::POLL)
+                    .map(|_| Message::Update(crate::self_update::UpdateMsg::Tick)),
+            );
+        }
+        if self.script.as_ref().is_some_and(|s| !s.done()) {
+            background.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));
+        }
+        if !foreground {
+            return Subscription::batch(background);
+        }
+        let mut subs = background;
+        subs.extend([
             window::resize_events().map(|(id, s)| Message::WindowResized(id, s)),
             window::close_requests().map(Message::WindowCloseRequest),
             window::close_events().map(Message::WindowClosed),
-        ];
+        ]);
         subs.push(event::listen_with(|e, _, id| match e {
             Event::Window(window::Event::Focused) => Some(Message::WindowFocus(id, true)),
             Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
@@ -4421,13 +4448,6 @@ impl App {
                 Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(id, p)),
                 _ => None,
             }));
-        }
-        if let Some(l) = &self.link {
-            subs.push(
-                meninx_client::iced_support::subscription(&l.client)
-                    .with(self.link_gen)
-                    .map(|(generation, e)| Message::Client(generation, e)),
-            );
         }
         if self.dragging || self.side_dragging || self.list_dragging || self.scripts_drag.is_some() {
             // The dividers are in the app window: the detail window's pointer does not drive them.
@@ -4534,7 +4554,6 @@ impl App {
             // Turns the bell's and the list's loaders (`icons::spinner`).
             subs.push(iced::time::every(crate::icons::SPIN_FRAME).map(|_| Message::Expire));
         }
-        subs.push(self.footer_subscription());
         subs.push(event::listen_with(|e, _, _| match e {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
             Event::Window(window::Event::FileDropped(p)) => Some(Message::OsFileDropped(p)),
@@ -4554,14 +4573,14 @@ impl App {
                     .map(|_| Message::UTerm(crate::uterm::UTermMsg::PortsTick)),
             );
         }
-        if self.update_polling() {
-            subs.push(
-                iced::time::every(crate::self_update::POLL)
-                    .map(|_| Message::Update(crate::self_update::UpdateMsg::Tick)),
-            );
-        }
-        if self.script.as_ref().is_some_and(|s| !s.done()) {
-            subs.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));
+        if self.server_menu {
+            subs.push(event::listen_with(|e, _, _| match e {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::ServerMenu(false)),
+                _ => None,
+            }));
         }
         Subscription::batch(subs)
     }
@@ -4579,13 +4598,18 @@ impl App {
         let window = self.window;
         let size = self.window_size;
         let script = self.script.take();
+        let brief = std::mem::take(&mut self.servers_brief);
+        let shown = self.shown;
         *self = App::load(
             self.data_dir.clone(),
             self.runtime.clone(),
-            self.remote_override.clone(),
+            (self.server_id.clone(), self.server_name.clone()),
+            self.target.clone(),
         );
         self.window = window;
         self.window_size = size;
+        self.servers_brief = brief;
+        self.shown = shown;
         self.script = script;
         self.conn = Conn::Disconnected(tr::conn_closed());
         detail_window.unwrap_or_else(Task::none)
