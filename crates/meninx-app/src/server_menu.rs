@@ -5,7 +5,7 @@ use iced::widget::{Column, button, column, container, mouse_area, pin, row, spac
 use iced::{Alignment, Color, Element, Fill, Task, Widget as _};
 use meninx_client::AgentActivity;
 
-use crate::app::{App, Conn, Message, SSH_HOST_ID};
+use crate::app::{App, Conn, Message, Modal, SSH_HOST_ID};
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::shell::{LinkState, ServerBrief};
@@ -118,50 +118,15 @@ impl App {
                 self.server_menu = false;
                 return self.update(Message::Page(crate::ui_state::Page::Settings));
             }
-            Message::ServerEdit(id) => {
-                let entry = id
-                    .as_deref()
-                    .and_then(|id| self.ui.servers.iter().find(|e| e.id == id))
-                    .cloned();
-                let focus = id.is_some();
-                self.settings.edit_server(id, entry.as_ref());
-                if focus {
-                    return iced::widget::operation::focus(SSH_HOST_ID);
+            Message::ServerEdit(None) => {
+                if matches!(self.modal, Some(Modal::Server(_))) {
+                    self.modal = None;
                 }
             }
-            Message::SettingsSshName(v) => self.settings.ssh_name = v,
-            Message::SettingsSshHost(v) => self.settings.ssh_host = v,
-            Message::SettingsSshCommand(v) => self.settings.ssh_command = v,
-            Message::SettingsApplyServer => {
-                let Some(id) = self.settings.server_edit.clone() else {
-                    return Task::none();
-                };
-                let pref = match self.settings.server_pref() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.settings.server_error = Some(e);
-                        return Task::none();
-                    }
-                };
-                let name = match self.settings.ssh_name.trim() {
-                    "" => self.settings.ssh_host.trim().to_owned(),
-                    n => n.to_owned(),
-                };
-                crate::script::log(&format!("server list: {id:?} = {name} {pref:?}"));
-                if id.is_empty() {
-                    let id = new_server_id(&name, &self.ui.servers);
-                    self.ui.servers.push(ServerEntry {
-                        id,
-                        name,
-                        pref,
-                        auto_connect: true,
-                    });
-                } else if let Some(e) = self.ui.servers.iter_mut().find(|e| e.id == id) {
-                    e.name = name;
-                    e.pref = pref;
-                }
-                self.settings.edit_server(None, None);
-                self.save_ui();
+            Message::ServerEdit(Some(id)) => {
+                let entry = self.ui.servers.iter().find(|e| e.id == id);
+                self.modal = Some(Modal::Server(ServerForm::new(id.clone(), entry)));
+                return iced::widget::operation::focus(SSH_HOST_ID);
             }
             Message::ServerRemove(id) => {
                 crate::script::log(&format!("server list: remove {id}"));
@@ -169,15 +134,102 @@ impl App {
                 if self.ui.current_server == id {
                     self.ui.current_server = LOCAL_SERVER.to_owned();
                 }
-                if self.settings.server_edit.as_deref() == Some(id.as_str()) {
-                    self.settings.edit_server(None, None);
-                }
                 self.save_ui();
             }
             Message::ServerAutoConnect(id, on) => {
                 if let Some(e) = self.ui.servers.iter_mut().find(|e| e.id == id) {
                     e.auto_connect = on;
                 }
+                self.save_ui();
+            }
+            Message::ServerTested(n, r) => {
+                if let Some(Modal::Server(f)) = &mut self.modal
+                    && f.test == ServerTest::Running(n)
+                {
+                    f.test = match r {
+                        Ok(v) => ServerTest::Ok(v),
+                        Err(e) => ServerTest::Failed(e),
+                    };
+                }
+            }
+            m => return self.on_server_form(m),
+        }
+        Task::none()
+    }
+
+    /// The server dialog's own messages (it is open).
+    fn on_server_form(&mut self, m: Message) -> Task<Message> {
+        let Some(Modal::Server(f)) = &mut self.modal else {
+            return Task::none();
+        };
+        match m {
+            Message::SettingsSshName(v) => f.name = v,
+            Message::SettingsSshHost(v) => {
+                f.host = v;
+                f.error = None;
+                f.test = ServerTest::Idle;
+            }
+            Message::SettingsSshCommand(v) => {
+                f.command = v;
+                f.test = ServerTest::Idle;
+            }
+            Message::ServerFormAdvanced => f.advanced = !f.advanced,
+            Message::ServerFormAuto(on) => f.auto_connect = on,
+            Message::ServerTest => {
+                let pref = match f.pref() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        f.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                let n = next_test();
+                f.test = ServerTest::Running(n);
+                let transport = crate::app::build_target(&pref, None).transport;
+                return Task::perform(
+                    async move {
+                        let t = transport?;
+                        let opts = meninx_client::ClientOptions {
+                            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+                            ..meninx_client::ClientOptions::default()
+                        };
+                        // Dropped right after: the test keeps no connection.
+                        meninx_client::Client::connect(meninx_client::Switchable::new(t), opts)
+                            .await
+                            .map(|c| c.welcome().map(|w| w.server_version).unwrap_or_default())
+                            .map_err(|e| crate::i18n::proto_error(&e))
+                    },
+                    move |r| Message::ServerTested(n, r),
+                );
+            }
+            Message::SettingsApplyServer => {
+                let pref = match f.pref() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        f.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                let name = match f.name.trim() {
+                    "" => f.host.trim().to_owned(),
+                    n => n.to_owned(),
+                };
+                let (id, auto_connect) = (f.id.clone(), f.auto_connect);
+                crate::script::log(&format!("server list: {id:?} = {name} {pref:?}"));
+                if id.is_empty() {
+                    let id = new_server_id(&name, &self.ui.servers);
+                    self.ui.servers.push(ServerEntry {
+                        id,
+                        name,
+                        pref,
+                        auto_connect,
+                    });
+                } else if let Some(e) = self.ui.servers.iter_mut().find(|e| e.id == id) {
+                    e.name = name;
+                    e.pref = pref;
+                    e.auto_connect = auto_connect;
+                }
+                self.modal = None;
                 self.save_ui();
             }
             _ => {}
@@ -304,7 +356,6 @@ impl App {
     /// Settings -> server: Local, then the SSH servers (auto-connect, edit, remove), and the
     /// add / edit form.
     pub(crate) fn server_list<'a>(&'a self) -> El<'a> {
-        let f = &self.settings;
         let state_of = |id: &str| {
             self.servers_brief
                 .iter()
@@ -365,43 +416,213 @@ impl App {
             .boxed();
             c = c.push(entry_row(&e.id, e.name.clone(), format!("ssh {host}"), actions));
         }
-        match &f.server_edit {
-            None => {
-                c = c.push(row![
-                    space().width(Fill),
-                    small(tr::server_add(), style::secondary, Message::ServerEdit(Some(String::new()))),
-                ].boxed());
-            }
-            Some(_) => {
-                let input = |placeholder: String, value: &'a str, on: fn(String) -> Message| {
-                    text_input(placeholder, value)
-                        .on_input(on)
-                        .on_submit(Message::SettingsApplyServer)
-                        .size(13)
-                        .padding([5, 8])
-                        .style(style::input)
-                };
-                c = c.push(
-                    column![
-                        input(tr::ssh_host_placeholder(), &f.ssh_host, Message::SettingsSshHost)
-                            .id(SSH_HOST_ID),
-                        input(tr::server_name_placeholder(), &f.ssh_name, Message::SettingsSshName),
-                        input(tr::ssh_command_placeholder(), &f.ssh_command, Message::SettingsSshCommand),
-                        row![
-                            space().width(Fill),
-                            small(tr::cancel(), style::secondary, Message::ServerEdit(None)),
-                            small(tr::save(), style::primary, Message::SettingsApplyServer),
-                        ]
-                        .spacing(6),
-                    ]
-                    .spacing(6)
-                    .boxed(),
-                );
-                if let Some(e) = &f.server_error {
-                    c = c.push(crate::view::error_box(e));
-                }
-            }
-        }
+        c = c.push(
+            row![
+                space().width(Fill),
+                small(tr::server_add(), style::secondary, Message::ServerEdit(Some(String::new()))),
+            ]
+            .boxed(),
+        );
         c.boxed()
     }
+
+    /// The server dialog (A안): host and name with labels and hints, the server command under
+    /// 고급, auto-connect, a connection test, then 추가 / 저장.
+    pub(crate) fn server_dialog<'a>(&'a self, f: &'a ServerForm) -> El<'a> {
+        let field = |label: String, input: El<'a>, hint: Option<String>| -> El<'a> {
+            let mut c = column![text(label).size(12).color(style::DIM), input].spacing(4);
+            if let Some(h) = hint {
+                c = c.push(
+                    text(h)
+                        .size(11)
+                        .color(style::FAINT)
+                        .wrapping(text::Wrapping::WordOrGlyph)
+                        .boxed(),
+                );
+            }
+            c.boxed()
+        };
+        let input = |placeholder: String, value: &'a str, on: fn(String) -> Message| {
+            text_input(placeholder, value)
+                .on_input(on)
+                .on_submit(Message::SettingsApplyServer)
+                .size(13)
+                .padding([6, 9])
+                .style(style::input)
+        };
+        let new = f.id.is_empty();
+        let host_placeholder = tr::ssh_host_placeholder();
+        let name_placeholder = match f.host.trim() {
+            "" => tr::server_name_placeholder(),
+            h => h.to_owned(),
+        };
+        let mut c = column![
+            column![
+                text(if new { tr::server_add() } else { tr::server_edit_title() })
+                    .size(18)
+                    .font(style::bold()),
+                text(tr::server_dialog_sub()).size(12).color(style::DIM),
+            ]
+            .spacing(2),
+            field(
+                tr::server_host_label(),
+                input(host_placeholder, &f.host, Message::SettingsSshHost)
+                    .id(SSH_HOST_ID)
+                    .boxed(),
+                Some(tr::server_host_hint()),
+            ),
+            field(
+                tr::server_name_label(),
+                input(name_placeholder, &f.name, Message::SettingsSshName).boxed(),
+                Some(tr::server_name_hint()),
+            ),
+            button(
+                row![
+                    icons::icon(
+                        if f.advanced { Icon::ChevronDown } else { Icon::ChevronRight },
+                        12.0,
+                        style::DIM
+                    ),
+                    text(tr::server_advanced()).size(12).color(style::DIM),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+            .padding([2, 0])
+            .style(style::ghost_choice(false))
+            .on_press(Message::ServerFormAdvanced),
+        ]
+        .spacing(12);
+        if f.advanced {
+            c = c.push(field(
+                tr::server_command_label(),
+                input(tr::ssh_command_placeholder(), &f.command, Message::SettingsSshCommand).boxed(),
+                None,
+            ));
+        }
+        c = c.push(
+            iced::widget::checkbox(f.auto_connect)
+                .label(tr::server_auto_connect_hint())
+                .on_toggle(Message::ServerFormAuto)
+                .size(15)
+                .text_size(13)
+                .boxed(),
+        );
+        if let Some(e) = &f.error {
+            c = c.push(crate::view::error_box(e));
+        }
+        let (color, status) = match &f.test {
+            ServerTest::Idle => (style::FAINT, String::new()),
+            ServerTest::Running(_) => (style::AMBER, tr::server_testing()),
+            ServerTest::Ok(v) => (style::GREEN, tr::conn_connected(v)),
+            ServerTest::Failed(e) => (style::RED, tr::server_test_failed(e)),
+        };
+        let testing = matches!(f.test, ServerTest::Running(_));
+        let mut test_row = row![].spacing(8).align_y(Alignment::Center);
+        if !status.is_empty() {
+            test_row = test_row.push(text(DOT).size(10).color(color).boxed());
+        }
+        c = c.push(
+            container(space()).height(1).width(Fill).style(style::bg(style::BORDER)).boxed(),
+        );
+        c = c.push(
+            test_row
+                .push(
+                    text(status)
+                        .size(12)
+                        .color(style::DIM)
+                        .wrapping(text::Wrapping::WordOrGlyph)
+                        .width(Fill)
+                        .boxed(),
+                )
+                .push(
+                    button(text(tr::server_test()).size(12))
+                        .padding([4, 10])
+                        .style(style::secondary)
+                        .on_press_maybe((!testing).then_some(Message::ServerTest))
+                        .boxed(),
+                )
+                .boxed(),
+        );
+        c = c.push(
+            row![
+                space().width(Fill),
+                button(text(tr::cancel()).size(13))
+                    .padding([6, 14])
+                    .style(style::secondary)
+                    .on_press(Message::ServerEdit(None)),
+                button(text(if new { tr::add() } else { tr::save() }).size(13))
+                    .padding([6, 14])
+                    .style(style::primary)
+                    .on_press(Message::SettingsApplyServer),
+            ]
+            .spacing(8)
+            .boxed(),
+        );
+        c.width(440).boxed()
+    }
+}
+
+/// The server dialog's state (`Modal::Server`).
+#[derive(Debug, Default)]
+pub struct ServerForm {
+    /// The entry edited (`""` = a new one).
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub command: String,
+    pub auto_connect: bool,
+    /// 고급 (the server command) is unfolded.
+    pub advanced: bool,
+    pub error: Option<String>,
+    pub test: ServerTest,
+}
+
+/// The dialog's connection test.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ServerTest {
+    #[default]
+    Idle,
+    /// Test `n` runs (an older test's result is ignored).
+    Running(u64),
+    /// Connected: the server's version.
+    Ok(String),
+    Failed(String),
+}
+
+impl ServerForm {
+    fn new(id: String, entry: Option<&ServerEntry>) -> Self {
+        let mut f = ServerForm {
+            id,
+            auto_connect: true,
+            ..Default::default()
+        };
+        if let Some(e) = entry {
+            f.name = e.name.clone();
+            f.auto_connect = e.auto_connect;
+            if let ServerPref::Ssh { host, command } = &e.pref {
+                f.host = host.clone();
+                f.command = command.clone();
+                f.advanced = !command.is_empty();
+            }
+        }
+        f
+    }
+
+    /// The edited server (`Err` = localized validation message).
+    fn pref(&self) -> Result<ServerPref, String> {
+        let host = self.host.trim();
+        if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
+            return Err(tr::err_ssh_host());
+        }
+        Ok(ServerPref::Ssh {
+            host: host.to_owned(),
+            command: self.command.trim().to_owned(),
+        })
+    }
+}
+
+fn next_test() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }

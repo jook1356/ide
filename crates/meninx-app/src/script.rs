@@ -226,6 +226,8 @@ enum Step {
     Retry,
     /// Settings page: start adding a server with this host; does not save.
     SettingsServer(&'static str),
+    /// The server dialog's connection test ended (fails for the unreachable host).
+    WaitServerTestFailed(u64),
     ApplyServer,
     /// Show this server (through the shell, like the title bar's menu).
     ShowServer(&'static str),
@@ -1097,6 +1099,9 @@ fn server_list_steps() -> Vec<Step> {
         Wait(300),
         Shot("22_settings_ssh"),
         Pause("settings_ssh"),
+        App(Message::ServerTest),
+        WaitServerTestFailed(30_000),
+        Shot("22b_server_test"),
         ApplyServer,
         ExpectSavedServers(1),
         WaitServerDown(UNREACHABLE_ID, 15_000),
@@ -3845,6 +3850,19 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 tasks.push(app.update(Message::SettingsSshHost(host.into())));
             }
             Step::ApplyServer => tasks.push(app.update(Message::SettingsApplyServer)),
+            Step::WaitServerTestFailed(ms) => {
+                let test = match &app.modal {
+                    Some(Modal::Server(f)) => Some(f.test.clone()),
+                    _ => None,
+                };
+                match test {
+                    Some(crate::server_menu::ServerTest::Failed(e)) => {
+                        sc.check(true, &format!("server test failed: {e}"));
+                    }
+                    t if timeout(ms) => sc.check(false, &format!("server test {t:?}")),
+                    _ => next = false,
+                }
+            }
             Step::ShowServer(id) => tasks.push(Task::done(Message::PickServer(id.into()))),
             Step::ExpectShown(id) => {
                 let shown = &app.ui.current_server;

@@ -52,10 +52,11 @@ another server is a later addition.
 - **Title bar**: the server menu beside the brand: the current server's name and a dot for
   its connection; open: every server with its state (connected / connecting / not connected)
   and counts (working, waiting for the user), a retry for a disconnected one, and 서버 관리
-  (the settings page). A dot on the button when another server has a session waiting for the
+ (the settings page). A dot on the button when another server has a session waiting for the
   user or a new answer.
-- **Settings -> 서버**: the list (Local first, then SSH servers): add (name, `ssh` host,
-  optional server command), edit, remove, auto-connect. A change rebuilds that server's `App`
+- **Settings -> 서버**: the list (Local first, then SSH servers): auto-connect, edit, remove, and
+  서버 추가. Adding and editing open a dialog: SSH host and name with hints, the server command
+  under 고급, auto-connect, 연결 테스트 (a throwaway client: the server version or why not). A change rebuilds that server's `App`
   (its sessions keep running on the server).
 - Every other page shows the current server's data, as before (repos, accounts, profiles,
   widgets, the session list).
