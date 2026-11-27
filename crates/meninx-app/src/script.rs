@@ -226,8 +226,12 @@ enum Step {
     Retry,
     /// Settings page: start adding a server with this host; does not save.
     SettingsServer(&'static str),
-    /// The server dialog's connection test ended (fails for the unreachable host).
-    WaitServerTestFailed(u64),
+    /// The server dialog's check ended as `failed` / `missing` / `differs` / `ok`.
+    WaitServerTest(&'static str, u64),
+    /// The server menu shows this server connected.
+    WaitServerUp(&'static str, u64),
+    /// Run a command on the `MENINX_APP_TEST_SSH` host (`ssh -F $MENINX_SSH_CONFIG`), not waited for.
+    RemoteShell(&'static str),
     ApplyServer,
     /// Show this server (through the shell, like the title bar's menu).
     ShowServer(&'static str),
@@ -1100,7 +1104,7 @@ fn server_list_steps() -> Vec<Step> {
         Shot("22_settings_ssh"),
         Pause("settings_ssh"),
         App(Message::ServerTest),
-        WaitServerTestFailed(30_000),
+        WaitServerTest("failed", 30_000),
         Shot("22b_server_test"),
         ApplyServer,
         ExpectSavedServers(1),
@@ -1126,6 +1130,50 @@ fn server_list_steps() -> Vec<Step> {
     ]
 }
 
+/// Installing the server on a real SSH host (`docs/remote-install.md`; `MENINX_APP_TEST_SSH=<host>`,
+/// with `MENINX_SSH_CONFIG` for its key): nothing there -> install -> connected and shown; another
+/// build -> update; then the entry, the daemon and `~/.meninx` are removed again.
+fn remote_install_steps(host: &'static str) -> Vec<Step> {
+    use Step::*;
+    let id: &'static str = Box::leak(crate::ui_state::new_server_id(host, &[]).into_boxed_str());
+    vec![
+        Log("--- remote install over SSH"),
+        RemoteShell("rm -rf ~/.meninx"),
+        Wait(3000),
+        App(Message::Page(Page::Settings)),
+        SettingsServer(host),
+        App(Message::ServerTest),
+        WaitServerTest("missing", 60_000),
+        Shot("30_remote_missing"),
+        App(Message::ServerInstall),
+        WaitServerTest("ok", 300_000),
+        Shot("31_remote_installed"),
+        ApplyServer,
+        WaitServerUp(id, 60_000),
+        ShowServer(id),
+        Wait(2000),
+        ExpectShown(id),
+        Shot("32_remote_shown"),
+        ShowServer(LOCAL_SERVER),
+        Wait(500),
+        Log("--- another build installed: update"),
+        RemoteShell("b=~/.meninx/bin/meninx-server; cp $b $b.tmp && printf x >> $b.tmp && mv -f $b.tmp $b"),
+        Wait(3000),
+        App(Message::ServerEdit(Some(id.into()))),
+        App(Message::ServerTest),
+        WaitServerTest("differs", 60_000),
+        Shot("33_remote_differs"),
+        App(Message::ServerInstall),
+        WaitServerTest("ok", 300_000),
+        App(Message::ServerEdit(None)),
+        App(Message::ServerRemove(id.into())),
+        RemoteShell(
+            "p=${XDG_DATA_HOME:-$HOME/.local/share}/meninx; [ -f $p/meninx-server.pid ] && kill $(cat $p/meninx-server.pid); sleep 1; rm -rf ~/.meninx $p",
+        ),
+        Wait(3000),
+    ]
+}
+
 /// Startup, the server list and the server stop (`MENINX_APP_SCRIPT_ONLY=servers`).
 fn steps_servers_only() -> Vec<Step> {
     use Step::*;
@@ -1136,6 +1184,9 @@ fn steps_servers_only() -> Vec<Step> {
         MarkDaemon,
     ];
     s.extend(server_list_steps());
+    if let Some(host) = std::env::var("MENINX_APP_TEST_SSH").ok().filter(|v| !v.is_empty()) {
+        s.extend(remote_install_steps(Box::leak(host.into_boxed_str())));
+    }
     s.extend([
         GoPage(Page::Settings),
         AskStopServer,
@@ -3850,18 +3901,48 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 tasks.push(app.update(Message::SettingsSshHost(host.into())));
             }
             Step::ApplyServer => tasks.push(app.update(Message::SettingsApplyServer)),
-            Step::WaitServerTestFailed(ms) => {
+            Step::WaitServerTest(kind, ms) => {
+                use crate::server_menu::ServerTest as T;
                 let test = match &app.modal {
                     Some(Modal::Server(f)) => Some(f.test.clone()),
                     _ => None,
                 };
-                match test {
-                    Some(crate::server_menu::ServerTest::Failed(e)) => {
-                        sc.check(true, &format!("server test failed: {e}"));
-                    }
-                    t if timeout(ms) => sc.check(false, &format!("server test {t:?}")),
-                    _ => next = false,
+                let now = match &test {
+                    Some(T::Failed(_)) => "failed",
+                    Some(T::Missing { .. }) => "missing",
+                    Some(T::Differs { .. }) => "differs",
+                    Some(T::Ok(_)) => "ok",
+                    _ => "",
+                };
+                if now == kind {
+                    sc.check(true, &format!("server check {test:?}"));
+                } else if !now.is_empty() || timeout(ms) {
+                    sc.check(false, &format!("server check {test:?}, expected {kind}"));
+                } else {
+                    next = false;
                 }
+            }
+            Step::WaitServerUp(id, ms) => {
+                let state = app.servers_brief.iter().find(|b| b.id == id).map(|b| b.state);
+                if state == Some(crate::shell::LinkState::Connected) {
+                    sc.check(true, &format!("server {id} connected"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("server {id} state {state:?}"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::RemoteShell(cmd) => {
+                let host = std::env::var("MENINX_APP_TEST_SSH").unwrap_or_default();
+                let config = std::env::var("MENINX_SSH_CONFIG").unwrap_or_default();
+                log(&format!("remote: {cmd}"));
+                std::thread::spawn(move || {
+                    let mut c = command("ssh");
+                    if !config.is_empty() {
+                        c.args(["-F", &config]);
+                    }
+                    let _ = c.args(["-o", "BatchMode=yes", "--", &host, cmd]).output();
+                });
             }
             Step::ShowServer(id) => tasks.push(Task::done(Message::PickServer(id.into()))),
             Step::ExpectShown(id) => {

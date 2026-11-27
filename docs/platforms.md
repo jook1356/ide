@@ -28,6 +28,11 @@ Checked on this machine: `cargo check --target aarch64-apple-darwin` and
 
 ## Linux: to do
 
+- [ ] **Remote server on a real Linux host** (`docs/remote-install.md`). The static musl builds of
+  `meninx-server` (x86_64, aarch64) were run only in WSL Ubuntu 22.04 (x86_64): `--version`, install
+  over SSH, a connection from the app. Assumption: the daemon (Unix socket, `$XDG_DATA_HOME`) and
+  sessions work on other distributions; aarch64 never ran. Check: install from the server dialog on
+  a Debian / Fedora and an arm64 host, create a session there.
 - [ ] **Detail window place** (`meninx-app/src/detail_window.rs` `remember_detail_geometry`): logical
   position / size from `Moved` and resize events, not saved while maximised or at x / y below
   -10000 (assumed: a minimised window may report a parking spot like Windows' -32000). Not
@@ -210,6 +215,8 @@ what is assumed and how to check it. Tick an item only after checking it on a Ma
 Newest first; one line per change that touched another OS's code, so the Mac pass knows what to
 look at.
 
+- 2026-11-28: static Linux builds of `meninx-server` (musl, `cargo zigbuild`, profile `remote`) shipped
+  in `<app>/remote/linux-<arch>/` and installed over SSH (`remote_install.rs`); x86_64 checked in WSL.
 - 2026-11-25: detail window place off Windows: not saved while maximised or at a parking
   spot (`detail_window.rs` `remember_detail_geometry`); unbuilt on macOS / Linux.
 - 2026-11-25: `restart_scrollback_e2e` Unix branch (`sh` loop printing the old lines); unrun on

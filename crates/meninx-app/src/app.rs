@@ -779,9 +779,10 @@ pub enum Message {
     /// The server dialog's 고급 (server command) unfolded / folded.
     ServerFormAdvanced,
     ServerFormAuto(bool),
-    /// The server dialog's 연결 테스트, and its result (`Ok` = server version) for test `n`.
+    /// The server dialog's 연결 테스트, 설치 / 업데이트, and the result of check `n`.
     ServerTest,
-    ServerTested(u64, Result<String, String>),
+    ServerInstall,
+    ServerTested(u64, crate::server_menu::ServerTest),
     SettingsSshName(String),
     SettingsSshHost(String),
     SettingsSshCommand(String),
@@ -1030,13 +1031,23 @@ pub struct Target {
     pub remote: String,
 }
 
+/// The `ssh` of a server entry (`command` empty = the default, `DEFAULT_SSH_COMMAND`).
+/// `MENINX_SSH_CONFIG=<file>` adds `-F <file>` (tests: a scratch ssh config).
+pub fn ssh_for(host: &str, command: &str) -> Ssh {
+    let mut s = Ssh::new(host);
+    if !command.is_empty() {
+        s.server_command = command.to_owned();
+    }
+    if let Some(f) = std::env::var_os("MENINX_SSH_CONFIG").filter(|v| !v.is_empty()) {
+        s.extra_args = vec!["-F".into(), f.to_string_lossy().into_owned()];
+    }
+    s
+}
+
 /// `MENINX_REMOTE=ssh:<host>` (tests, scripts) overrides the server setting.
 pub fn build_target(pref: &ServerPref, remote_override: Option<&str>) -> Target {
     let ssh = |host: &str, command: &str| {
-        let mut s = Ssh::new(host);
-        if !command.is_empty() {
-            s.server_command = command.to_owned();
-        }
+        let s = ssh_for(host, command);
         Target {
             remote: s.describe(),
             transport: Ok(Arc::new(s) as Arc<dyn Transport>),
@@ -4004,6 +4015,7 @@ impl App {
             | Message::ServerFormAdvanced
             | Message::ServerFormAuto(_)
             | Message::ServerTest
+            | Message::ServerInstall
             | Message::ServerTested(..)
             | Message::ServerAutoConnect(..) => self.on_server_msg(message),
 

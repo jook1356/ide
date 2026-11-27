@@ -142,14 +142,11 @@ impl App {
                 }
                 self.save_ui();
             }
-            Message::ServerTested(n, r) => {
+            Message::ServerTested(n, t) => {
                 if let Some(Modal::Server(f)) = &mut self.modal
-                    && f.test == ServerTest::Running(n)
+                    && f.test.run() == Some(n)
                 {
-                    f.test = match r {
-                        Ok(v) => ServerTest::Ok(v),
-                        Err(e) => ServerTest::Failed(e),
-                    };
+                    f.test = t;
                 }
             }
             m => return self.on_server_form(m),
@@ -175,7 +172,7 @@ impl App {
             }
             Message::ServerFormAdvanced => f.advanced = !f.advanced,
             Message::ServerFormAuto(on) => f.auto_connect = on,
-            Message::ServerTest => {
+            Message::ServerTest | Message::ServerInstall => {
                 let pref = match f.pref() {
                     Ok(p) => p,
                     Err(e) => {
@@ -184,23 +181,16 @@ impl App {
                     }
                 };
                 let n = next_test();
-                f.test = ServerTest::Running(n);
-                let transport = crate::app::build_target(&pref, None).transport;
-                return Task::perform(
-                    async move {
-                        let t = transport?;
-                        let opts = meninx_client::ClientOptions {
-                            client_version: env!("CARGO_PKG_VERSION").to_owned(),
-                            ..meninx_client::ClientOptions::default()
-                        };
-                        // Dropped right after: the test keeps no connection.
-                        meninx_client::Client::connect(meninx_client::Switchable::new(t), opts)
-                            .await
-                            .map(|c| c.welcome().map(|w| w.server_version).unwrap_or_default())
-                            .map_err(|e| crate::i18n::proto_error(&e))
-                    },
-                    move |r| Message::ServerTested(n, r),
-                );
+                let install = match (&m, &f.test) {
+                    (Message::ServerInstall, ServerTest::Missing { platform, .. }) => Some((platform.clone(), false)),
+                    (Message::ServerInstall, ServerTest::Differs { platform, incompatible, .. }) => {
+                        Some((platform.clone(), *incompatible))
+                    }
+                    (Message::ServerInstall, _) => return Task::none(),
+                    _ => None,
+                };
+                f.test = if install.is_some() { ServerTest::Installing(n) } else { ServerTest::Running(n) };
+                return Task::perform(check_server(pref, install), move |t| Message::ServerTested(n, t));
             }
             Message::SettingsApplyServer => {
                 let pref = match f.pref() {
@@ -511,13 +501,27 @@ impl App {
         if let Some(e) = &f.error {
             c = c.push(crate::view::error_box(e));
         }
-        let (color, status) = match &f.test {
-            ServerTest::Idle => (style::FAINT, String::new()),
-            ServerTest::Running(_) => (style::AMBER, tr::server_testing()),
-            ServerTest::Ok(v) => (style::GREEN, tr::conn_connected(v)),
-            ServerTest::Failed(e) => (style::RED, tr::server_test_failed(e)),
+        // The check's result, and 설치 / 업데이트 when it offers one.
+        let (color, status, action) = match &f.test {
+            ServerTest::Idle => (style::FAINT, String::new(), None),
+            ServerTest::Running(_) => (style::AMBER, tr::server_testing(), None),
+            ServerTest::Installing(_) => (style::AMBER, tr::server_installing(), None),
+            ServerTest::Ok(v) => (style::GREEN, tr::conn_connected(v), None),
+            ServerTest::Missing { platform, bundled: true } => {
+                (style::AMBER, tr::server_missing(platform), Some(tr::server_install()))
+            }
+            ServerTest::Missing { platform, bundled: false } => {
+                (style::RED, tr::server_no_build(platform), None)
+            }
+            ServerTest::Differs { version, incompatible: false, .. } => {
+                (style::AMBER, tr::server_differs(version), Some(tr::server_update()))
+            }
+            ServerTest::Differs { version, incompatible: true, .. } => {
+                (style::RED, tr::server_incompatible(version), Some(tr::server_update()))
+            }
+            ServerTest::Failed(e) => (style::RED, tr::server_test_failed(e), None),
         };
-        let testing = matches!(f.test, ServerTest::Running(_));
+        let testing = f.test.run().is_some();
         let mut test_row = row![].spacing(8).align_y(Alignment::Center);
         if !status.is_empty() {
             test_row = test_row.push(text(DOT).size(10).color(color).boxed());
@@ -542,6 +546,14 @@ impl App {
                         .on_press_maybe((!testing).then_some(Message::ServerTest))
                         .boxed(),
                 )
+                .push(match action {
+                    Some(label) => button(text(label).size(12))
+                        .padding([4, 10])
+                        .style(style::primary)
+                        .on_press(Message::ServerInstall)
+                        .boxed(),
+                    None => space().boxed(),
+                })
                 .boxed(),
         );
         c = c.push(
@@ -578,16 +590,122 @@ pub struct ServerForm {
     pub test: ServerTest,
 }
 
-/// The dialog's connection test.
+/// The dialog's connection check (`docs/remote-install.md`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ServerTest {
     #[default]
     Idle,
-    /// Test `n` runs (an older test's result is ignored).
+    /// Check `n` runs (an older check's result is ignored).
     Running(u64),
-    /// Connected: the server's version.
+    /// Install / update `n` runs, then the check.
+    Installing(u64),
+    /// Connected to this app's build (or a server not installed by Meninx): its version.
     Ok(String),
+    /// No server in `~/.meninx/bin` and none answered; `bundled`: the app has a build for
+    /// `platform`.
+    Missing { platform: String, bundled: bool },
+    /// Another build is installed: `incompatible` when it does not speak this app's protocol
+    /// (updating restarts the daemon: its sessions stop).
+    Differs {
+        platform: String,
+        version: String,
+        incompatible: bool,
+    },
     Failed(String),
+}
+
+impl ServerTest {
+    /// The check or install that runs.
+    pub fn run(&self) -> Option<u64> {
+        match self {
+            ServerTest::Running(n) | ServerTest::Installing(n) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+/// The app's Linux build of the server for `platform` (`linux-x86_64`, ...):
+/// `<app folder>/remote/<platform>/meninx-server`, or under `MENINX_REMOTE_SERVERS`.
+pub fn bundled_server(platform: &str) -> Option<std::path::PathBuf> {
+    let base = match std::env::var_os("MENINX_REMOTE_SERVERS").filter(|v| !v.is_empty()) {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::current_exe().ok()?.parent()?.join("remote"),
+    };
+    let p = base.join(platform).join("meninx-server");
+    p.is_file().then_some(p)
+}
+
+/// Check server `pref` (installing first when `install` names the platform, restarting the
+/// daemon too when the installed one was incompatible): what is installed, and whether this
+/// app can talk to it.
+async fn check_server(pref: ServerPref, install: Option<(String, bool)>) -> ServerTest {
+    use meninx_client::remote_install as ri;
+    let ServerPref::Ssh { host, command } = &pref else {
+        return ServerTest::Failed(String::new());
+    };
+    let ssh = crate::app::ssh_for(host, command);
+    if let Some((platform, restart)) = install {
+        let Some(path) = bundled_server(&platform) else {
+            return ServerTest::Failed(tr::server_no_build(&platform));
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return ServerTest::Failed(format!("{}: {e}", path.display())),
+        };
+        if let Err(e) = ri::install(&ssh, bytes).await {
+            return ServerTest::Failed(e.to_string());
+        }
+        if restart && let Err(e) = ri::restart(&ssh).await {
+            return ServerTest::Failed(e.to_string());
+        }
+    }
+    // A custom server command is the user's: only the connection is checked.
+    let probe = if command.is_empty() {
+        match ri::probe(&ssh).await {
+            Ok(p) => Some(p),
+            Err(e) => return ServerTest::Failed(e.to_string()),
+        }
+    } else {
+        None
+    };
+    let same_build = |p: &ri::Probe| {
+        let Some(i) = &p.installed else { return true };
+        match bundled_server(&p.platform).and_then(|b| std::fs::read(b).ok()) {
+            Some(bytes) => ri::cksum(&bytes) == i.cksum,
+            // No build to compare with: nothing to offer.
+            None => true,
+        }
+    };
+    let opts = meninx_client::ClientOptions {
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
+        ..meninx_client::ClientOptions::default()
+    };
+    // Dropped right after: the check keeps no connection.
+    let connected = meninx_client::Client::connect(meninx_client::Switchable::new(ssh.clone()), opts)
+        .await
+        .map(|c| c.welcome().map(|w| w.server_version).unwrap_or_default());
+    match (probe, connected) {
+        (Some(p), Ok(v)) if !same_build(&p) => ServerTest::Differs {
+            platform: p.platform,
+            version: v,
+            incompatible: false,
+        },
+        // Ours, or a server the user installed (`meninx-server` on `PATH`).
+        (_, Ok(v)) => ServerTest::Ok(v),
+        (Some(p), Err(_)) if p.installed.is_none() => {
+            let bundled = bundled_server(&p.platform).is_some();
+            ServerTest::Missing {
+                platform: p.platform,
+                bundled,
+            }
+        }
+        (Some(p), Err(e)) if e.id == "proto-version" => ServerTest::Differs {
+            version: p.installed.map(|i| i.version).unwrap_or_default(),
+            platform: p.platform,
+            incompatible: true,
+        },
+        (_, Err(e)) => ServerTest::Failed(crate::i18n::proto_error(&e)),
+    }
 }
 
 impl ServerForm {

@@ -19,6 +19,7 @@
 //! ```
 
 mod client;
+pub mod remote_install;
 pub mod transport;
 
 pub use client::{Client, ClientEvent, ClientEvents, ClientOptions, SearchEvent, SearchStream, UTermOpen};

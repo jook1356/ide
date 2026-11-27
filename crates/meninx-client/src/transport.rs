@@ -144,13 +144,20 @@ impl Transport for LocalChild {
     }
 }
 
+/// The remote command of an SSH server without one: `~/.meninx/bin/meninx-server` (where
+/// [`crate::remote_install`] puts it), else `meninx-server` on `PATH`. Run by `sh` so it does not
+/// depend on the login shell.
+pub const DEFAULT_SSH_COMMAND: &str =
+    "sh -c 'b=\"$HOME/.meninx/bin/meninx-server\"; [ -x \"$b\" ] || b=meninx-server; exec \"$b\" --stdio'";
+
 /// Runs `ssh <host> meninx-server --stdio` with the system OpenSSH client. Authentication is
 /// SSH's (keys/agent); `BatchMode` stops it from prompting, since there is no terminal.
 #[derive(Debug, Clone)]
 pub struct Ssh {
     /// `host` or `user@host` (or an alias from `~/.ssh/config`).
     pub host: String,
-    /// Remote command (default `meninx-server --stdio`).
+    /// Remote command (default [`DEFAULT_SSH_COMMAND`]: the installed server, else `meninx-server` on
+    /// `PATH`).
     pub server_command: String,
     /// The ssh binary (default `ssh`).
     pub ssh_program: PathBuf,
@@ -163,7 +170,7 @@ impl Ssh {
     pub fn new(host: impl Into<String>) -> Self {
         Ssh {
             host: host.into(),
-            server_command: "meninx-server --stdio".into(),
+            server_command: DEFAULT_SSH_COMMAND.into(),
             ssh_program: PathBuf::from("ssh"),
             extra_args: Vec::new(),
         }
@@ -171,6 +178,11 @@ impl Ssh {
 
     /// The full argument list passed to ssh.
     pub fn args(&self) -> Vec<String> {
+        self.command_args(&self.server_command)
+    }
+
+    /// The argument list that runs `remote` on the host (same options as the connection).
+    pub fn command_args(&self, remote: &str) -> Vec<String> {
         let mut a = vec![
             "-T".to_owned(),
             "-o".into(),
@@ -181,7 +193,7 @@ impl Ssh {
         a.extend(self.extra_args.iter().cloned());
         a.push("--".into());
         a.push(self.host.clone());
-        a.push(self.server_command.clone());
+        a.push(remote.to_owned());
         a
     }
 }
@@ -290,7 +302,7 @@ mod tests {
                 "2222",
                 "--",
                 "me@devbox",
-                "meninx-server --stdio"
+                DEFAULT_SSH_COMMAND
             ]
         );
         assert_eq!(s.describe(), "ssh me@devbox");
