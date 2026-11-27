@@ -168,10 +168,17 @@ pub fn query_maximized(id: window::Id) -> Task<Message> {
     window::is_maximized(id).map(move |m| Message::Frame(id, FrameMsg::Maximized(m)))
 }
 
-/// The title bar of window `id`: `label` on the left, the window's own `actions`, then the
+/// The title bar of window `id`: `label` on the left, then `lead` (the app window's server menu
+/// button), the window's own `actions`, then the
 /// caption buttons; a 1 px border below. The bar drags the window (its buttons take their own
 /// presses first). The close button sends the same close request as the OS one did.
-pub fn title_bar<'a>(id: window::Id, label: String, actions: El<'a>, maximized: bool) -> El<'a> {
+pub fn title_bar<'a>(
+    id: window::Id,
+    label: String,
+    lead: El<'a>,
+    actions: El<'a>,
+    maximized: bool,
+) -> El<'a> {
     let title = text(label)
         .size(12)
         .color(style::DIM)
@@ -211,7 +218,9 @@ pub fn title_bar<'a>(id: window::Id, label: String, actions: El<'a>, maximized: 
         container(
             row![
                 space().width(if NATIVE_BUTTONS { TRAFFIC_LIGHTS_W } else { 0.0 }),
-                container(title).width(Fill).padding([0, 12]),
+                container(title).padding([0, 12]),
+                lead,
+                space().width(Fill),
                 actions,
                 space().width(8),
                 if NATIVE_BUTTONS { space().boxed() } else { captions.boxed() },

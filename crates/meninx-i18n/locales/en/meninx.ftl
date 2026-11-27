@@ -278,15 +278,20 @@ stop-server-body = Every session (agents and shells) is stopped and the backgrou
 stopping = Stopping…
 
 conn-target = Server: { $target }
-server-ssh = SSH
 ssh-host-placeholder = user@host
 ssh-command-placeholder = Server command (default: meninx-server --stdio)
-server-apply = Apply
-server-env-override = MENINX_REMOTE={ $value } overrides this setting.
+server-env-override = MENINX_REMOTE={ $value } replaces the server list.
+conn-off = Not connected (auto-connect is off).
+server-state-off = not connected
+server-counts = { NUMBER($working) } working · { NUMBER($waiting) } waiting · { NUMBER($fresh) } new
+server-manage = Manage servers…
+server-add = Add server
+server-edit = Edit
+server-auto-connect = Auto-connect
+server-name-placeholder = Name (default: the host)
+server-local-detail = This computer
+server-list-note = Each server has its own sessions, repos, accounts and profiles. Pick the shown one in the title bar. Servers with auto-connect stay connected while another is shown.
 err-ssh-host = Enter an SSH host such as user@host.
-switch-server-title = Switch server?
-switch-server-body = The app reconnects to { $target }. Sessions on the current server keep running there.
-switch-server = Switch
 font-label = FONTS
 font-ui = UI
 font-code = Code

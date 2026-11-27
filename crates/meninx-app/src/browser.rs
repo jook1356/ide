@@ -190,6 +190,8 @@ impl App {
 
     /// Create the view of the shown browser tab and hide every other tab.
     pub(crate) fn sync_browsers(&mut self, shown: Option<u32>) {
+        // Another server is shown: every tab of this one stays hidden (`shell.rs`).
+        let shown = shown.filter(|_| self.shown);
         let runtime = self.runtime.clone();
         if let Some(id) = shown
             && let Some(b) = self.browser_mut(id)

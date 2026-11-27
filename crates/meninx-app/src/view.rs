@@ -15,7 +15,7 @@ use meninx_term::{TermConfig, TerminalView};
 use crate::app::{
     ALL_CONFIGURATIONS, App, Choice, Conn, DIVIDER_W, Live, Message,
     Modal, NEW_TITLE_ID, NewForm, PICK_LIST_ID, PICK_PATH_ID, PickRootForm, QuickForm, RAIL_W,
-    RunState, SSH_HOST_ID, SessionReposForm, SettingsForm, SortChange,
+    RunState, SessionReposForm, SettingsForm, SortChange,
     TERM_ID,
 };
 use crate::i18n::{self, tr};
@@ -24,7 +24,7 @@ use crate::icons::{self, Icon};
 use crate::new_session_repos;
 use crate::session_sort::{SortDir, SortItem, SortKey};
 use crate::style;
-use crate::ui_state::{CloseAction, FontSlot, LOGIN_GROUP, Page, ServerPref};
+use crate::ui_state::{CloseAction, FontSlot, LOGIN_GROUP, Page};
 
 type El<'a> = Element<'a, Message>;
 
@@ -344,14 +344,15 @@ impl App {
         // Frameless window (`frame.rs`): the title bar stays usable above modals.
         if let Some(id) = self.window {
             let max = self.window_maximized;
-            let bar = crate::frame::title_bar(id, "Meninx".into(), space().boxed(), max);
+            let bar = crate::frame::title_bar(id, "Meninx".into(), self.server_button(), space().boxed(), max);
             // The item menu is placed in window coordinates: a layer over the whole window.
             let window = stack![
                 column![bar, root],
                 self.item_menu_layer(false),
                 self.session_menu_layer(),
                 self.drag_ghost(),
-                self.side_menu_layer()
+                self.side_menu_layer(),
+                self.server_menu_layer()
             ]
                 .width(Fill)
                 .height(Fill);
@@ -2117,58 +2118,9 @@ impl App {
     }
 
     /// Settings page: connection status, local / SSH server, stop server.
-    fn server_section<'a>(&'a self, f: &'a SettingsForm, online: bool) -> El<'a> {
+    fn server_section<'a>(&'a self, _f: &'a SettingsForm, online: bool) -> El<'a> {
         let mut c = column![label(tr::server_label()), self.connection_status()].spacing(10);
-        let kinds = row![
-            button(text(tr::conn_local()).size(13))
-                .padding([5, 12])
-                .style(style::choice(!f.ssh))
-                .on_press(Message::SettingsServerSsh(false)),
-            button(text(tr::server_ssh()).size(13))
-                .padding([5, 12])
-                .style(style::choice(f.ssh))
-                .on_press(Message::SettingsServerSsh(true)),
-            space().width(Fill),
-            button(text(tr::server_apply()).size(13))
-                .padding([5, 12])
-                .style(style::secondary)
-                .on_press(Message::SettingsApplyServer),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-        c = c.push(kinds.boxed());
-        if f.ssh {
-            c = c.push(
-                text_input(tr::ssh_host_placeholder(), &f.ssh_host)
-                    .id(SSH_HOST_ID)
-                    .on_input(Message::SettingsSshHost)
-                    .on_submit(Message::SettingsApplyServer)
-                    .size(13)
-                    .padding([5, 8])
-                    .style(style::input)
-                    .boxed(),
-            );
-            c = c.push(
-                text_input(tr::ssh_command_placeholder(), &f.ssh_command)
-                    .on_input(Message::SettingsSshCommand)
-                    .on_submit(Message::SettingsApplyServer)
-                    .size(13)
-                    .padding([5, 8])
-                    .style(style::input)
-                    .boxed(),
-            );
-        }
-        if let Some(v) = &self.remote_override {
-            c = c.push(
-                text(tr::server_env_override(v))
-                    .size(12)
-                    .color(style::AMBER)
-                    .boxed(),
-            );
-        }
-        if let Some(e) = &f.server_error {
-            c = c.push(error_box(e));
-        }
+        c = c.push(self.server_list());
         // An incompatible server cannot be asked to stop: the row offers 서버 재시작.
         let stop_row = if self.server_outdated {
             row![
@@ -3042,33 +2994,6 @@ impl App {
                     .boxed(),
                 );
                 c.width(460).boxed()
-            }
-            Modal::SwitchServer(pref) => {
-                let target = match pref {
-                    ServerPref::Local => tr::conn_local(),
-                    ServerPref::Ssh { host, .. } => format!("ssh {host}"),
-                };
-                column![
-                    text(tr::switch_server_title()).size(18).font(style::bold()),
-                    text(tr::switch_server_body(&target))
-                        .size(13)
-                        .color(style::DIM),
-                    row![
-                        space().width(Fill),
-                        button(text(tr::cancel()).size(13))
-                            .padding([6, 14])
-                            .style(style::secondary)
-                            .on_press(Message::CloseModal),
-                        button(text(tr::switch_server()).size(13))
-                            .padding([6, 14])
-                            .style(style::primary)
-                            .on_press(Message::SwitchServerConfirm),
-                    ]
-                    .spacing(8),
-                ]
-                .spacing(10)
-                .width(460)
-                .boxed()
             }
             Modal::Close(f) => {
                 let running = self.sessions.iter().filter(|l| l.state.is_alive()).count();

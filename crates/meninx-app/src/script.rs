@@ -38,7 +38,7 @@ use crate::app::{ALL_CONFIGURATIONS, App, Conn, McpField, Message, Modal, RunSta
 use crate::detail::{DetailMsg, FileBar, Item, ItemKey, SideTab};
 use crate::list_edit::{ListEditMsg, ListKind};
 use crate::session_sort::SortKey;
-use crate::ui_state::{CloseAction, LOGIN_GROUP, Page, ServerPref};
+use crate::ui_state::{CloseAction, LOCAL_SERVER, LOGIN_GROUP, Page};
 use meninx_client::{AccountState, SessionKind};
 
 /// Changes / History tab action steps (`script_changes.rs`).
@@ -224,17 +224,19 @@ enum Step {
     /// The remembered daemon exited and its pid file is gone.
     WaitDaemonGone(u64),
     Retry,
-    /// Settings page: choose SSH with this host (`None` = local); does not apply.
-    SettingsServer(Option<&'static str>),
+    /// Settings page: start adding a server with this host; does not save.
+    SettingsServer(&'static str),
     ApplyServer,
-    ConfirmSwitch,
-    /// `ui.json` stores SSH (`true`) or local.
-    ExpectSavedServer(bool),
+    /// Show this server (through the shell, like the title bar's menu).
+    ShowServer(&'static str),
+    /// The shown server is this one (`current_server`, shared by every server's `App`).
+    ExpectShown(&'static str),
+    /// Wait until the server menu shows this server not connected (lost or off).
+    WaitServerDown(&'static str, u64),
+    /// `ui.json` lists this many SSH servers.
+    ExpectSavedServers(usize),
     /// The footer names this server.
     ExpectFooter(&'static str),
-    ExpectNotConnected,
-    /// No `meninx-server` child of this app (SSH selected: nothing local is started).
-    ExpectNoServerChild,
     /// Like clicking the window's close button.
     CloseWindow,
     ExpectCloseDialog,
@@ -382,6 +384,8 @@ enum Step {
 
 /// SSH host that never resolves (`.invalid` is reserved).
 const UNREACHABLE: &str = "meninx-test@unreachable.invalid";
+/// Its id in the server list (`ui_state::new_server_id`).
+const UNREACHABLE_ID: &str = "meninx-test-unreachable-invalid";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Repo {
@@ -412,7 +416,6 @@ pub struct Script {
     luma: HashMap<String, f32>,
     daemon_pid: Option<u32>,
     probe: Probe,
-    children: Option<std::sync::mpsc::Receiver<String>>,
     finished: bool,
     /// Index of the phase 2 session in `ids`.
     p2: Option<usize>,
@@ -498,6 +501,8 @@ impl Script {
         // `MENINX_APP_SCRIPT_ONLY=newrepos`: startup, the new-session dialog checks with many repos
         // and the server stop.
         let only_new_repos = only == "newrepos";
+        // `MENINX_APP_SCRIPT_ONLY=servers`: startup, the server list checks and the server stop.
+        let only_servers = only == "servers";
         log(&format!(
             "script {mode:?}: data dir {}, repo {}, evidence {}, claude {claude}",
             data.display(),
@@ -506,7 +511,9 @@ impl Script {
         ));
         Some(Script {
             steps: {
-                let mut s = if only_new_repos {
+                let mut s = if only_servers {
+                    steps_servers_only()
+                } else if only_new_repos {
                     new_repos_steps::steps_only()
                 } else if only_preview {
                     preview_steps::steps_only()
@@ -521,7 +528,7 @@ impl Script {
                 } else {
                     steps(claude)
                 };
-                if !only_pop && !only_widget && !only_preview && !only_browser && !only_new_repos {
+                if !only_pop && !only_widget && !only_preview && !only_browser && !only_new_repos && !only_servers {
                     changes::splice(&mut s);
                     footer_steps::splice(&mut s);
                     detail_window_steps::splice(&mut s);
@@ -546,7 +553,6 @@ impl Script {
             luma: HashMap::new(),
             daemon_pid: None,
             probe: Probe::default(),
-            children: None,
             finished: false,
             p2: None,
             repo2,
@@ -1058,34 +1064,9 @@ fn steps(claude: bool) -> Vec<Step> {
         GoPage(Page::Work),
         Wait(500),
         Shot("21_new_server"),
-        Log("--- server setting: SSH to an unreachable host (no local server is started)"),
-        App(Message::Page(Page::Settings)),
-        SettingsServer(Some(UNREACHABLE)),
-        Wait(300),
-        Shot("22_settings_ssh"),
-        Pause("settings_ssh"),
-        ApplyServer,
-        Wait(300),
-        Shot("23_switch_server_confirm"),
-        ConfirmSwitch,
-        ExpectSavedServer(true),
-        ExpectFooter("ssh meninx-test@unreachable.invalid"),
-        WaitDisconnected(5000),
-        Wait(6000),
-        ExpectNoServerChild,
-        ExpectNotConnected,
-        Shot("24_ssh_unreachable"),
-        Pause("ssh_unreachable"),
-        ExpectPage(Page::Settings),
-        ExpectServerTooltip("Server: ssh meninx-test@unreachable.invalid"),
-        Log("--- back to the local server (the local daemon kept running)"),
-        GoPage(Page::Settings),
-        SettingsServer(None),
-        ApplyServer,
-        ConfirmSwitch,
-        ExpectSavedServer(false),
-        WaitReady(30_000),
-        ExpectFooter("Local"),
+    ]);
+    s.extend(server_list_steps());
+    s.extend([
         Log("--- close the window while a session runs: dialog, stop everything"),
         Start(0),
         WaitRunning(0, 15_000),
@@ -1100,6 +1081,62 @@ fn steps(claude: bool) -> Vec<Step> {
         // The app exits once the server confirmed the shutdown (DONE is logged on exit).
         Wait(60_000),
         Log("FAIL the app did not exit after the close dialog"),
+        Exit,
+    ]);
+    s
+}
+
+/// The server list (`docs/multi-server.md`): add an unreachable SSH server, see it down in the
+/// menu, show it and Local again, remove it.
+fn server_list_steps() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Log("--- server list: an SSH server on an unreachable host (Local stays connected)"),
+        App(Message::Page(Page::Settings)),
+        SettingsServer(UNREACHABLE),
+        Wait(300),
+        Shot("22_settings_ssh"),
+        Pause("settings_ssh"),
+        ApplyServer,
+        ExpectSavedServers(1),
+        WaitServerDown(UNREACHABLE_ID, 15_000),
+        ExpectFooter("Local"),
+        App(Message::ServerMenu(true)),
+        Wait(300),
+        Shot("23_server_menu"),
+        Log("--- show the unreachable server, then Local again (its daemon kept running)"),
+        ShowServer(UNREACHABLE_ID),
+        Wait(1500),
+        ExpectShown(UNREACHABLE_ID),
+        Shot("24_ssh_unreachable"),
+        Pause("ssh_unreachable"),
+        ExpectPage(Page::Settings),
+        ShowServer(LOCAL_SERVER),
+        Wait(500),
+        ExpectShown(LOCAL_SERVER),
+        WaitReady(30_000),
+        App(Message::ServerRemove(UNREACHABLE_ID.into())),
+        ExpectSavedServers(0),
+        ExpectFooter("Local"),
+    ]
+}
+
+/// Startup, the server list and the server stop (`MENINX_APP_SCRIPT_ONLY=servers`).
+fn steps_servers_only() -> Vec<Step> {
+    use Step::*;
+    let mut s = vec![
+        Log("--- startup (server list only)"),
+        SetLang(LanguagePref::Fixed(Lang::En)),
+        WaitReady(30_000),
+        MarkDaemon,
+    ];
+    s.extend(server_list_steps());
+    s.extend([
+        GoPage(Page::Settings),
+        AskStopServer,
+        ConfirmStopServer,
+        WaitDisconnected(15_000),
+        WaitDaemonGone(10_000),
         Exit,
     ]);
     s
@@ -3804,65 +3841,36 @@ fn step(sc: &mut Script, app: &mut App) -> Task<Message> {
                 }
             }
             Step::SettingsServer(host) => {
-                tasks.push(app.update(Message::SettingsServerSsh(host.is_some())));
-                if let Some(h) = host {
-                    tasks.push(app.update(Message::SettingsSshHost(h.into())));
-                }
+                tasks.push(app.update(Message::ServerEdit(Some(String::new()))));
+                tasks.push(app.update(Message::SettingsSshHost(host.into())));
             }
             Step::ApplyServer => tasks.push(app.update(Message::SettingsApplyServer)),
-            Step::ConfirmSwitch => {
-                let ok = matches!(app.modal, Some(Modal::SwitchServer(_)));
-                sc.check(ok, "switch-server confirm shown");
-                tasks.push(app.update(Message::SwitchServerConfirm));
+            Step::ShowServer(id) => tasks.push(Task::done(Message::PickServer(id.into()))),
+            Step::ExpectShown(id) => {
+                let shown = &app.ui.current_server;
+                sc.check(shown == id, &format!("shown server {shown:?}"));
             }
-            Step::ExpectSavedServer(ssh) => {
-                let saved = crate::ui_state::UiState::load(&app.data_dir).server;
-                let ok = matches!(saved, ServerPref::Ssh { .. }) == ssh;
-                sc.check(ok, &format!("ui.json server {saved:?}"));
+            Step::WaitServerDown(id, ms) => {
+                let state = app.servers_brief.iter().find(|b| b.id == id).map(|b| b.state);
+                let down = matches!(
+                    state,
+                    Some(crate::shell::LinkState::Lost | crate::shell::LinkState::Off)
+                );
+                if down {
+                    sc.check(true, &format!("server {id} not connected ({state:?})"));
+                } else if timeout(ms) {
+                    sc.check(false, &format!("server {id} state {state:?}"));
+                } else {
+                    next = false;
+                }
+            }
+            Step::ExpectSavedServers(n) => {
+                let saved = crate::ui_state::UiState::load(&app.data_dir).servers;
+                sc.check(saved.len() == n, &format!("ui.json servers {saved:?}"));
             }
             Step::ExpectFooter(needle) => {
                 let l = app.server_label();
                 sc.check(l.contains(needle), &format!("footer server label {l:?}"));
-            }
-            Step::ExpectNotConnected => {
-                sc.check(
-                    !app.conn.is_connected() && app.sessions.is_empty(),
-                    &format!("not connected, no sessions listed: {:?}", app.conn),
-                );
-            }
-            Step::ExpectNoServerChild => {
-                let rx = sc.children.get_or_insert_with(|| {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let me = std::process::id();
-                    std::thread::spawn(move || {
-                        let q = format!(
-                            "Get-CimInstance Win32_Process -Filter \"ParentProcessId={me}\" | \
-                             ForEach-Object {{ $_.Name }}"
-                        );
-                        let out = command("powershell")
-                            .args(["-NoProfile", "-Command", &q])
-                            .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                            .unwrap_or_default();
-                        let _ = tx.send(out);
-                    });
-                    rx
-                });
-                match rx.try_recv() {
-                    Ok(out) => {
-                        sc.children = None;
-                        let names: Vec<&str> = out.split_whitespace().collect();
-                        log(&format!("child processes of the app: {names:?}"));
-                        sc.check(
-                            !names
-                                .iter()
-                                .any(|n| n.eq_ignore_ascii_case("meninx-server.exe")),
-                            "no local meninx-server started while SSH is selected",
-                        );
-                    }
-                    Err(_) if timeout(30_000) => sc.check(false, "child probe timed out"),
-                    Err(_) => next = false,
-                }
             }
             Step::CloseWindow => tasks.push(app.update(Message::CloseRequested)),
             Step::ExpectCloseDialog => {

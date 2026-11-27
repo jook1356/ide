@@ -86,6 +86,47 @@ pub enum Page {
     Settings,
 }
 
+/// Id of Local in [`UiState::current_server`] (never an entry's id).
+pub const LOCAL_SERVER: &str = "local";
+
+/// A server of the list besides Local (`docs/multi-server.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerEntry {
+    /// Stable id: also the folder of its UI state (`<data>/servers/<id>/ui.json`).
+    pub id: String,
+    pub name: String,
+    /// How to reach it (never `Local`).
+    #[serde(flatten)]
+    pub pref: ServerPref,
+    /// Connected at start and kept connected while another server is shown (else when picked).
+    #[serde(default = "yes")]
+    pub auto_connect: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A new entry id from `base` (a name or host): a lowercase slug, unique among `taken`.
+pub fn new_server_id(base: &str, taken: &[ServerEntry]) -> String {
+    let mut slug = String::new();
+    for c in base.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_matches('-').chars().take(32).collect();
+    let slug = if slug.is_empty() { "server".to_owned() } else { slug };
+    let free = |s: &str| s != LOCAL_SERVER && !taken.iter().any(|e| e.id == s);
+    if free(&slug) {
+        return slug;
+    }
+    (2..).map(|n| format!("{slug}-{n}")).find(|s| free(s)).unwrap_or(slug)
+}
+
 /// Which server the app connects to.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -147,9 +188,14 @@ pub struct UiState {
     /// Closing the window: ask / keep sessions running / stop them and the server.
     #[serde(deserialize_with = "lenient")]
     pub on_close: CloseAction,
-    /// Server to connect to (`MENINX_REMOTE` overrides it).
-    #[serde(deserialize_with = "lenient")]
+    /// The one server of older files: read once, moved into `servers` (never written).
+    #[serde(deserialize_with = "lenient", skip_serializing)]
     pub server: ServerPref,
+    /// Servers besides Local (`docs/multi-server.md`; `MENINX_REMOTE` replaces the list).
+    #[serde(deserialize_with = "lenient")]
+    pub servers: Vec<ServerEntry>,
+    /// The shown server: [`LOCAL_SERVER`] or an id of `servers`.
+    pub current_server: String,
     /// Fonts picked in Settings.
     #[serde(deserialize_with = "lenient")]
     pub fonts: FontPrefs,
@@ -282,6 +328,8 @@ impl Default for UiState {
             language: LanguagePref::System,
             on_close: CloseAction::Ask,
             server: ServerPref::Local,
+            servers: Vec::new(),
+            current_server: LOCAL_SERVER.to_owned(),
             fonts: FontPrefs::default(),
             detail: BTreeMap::new(),
             page: Page::Work,
@@ -313,10 +361,24 @@ impl UiState {
         data_dir.join("ui.json")
     }
 
+    /// The UI state file of server `id`: Local's is `ui.json` (also the record of the globals),
+    /// another server's `servers/<id>/ui.json`.
+    pub fn server_file(data_dir: &Path, id: &str) -> PathBuf {
+        if id == LOCAL_SERVER {
+            Self::file(data_dir)
+        } else {
+            data_dir.join("servers").join(id).join("ui.json")
+        }
+    }
+
     /// Load `ui.json`; a missing or unreadable file gives the defaults (logged).
     pub fn load(data_dir: &Path) -> Self {
-        let path = Self::file(data_dir);
-        let mut state: UiState = match std::fs::read(&path) {
+        Self::load_from(&Self::file(data_dir))
+    }
+
+    /// Load a UI state file (see [`UiState::load`]).
+    pub fn load_from(path: &Path) -> Self {
+        let mut state: UiState = match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::warn!("ignoring invalid {}: {e}", path.display());
                 UiState::default()
@@ -328,19 +390,48 @@ impl UiState {
         }
         state.split_ratio = state.split_ratio.clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
         state.session_sort = crate::session_sort::normalized(&state.session_sort);
+        state.migrate_servers();
         state
     }
 
-    /// Write `ui.json` atomically (temp file + rename). Errors are logged, not fatal.
-    pub fn save(&self, data_dir: &Path) {
-        let path = Self::file(data_dir);
-        let tmp = data_dir.join("ui.json.tmp");
+    /// The one server of an older file becomes the list's entry, shown; entries that are
+    /// Local, without an id or repeated are dropped; an unknown current server is Local.
+    fn migrate_servers(&mut self) {
+        if let ServerPref::Ssh { host, command } = std::mem::take(&mut self.server)
+            && self.servers.is_empty()
+        {
+            let id = new_server_id(&host, &[]);
+            self.servers.push(ServerEntry {
+                id: id.clone(),
+                name: host.clone(),
+                pref: ServerPref::Ssh { host, command },
+                auto_connect: true,
+            });
+            self.current_server = id;
+        }
+        let mut seen = BTreeSet::new();
+        self.servers.retain(|e| {
+            !e.id.is_empty()
+                && e.id != LOCAL_SERVER
+                && e.pref != ServerPref::Local
+                && seen.insert(e.id.clone())
+        });
+        if !self.servers.iter().any(|e| e.id == self.current_server) {
+            self.current_server = LOCAL_SERVER.to_owned();
+        }
+    }
+
+    /// Write a UI state file atomically (temp file + rename). Errors are logged, not fatal.
+    pub fn save_to(&self, path: &Path) {
+        let tmp = path.with_extension("json.tmp");
         let result = serde_json::to_vec_pretty(self)
             .map_err(std::io::Error::other)
             .and_then(|bytes| {
-                std::fs::create_dir_all(data_dir)?;
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
                 std::fs::write(&tmp, bytes)?;
-                std::fs::rename(&tmp, &path)
+                std::fs::rename(&tmp, path)
             });
         if let Err(e) = result {
             tracing::warn!("saving {}: {e}", path.display());
@@ -348,9 +439,124 @@ impl UiState {
     }
 }
 
+/// The PC-wide fields: every server's `App` has the same values (the shell copies a change
+/// to the others, `shell.rs`). The rest is per server: `selected`, `configuration`,
+/// `last_repo`, `detail`, `folded_groups`, `archive_open`, `folded_families`,
+/// `default_shell`, `recent_term_dirs` (and the old `server`).
+macro_rules! globals {
+    ($($f:ident),* $(,)?) => {
+        impl UiState {
+            /// Copy the PC-wide fields from `o`.
+            pub fn copy_globals(&mut self, o: &UiState) {
+                $(self.$f = o.$f.clone();)*
+            }
+
+            /// The PC-wide fields are the same as `o`'s.
+            pub fn globals_eq(&self, o: &UiState) -> bool {
+                true $(&& self.$f == o.$f)*
+            }
+        }
+    };
+}
+
+globals!(
+    split_ratio,
+    detail_collapsed,
+    composer_open,
+    language,
+    on_close,
+    fonts,
+    page,
+    sessions_open,
+    sessions_all,
+    session_sort,
+    update_seen,
+    detail_detached,
+    detail_pinned,
+    detail_window,
+    detail_rail,
+    side_width,
+    list_width,
+    scripts_collapsed,
+    scripts_height,
+    explore_hide_ignored,
+    bookmarks,
+    servers,
+    current_server,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn servers() {
+        let e = |id: &str| ServerEntry {
+            id: id.into(),
+            name: id.into(),
+            pref: ServerPref::Ssh {
+                host: id.into(),
+                command: String::new(),
+            },
+            auto_connect: true,
+        };
+        assert_eq!(new_server_id("me@Dev Box", &[]), "me-dev-box");
+        assert_eq!(new_server_id("local", &[]), "local-2");
+        assert_eq!(new_server_id("한글", &[]), "server");
+        assert_eq!(new_server_id("a", &[e("a"), e("a-2")]), "a-3");
+
+        // An older single server becomes the shown entry.
+        let mut s: UiState =
+            serde_json::from_str(r#"{"server": {"kind": "ssh", "host": "me@h", "command": "x"}}"#)
+                .unwrap();
+        s.migrate_servers();
+        assert_eq!(s.current_server, "me-h");
+        assert_eq!(
+            s.servers,
+            [ServerEntry {
+                id: "me-h".into(),
+                name: "me@h".into(),
+                pref: ServerPref::Ssh {
+                    host: "me@h".into(),
+                    command: "x".into()
+                },
+                auto_connect: true,
+            }]
+        );
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("server").is_none());
+        assert_eq!(json["servers"][0]["kind"], "ssh");
+
+        // Bad entries are dropped; an unknown current server is Local.
+        let mut s: UiState = serde_json::from_str(
+            r#"{"servers": [{"id": "a", "name": "A", "kind": "ssh", "host": "h"},
+                            {"id": "a", "name": "again", "kind": "ssh", "host": "h2"},
+                            {"id": "local", "name": "L", "kind": "ssh", "host": "h3"},
+                            {"id": "b", "name": "B", "kind": "local"}],
+                "current_server": "zz"}"#,
+        )
+        .unwrap();
+        s.migrate_servers();
+        assert_eq!(s.servers.len(), 1);
+        assert_eq!((s.servers[0].name.as_str(), s.servers[0].auto_connect), ("A", true));
+        assert_eq!(s.current_server, LOCAL_SERVER);
+
+        // Globals copy over; per-server fields stay.
+        let mut a = UiState {
+            selected: Some("x".into()),
+            ..UiState::default()
+        };
+        let b = UiState {
+            selected: Some("y".into()),
+            list_width: 333.0,
+            servers: vec![e("q")],
+            ..UiState::default()
+        };
+        assert!(!a.globals_eq(&b));
+        a.copy_globals(&b);
+        assert!(a.globals_eq(&b));
+        assert_eq!((a.selected.as_deref(), a.list_width), (Some("x"), 333.0));
+    }
 
     #[test]
     fn round_trip_and_defaults() {
@@ -385,10 +591,16 @@ mod tests {
                 dpi: Some(144),
                 maximized: true,
             }),
-            server: ServerPref::Ssh {
-                host: "me@devbox".into(),
-                command: "/opt/meninx/meninx-server --stdio".into(),
-            },
+            servers: vec![ServerEntry {
+                id: "devbox".into(),
+                name: "Dev box".into(),
+                pref: ServerPref::Ssh {
+                    host: "me@devbox".into(),
+                    command: "/opt/meninx/meninx-server --stdio".into(),
+                },
+                auto_connect: false,
+            }],
+            current_server: "devbox".into(),
             fonts: FontPrefs {
                 ui: "Pretendard".into(),
                 code: "D2Coding".into(),
@@ -404,7 +616,7 @@ mod tests {
                 side: "search".into(),
             },
         );
-        s.save(&base);
+        s.save_to(&UiState::file(&base));
         assert_eq!(UiState::load(&base), s);
 
         // Partial / older files fill in defaults; out-of-range ratios are clamped.
@@ -435,8 +647,8 @@ mod tests {
         .unwrap();
         let l = UiState::load(&base);
         assert_eq!(
-            (l.on_close, l.server, l.page, l.split_ratio),
-            (CloseAction::Ask, ServerPref::Local, Page::Work, 0.5)
+            (l.on_close, l.servers.is_empty(), l.page, l.split_ratio),
+            (CloseAction::Ask, true, Page::Work, 0.5)
         );
         std::fs::write(
             UiState::file(&base),
@@ -463,13 +675,7 @@ mod tests {
         .unwrap();
         let l = UiState::load(&base);
         assert_eq!(l.on_close, CloseAction::Stop);
-        assert_eq!(
-            l.server,
-            ServerPref::Ssh {
-                host: "h".into(),
-                command: String::new()
-            }
-        );
+        assert_eq!((l.servers.len(), l.current_server.as_str()), (1, "h"));
 
         std::fs::write(UiState::file(&base), "not json").unwrap();
         assert_eq!(UiState::load(&base), UiState::default());

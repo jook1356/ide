@@ -913,7 +913,7 @@ impl App {
         let ui = d.to_ui();
         if self.ui.detail.get(sid) != Some(&ui) {
             self.ui.detail.insert(sid.to_owned(), ui);
-            self.ui.save(&self.data_dir);
+            self.ui.save_to(&self.ui_file);
         }
     }
 

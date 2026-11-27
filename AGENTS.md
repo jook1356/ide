@@ -23,7 +23,7 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   The app attaches to a running daemon or starts one (detached, no console window); closing the
   window keeps sessions running unless the user chooses otherwise (close dialog / Settings). The
   daemon exits after 10 min without clients and running sessions (`MENINX_SERVER_IDLE_EXIT_SECS`, 0 =
-  never). The settings page (rail -> 설정 / Settings) selects local or SSH; `MENINX_REMOTE=ssh:<host>` overrides it.
+  never). The settings page (rail -> 설정 / Settings) lists Local and SSH servers, the title bar picks the shown one (`docs/multi-server.md`); `MENINX_REMOTE=ssh:<host>` replaces the list.
 - Test daemons: kill only your own, by PID (`<data>/meninx-server.pid`), or end a script run with the
   app's stop-server action; never `taskkill /IM meninx-server.exe` (it hits other data dirs' daemons).
 - App end-to-end test (in-app, no OS input): `MENINX_APP_SCRIPT=1 MENINX_DATA_DIR=<scratch>
@@ -33,7 +33,7 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   results in `<evidence>/script.log` (`MENINX_APP_SCRIPT_PAUSE_MS` lengthens the pauses;
   `MENINX_APP_SCRIPT_ONLY=p2` runs only startup + the phase 2 file/changes/search checks + server
   stop; `MENINX_APP_SCRIPT_ONLY=pop` runs only startup + the detail window (pop-out) checks + server
-  stop; `MENINX_APP_SCRIPT_ONLY=newrepos` registers twelve scratch repos and checks the new-session
+  stop; `MENINX_APP_SCRIPT_ONLY=servers` runs only startup + the server list checks + server stop; `MENINX_APP_SCRIPT_ONLY=newrepos` registers twelve scratch repos and checks the new-session
   dialog with many repos (search, chips, recent order, a short window) + server
   stop). The phase 2 part creates its fixtures in the test repo on first use (TS import, Korean
   file name, binary file) and registers the repo on the repos page; a multi-repo pass (in Korean)
