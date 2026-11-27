@@ -391,12 +391,6 @@ pub struct SettingsForm {
     pub cfg_edit: Option<Box<ConfigEdit>>,
     pub error: Option<String>,
     pub busy: bool,
-    /// Settings -> servers: the entry being edited (`Some("")` = a new one) and its fields.
-    pub server_edit: Option<String>,
-    pub ssh_name: String,
-    pub ssh_host: String,
-    pub ssh_command: String,
-    pub server_error: Option<String>,
     /// Repos page: path typed to register.
     pub repo_input: String,
     /// Repos page: the repo shown right of the list (Desk's selected repo).
@@ -466,32 +460,6 @@ pub struct InitRepoForm {
     pub busy: bool,
 }
 
-impl SettingsForm {
-    /// Edit server entry `id` (`""` = a new one; its fields from `entry`), or stop editing.
-    pub(crate) fn edit_server(&mut self, id: Option<String>, entry: Option<&crate::ui_state::ServerEntry>) {
-        (self.ssh_name, self.ssh_host, self.ssh_command) = match entry.map(|e| (&e.name, &e.pref)) {
-            Some((name, ServerPref::Ssh { host, command })) => {
-                (name.clone(), host.clone(), command.clone())
-            }
-            _ => Default::default(),
-        };
-        self.server_edit = id;
-        self.server_error = None;
-    }
-
-    /// The edited server (`Err` = localized validation message).
-    pub(crate) fn server_pref(&self) -> Result<ServerPref, String> {
-        let host = self.ssh_host.trim();
-        if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
-            return Err(tr::err_ssh_host());
-        }
-        Ok(ServerPref::Ssh {
-            host: host.to_owned(),
-            command: self.ssh_command.trim().to_owned(),
-        })
-    }
-}
-
 /// "Close the window while sessions run" dialog.
 #[derive(Default)]
 pub struct CloseForm {
@@ -513,6 +481,8 @@ pub enum Modal {
     StopServer(StopServerForm),
     /// End an incompatible local server and start this app's (`old_server.rs`).
     RestartOldServer(StopServerForm),
+    /// Settings -> servers: add or edit a server (`server_menu.rs`).
+    Server(crate::server_menu::ServerForm),
     Close(CloseForm),
     QuickOpen(QuickForm),
     DefPicker(DefPickerForm),
@@ -803,8 +773,15 @@ pub enum Message {
     ServerRetry(String),
     /// The server menu's 서버 관리: the settings page.
     ServerManage,
-    /// Settings -> servers: add (`Some("")`), edit (`Some(id)`) or stop editing (`None`).
+    /// Settings -> servers: the server dialog for a new server (`Some("")`) or entry `id`;
+    /// `None` closes it.
     ServerEdit(Option<String>),
+    /// The server dialog's 고급 (server command) unfolded / folded.
+    ServerFormAdvanced,
+    ServerFormAuto(bool),
+    /// The server dialog's 연결 테스트, and its result (`Ok` = server version) for test `n`.
+    ServerTest,
+    ServerTested(u64, Result<String, String>),
     SettingsSshName(String),
     SettingsSshHost(String),
     SettingsSshCommand(String),
@@ -2754,7 +2731,6 @@ impl App {
                             Page::Widgets => self.load_widgets(),
                             Page::Configurations => self.load_profile_history(),
                             Page::Settings => {
-                                self.settings.edit_server(None, None);
                                 self.load_approvals()
                             }
                             _ => Task::none(),
@@ -4025,6 +4001,10 @@ impl App {
             | Message::SettingsSshCommand(_)
             | Message::SettingsApplyServer
             | Message::ServerRemove(_)
+            | Message::ServerFormAdvanced
+            | Message::ServerFormAuto(_)
+            | Message::ServerTest
+            | Message::ServerTested(..)
             | Message::ServerAutoConnect(..) => self.on_server_msg(message),
 
             Message::Tick => crate::script::tick(self),

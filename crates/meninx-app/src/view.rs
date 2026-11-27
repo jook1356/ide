@@ -3041,6 +3041,7 @@ impl App {
                 c.width(560).boxed()
             }
             Modal::QuickOpen(f) => self.quick_open_card(f),
+            Modal::Server(f) => self.server_dialog(f),
             Modal::Changes(f) => self.changes_modal_card(f),
             Modal::Footer(f) => self.footer_modal_card(f),
             Modal::SkillEdit(f) => self.skill_modal_card(f),
