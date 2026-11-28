@@ -11,6 +11,7 @@ members = [
     "crates/meninx-server",
     "crates/meninx-client",
     "crates/meninx-views",
+    "crates/xtask",
 ]
 
 [workspace.package]

@@ -89,7 +89,7 @@
   VS 2022 Build Tools(cmake 크레이트가 `cl.exe`를 스스로 찾음, vcvars 불필요).
 - 사용자 환경변수: `CEF_PATH=C:\dev\cef\156`(PATH에도 있음), `CARGO_TARGET_DIR=D:/t/meninx`,
   `WGPU_BACKEND=dx12`. 이 설정 전에 열린 셸은 PATH를 레지스트리에서 다시 읽어야 해요.
-- 빌드: `cargo app`(= `cargo build --release -p meninx-app -p meninx-server`), 실행 파일은
+- 빌드: `cargo app`(`crates/xtask`: 앱 + 서버 + SSH 설치용 Linux 서버 `remote/`), 실행 파일은
   `C:\t\meninx\release\meninx.exe`.
 - 검사: `cargo clippy --workspace --all-targets`, `cargo test --workspace` +
   `MENINX_TEST_TMP=C:\t\test-tmp`(**git 저장소 밖**: 저장소 안이면 일반 폴더 테스트 3개가 실패).
