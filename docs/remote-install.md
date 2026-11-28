@@ -2,7 +2,7 @@
 
 Status: implemented (2026-11-28; checked against sshd in WSL Ubuntu 22.04, x86_64: app script `MENINX_APP_SCRIPT_ONLY=servers` with `MENINX_APP_TEST_SSH`). Code: `meninx-client/src/remote_install.rs` (probe, install,
 restart, POSIX `cksum`), `meninx-app/src/server_menu.rs` (the server dialog's check and
-설치 / 업데이트), `scripts/build-remote-servers.ps1` (the bundled builds). See
+설치 / 업데이트), `crates/xtask` (the bundled builds). See
 `docs/multi-server.md` for the server list.
 
 ## Builds the app ships
@@ -10,9 +10,9 @@ restart, POSIX `cksum`), `meninx-app/src/server_menu.rs` (the server dialog's ch
 - Static Linux builds of `meninx-server` (musl, x86_64 and aarch64; profile `remote`: no
   debug info, stripped) in `<app folder>/remote/linux-<arch>/meninx-server`, cross-built on
   Windows with `cargo zigbuild` (zig on `PATH` or `<toolchain>/zig/zig.exe` beside
-  `CARGO_HOME`, and `cargo install cargo-zigbuild`):
-  `scripts/build-remote-servers.ps1 -AppDir <target>/release`. The self-update script runs it
-  after the app build; without zig it leaves them out (the dialog then says there is no build).
+  `CARGO_HOME`, and `cargo install cargo-zigbuild`) by `cargo app` / `cargo app-debug`
+  (`crates/xtask`), so the self-update builds them too; without zig they are left out with a
+  warning (the dialog then says there is no build).
 - The app and these builds come from the same commit, so an install always speaks the app's
   protocol. `MENINX_REMOTE_SERVERS=<dir>` points the app at another folder (tests).
 

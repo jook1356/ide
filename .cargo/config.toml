@@ -1,4 +1,5 @@
 [alias]
-# The app (`meninx.exe`) starts `meninx-server.exe` from its own folder: always build both.
-app = "build --release -p meninx-app -p meninx-server"
-app-debug = "build -p meninx-app -p meninx-server"
+# The app (`meninx.exe`) starts `meninx-server.exe` from its own folder: always build both, plus the
+# Linux servers it installs on SSH hosts (`crates/xtask`, docs/remote-install.md; `cargo app --no-remote` skips them).
+app = "run -q -p xtask -- app --release"
+app-debug = "run -q -p xtask -- app"

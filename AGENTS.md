@@ -12,8 +12,10 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   in the CEF wrapper build (`cl.exe C1083`).
 - Force DX12 for CEF texture sharing: `WGPU_BACKEND=dx12`.
 - Build: **always build the app and the server together** (`meninx.exe` starts `meninx-server.exe` from
-  its own folder): `cargo build --release -p meninx-app -p meninx-server` (alias `cargo app`; debug:
-  `cargo app-debug`). `MENINX_SERVER_BIN` points the app at another server binary.
+  its own folder): `cargo app` (debug: `cargo app-debug`; `crates/xtask`): `meninx-app` + `meninx-server`, then the
+  static Linux servers the app installs on SSH hosts in `<target>/<profile>/remote/` (needs zig + `cargo install
+  cargo-zigbuild`; without them a warning, the app build still counts; `cargo app --no-remote` skips them;
+  `docs/remote-install.md`). `MENINX_SERVER_BIN` points the app at another server binary.
 - Check: `cargo clippy --workspace --all-targets`, `cargo test --workspace` with
   `MENINX_TEST_TMP=<scratch dir outside any git repository>` (e.g. `D:/t/test-tmp`; server e2e tests
   spawn real `meninx-server` daemons there). Not inside this repo: tests that need a plain, non-git
@@ -23,7 +25,7 @@ Rules for humans and coding agents working in this repo. Read docs/architecture.
   The app attaches to a running daemon or starts one (detached, no console window); closing the
   window keeps sessions running unless the user chooses otherwise (close dialog / Settings). The
   daemon exits after 10 min without clients and running sessions (`MENINX_SERVER_IDLE_EXIT_SECS`, 0 =
-  never). Linux servers for SSH installs: `scripts/build-remote-servers.ps1 -AppDir <target>/release` (zig + cargo-zigbuild; `docs/remote-install.md`).  never). The settings page (rail -> 설정 / Settings) lists Local and SSH servers, the title bar picks the shown one (`docs/multi-server.md`); `MENINX_REMOTE=ssh:<host>` replaces the list.
+  never). The settings page (rail -> 설정 / Settings) lists Local and SSH servers, the title bar picks the shown one (`docs/multi-server.md`); `MENINX_REMOTE=ssh:<host>` replaces the list.
 - Test daemons: kill only your own, by PID (`<data>/meninx-server.pid`), or end a script run with the
   app's stop-server action; never `taskkill /IM meninx-server.exe` (it hits other data dirs' daemons).
 - App end-to-end test (in-app, no OS input): `MENINX_APP_SCRIPT=1 MENINX_DATA_DIR=<scratch>
