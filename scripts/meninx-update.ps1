@@ -73,10 +73,15 @@ $app = Join-Path $AppDir $AppExe
 $server = Join-Path $AppDir $ServerExe
 $appOld = "$app.$RunId.old"
 $serverOld = "$server.$RunId.old"
+# The Linux servers for SSH installs (`cargo app`, docs/remote-install.md): a folder, swapped and
+# rolled back with the app so the two always come from the same build.
+$remote = Join-Path $AppDir 'remote'
+$remoteOld = "$remote.$RunId.old"
+$swap = @(@($app, $appOld), @($server, $serverOld), @($remote, $remoteOld))
 
 # Remove leftovers of earlier runs (a daemon may still run from an old server copy: skip it).
 Get-ChildItem -LiteralPath $AppDir -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.(old|failed)$' } | ForEach-Object {
-    try { Remove-Item -LiteralPath $_.FullName -Force } catch { Log "kept $($_.Name) (in use)" }
+    try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch { Log "kept $($_.Name) (in use)" }
 }
 
 try {
@@ -138,15 +143,14 @@ try {
     Status 'building'
     # A running exe cannot be overwritten but can be renamed: the running app and daemon keep
     # their (renamed) files, the build writes new ones.
-    foreach ($p in @(@($app, $appOld), @($server, $serverOld))) {
+    foreach ($p in $swap) {
         if (Test-Path -LiteralPath $p[0]) { Move-Item -LiteralPath $p[0] -Destination $p[1] -Force }
     }
     if ((Run $BuildCommand) -ne 0 -or -not (Test-Path -LiteralPath $app) -or -not (Test-Path -LiteralPath $server)) {
-        foreach ($p in @(@($app, $appOld), @($server, $serverOld))) {
-            if (Test-Path -LiteralPath $p[1]) {
-                if (Test-Path -LiteralPath $p[0]) { Remove-Item -LiteralPath $p[0] -Force }
-                Move-Item -LiteralPath $p[1] -Destination $p[0] -Force
-            }
+        foreach ($p in $swap) {
+            # What the failed build left (e.g. a first `remote` folder) goes; the old one comes back.
+            if (Test-Path -LiteralPath $p[0]) { Remove-Item -LiteralPath $p[0] -Recurse -Force }
+            if (Test-Path -LiteralPath $p[1]) { Move-Item -LiteralPath $p[1] -Destination $p[0] -Force }
         }
         Fail 'build failed (the running Meninx is unchanged)'
     }
@@ -197,11 +201,10 @@ while ((Get-Date) -lt $deadline) {
 Log 'the new app did not come up: rolling back'
 if (-not $new.HasExited) { Stop-Process -Id $new.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 500
-foreach ($p in @(@($app, $appOld), @($server, $serverOld))) {
-    if (Test-Path -LiteralPath $p[1]) {
-        if (Test-Path -LiteralPath $p[0]) { Move-Item -LiteralPath $p[0] -Destination "$($p[0]).$RunId.failed" -Force }
-        Move-Item -LiteralPath $p[1] -Destination $p[0] -Force
-    }
+foreach ($p in $swap) {
+    # The new build's files are set aside (also a `remote` folder the old build did not have).
+    if (Test-Path -LiteralPath $p[0]) { Move-Item -LiteralPath $p[0] -Destination "$($p[0]).$RunId.failed" -Force }
+    if (Test-Path -LiteralPath $p[1]) { Move-Item -LiteralPath $p[1] -Destination $p[0] -Force }
 }
 Start-Process -FilePath $app -WorkingDirectory $AppDir | Out-Null
 Status 'rolledBack' ("the new build did not come up`n" + (LogTail))

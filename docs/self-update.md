@@ -41,11 +41,11 @@ worktrees (Meninx sessions) share the original checkout's branch, so its files c
 | Phase | Meaning |
 |---|---|
 | `pulling` | `git fetch origin`, pick the commit, set the build checkout to it (see above). A failed fetch builds the local branch. |
-| `building` | `meninx.exe` / `meninx-server.exe` are renamed to `*.<run>.old` (a running exe can be renamed, not overwritten), then `cargo app` (`crates/xtask`: the app, its server and the Linux servers for SSH installs, `docs/remote-install.md`; those are left out with a warning when zig is missing) in the build checkout with the user's `PATH`, `CEF_PATH`, `WGPU_BACKEND` and `CARGO_TARGET_DIR=<target>`. A failed build moves the old files back (`failed`). |
+| `building` | `meninx.exe` / `meninx-server.exe` and the `remote` folder (the Linux servers, so they always match the app) are renamed to `*.<run>.old` (a running exe can be renamed, not overwritten), then `cargo app` (`crates/xtask`: the app, its server and the Linux servers for SSH installs, `docs/remote-install.md`; those are left out with a warning when zig is missing) in the build checkout with the user's `PATH`, `CEF_PATH`, `WGPU_BACKEND` and `CARGO_TARGET_DIR=<target>`. A failed build removes what it left and moves the old files back (`failed`). |
 | `ready` | Built; the footer shows a purple restart icon. Clicking writes the run id to `apply-request`. If the app closes first: `done` with message `closed-before-restart` (the next start uses the new build). |
 | `swapping` | The app that applied quits; the script waits for its pid (killed after 60 s) and starts the new `meninx.exe`. |
 | `done` | Written by the new app at startup (`confirm_started`). |
-| `rolledBack` | No `done` within 120 s or the new app exited: the new files become `*.<run>.failed`, the old ones come back, the old app starts. |
+| `rolledBack` | No `done` within 120 s or the new app exited: the new files (and `remote`) become `*.<run>.failed`, the old ones come back, the old app starts. |
 | `failed` | A step before `ready` failed; the running app is unchanged. |
 
 `*.old` / `*.failed` files are removed at the next run (a file still in use, such as the old
