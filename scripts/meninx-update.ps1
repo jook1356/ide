@@ -151,6 +151,12 @@ try {
         Fail 'build failed (the running Meninx is unchanged)'
     }
     [IO.File]::WriteAllText($builtFile, $to, $utf8)
+    # The Linux servers for SSH installs (docs/remote-install.md): a failure only leaves them out.
+    $remoteBuild = Join-Path $src 'scripts\build-remote-servers.ps1'
+    if (Test-Path -LiteralPath $remoteBuild) {
+        $code = Run "powershell -NoProfile -ExecutionPolicy Bypass -File `"$remoteBuild`" -AppDir `"$AppDir`" -TargetDir `"$TargetDir`""
+        if ($code -ne 0) { Log "Linux servers not built (exit $code)" }
+    }
 } catch {
     Fail "update error: $($_.Exception.Message)"
 }

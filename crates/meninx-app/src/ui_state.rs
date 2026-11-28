@@ -134,7 +134,7 @@ pub enum ServerPref {
     /// `meninx-server --stdio` next to `meninx.exe` (attaches to or starts the local daemon).
     #[default]
     Local,
-    /// `ssh <host> <command>` (command empty = `meninx-server --stdio`).
+    /// `ssh <host> <command>` (command empty = `meninx_client::transport::DEFAULT_SSH_COMMAND`: the installed server, else `meninx-server` on `PATH`).
     Ssh {
         host: String,
         #[serde(default)]

@@ -53,3 +53,10 @@ meninx-views = { path = "crates/meninx-views" }
 
 [profile.release]
 debug = 1
+
+# The Linux servers bundled with the app for remote installs (`scripts/build-remote-servers.ps1`):
+# small, no debug info.
+[profile.remote]
+inherits = "release"
+debug = false
+strip = "symbols"
